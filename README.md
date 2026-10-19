@@ -19,6 +19,8 @@ open "macos/build/HEC-RAS 2025.app"
 python3 test-all.py
 ```
 
+可分别用 `HECRAS_APP_SWIFT_SCRATCH_PATH` 与 `HECRAS_SWIFT_SCRATCH_PATH` 指定应用和测试的编译缓存，避免两种编译配置相互覆盖。
+
 ## 目录
 
 | 目录 | 内容 |
@@ -33,6 +35,6 @@ python3 test-all.py
 
 ## 开发状态
 
-当前为开发版本。地图渲染器选项、通用对象上下文菜单和部分 TIN 路由仍在完善，聊天服务暂未启用。自动化测试之外，实际界面交互与工程模型仍需持续验收。
+当前为开发版本。地图提供源渲染器选项、要素上下文操作、File Geodatabase 图层导入和流式 TIN 显示，聊天服务暂未启用。源实现中尚无实际效果的选项会说明原因并禁用。File Geodatabase 栅格依赖当前 GDAL 驱动能力，真实栅格子数据集已纳入自动化验证；实际界面交互与工程模型仍需持续验收。
 
 开发约定见 [AGENTS.md](AGENTS.md)，架构契约见 [docs/UI_RELATIONSHIPS.md](docs/UI_RELATIONSHIPS.md)，来源与许可信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

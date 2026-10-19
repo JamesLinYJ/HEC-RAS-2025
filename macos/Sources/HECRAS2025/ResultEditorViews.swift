@@ -94,7 +94,8 @@ struct ResultSummaryPage: View {
                 sourceContextRevision: sourceContextRevision)
             await resultPlanContext.ensureLoaded(asset: asset, projectPath: store.document?.url,
                 projectXml: projectXML, inspectorSnapshot: session.resultInspector?.snapshot,
-                sourceContextRevision: sourceContextRevision)
+                sourceContextRevision: sourceContextRevision,
+                coreLayerContext: store.captureCoreLayerRequestContext())
         }
         .onChange(of: inspectionIdentity) { _, _ in
             linkedResultSelection = nil
@@ -542,7 +543,8 @@ struct ResultProfileEditorPage: View {
                     sourceContextRevision: sourceContextRevision)
                 await resultPlanContext.ensureLoaded(asset: asset, projectPath: store.document?.url,
                     projectXml: projectXML, inspectorSnapshot: session.resultInspector?.snapshot,
-                    sourceContextRevision: sourceContextRevision)
+                    sourceContextRevision: sourceContextRevision,
+                    coreLayerContext: store.captureCoreLayerRequestContext())
             }
             .onChange(of: inspectorIdentity) { _, _ in linkedResultSelection = nil }
             .overlay(alignment: .top) {

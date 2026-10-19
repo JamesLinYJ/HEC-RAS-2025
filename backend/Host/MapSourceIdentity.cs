@@ -42,7 +42,9 @@ public sealed record MapSourceMapCapture(
 public sealed record MapSourceNodeLocation(
     MapSourceMapCapture Map,
     CatalogTreeNodeLocator Locator,
-    string SourcePath);
+    string SourcePath,
+    string? GdbVectorType = null,
+    string? GdbLayerName = null);
 
 /// <summary>An exact persisted map-layer row tied to its complete consumed-file family.</summary>
 public sealed record MapSourceNodeCapture(
@@ -55,7 +57,7 @@ public sealed record MapSourceNodeCapture(
 /// This helper does not inspect or transform raster/vector content; readers must report
 /// the files they actually consume and call the verify methods around their work.
 /// </summary>
-public static class MapSourceIdentity
+public static partial class MapSourceIdentity
 {
     private const long MaximumProjectXmlBytes = 8L * 1024 * 1024;
     private const long MaximumVisualizationBytes = 32L * 1024 * 1024;
@@ -211,6 +213,33 @@ public static class MapSourceIdentity
         return new(map, locator, sourcePath);
     }
 
+    /// <summary>Resolve one exact serialized GDB vector child, whose source is a directory.</summary>
+    public static MapSourceNodeLocation ResolvePersistedGdbNode(
+        MapTreeRequest mapRequest,
+        CatalogTreeNodeLocator locator)
+    {
+        ArgumentNullException.ThrowIfNull(mapRequest);
+        ArgumentNullException.ThrowIfNull(locator);
+        if (locator.NodeType != "GdbVectorLayer" || locator.MapType != "GdbVectorLayer")
+            throw new SourceFileChangedException();
+        MapSourceMapCapture map = CaptureMap(mapRequest);
+        string sourcePath = ResolveGdbNodePath(mapRequest, map, locator, out string vectorType,
+            out string layerName);
+        VerifyMap(mapRequest, map);
+        return new(map, locator, sourcePath, vectorType, layerName);
+    }
+
+    public static void VerifyPersistedGdbNode(MapTreeRequest mapRequest, MapSourceNodeLocation capture)
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        MapSourceNodeLocation current = ResolvePersistedGdbNode(mapRequest, capture.Locator);
+        if (!SameMap(capture.Map, current.Map) || !SameLocator(capture.Locator, current.Locator) ||
+            !PathComparer.Equals(capture.SourcePath, current.SourcePath) ||
+            !string.Equals(capture.GdbVectorType, current.GdbVectorType, StringComparison.Ordinal) ||
+            !string.Equals(capture.GdbLayerName, current.GdbLayerName, StringComparison.Ordinal))
+            throw new SourceFileChangedException();
+    }
+
     public static MapSourceNodeCapture ResolvePersistedNode(
         MapTreeRequest mapRequest,
         CatalogTreeNodeLocator locator,
@@ -358,6 +387,79 @@ public static class MapSourceIdentity
         if ((locator.AssetID is not null &&
                 !PathComparer.Equals(SourceFilePaths.Canonical(locator.AssetID), sourcePath)) ||
             !File.Exists(sourcePath) ||
+            !PathComparer.Equals(SourceFilePaths.Canonical(visualizationAlias), mapCapture.VisualizationPath))
+            throw new SourceFileChangedException();
+        return sourcePath;
+    }
+
+    private static string ResolveGdbNodePath(MapTreeRequest request,
+        MapSourceMapCapture mapCapture, CatalogTreeNodeLocator locator, out string vectorType,
+        out string layerName)
+    {
+        vectorType = "";
+        layerName = "";
+        if (locator.NodePath is not { Length: > 1 } nodePath ||
+            string.IsNullOrWhiteSpace(locator.RootName) || string.IsNullOrWhiteSpace(locator.NodeName) ||
+            string.IsNullOrWhiteSpace(locator.Filename) || string.IsNullOrWhiteSpace(locator.FilenameRelative) ||
+            string.IsNullOrWhiteSpace(locator.AssetID))
+            throw new SourceFileChangedException();
+
+        string visualizationAlias = Path.ChangeExtension(Path.GetFullPath(request.ProjectPath), ".vis");
+        if (mapCapture.VisualizationRevision is null || !File.Exists(mapCapture.VisualizationPath))
+            throw new SourceFileChangedException();
+        byte[] bytes = ReadBoundedFile(mapCapture.VisualizationPath, MaximumVisualizationBytes);
+        if (!string.Equals(Hash(bytes), mapCapture.VisualizationRevision, StringComparison.Ordinal))
+            throw new SourceFileChangedException();
+        XDocument document = ParseXml(bytes, MaximumVisualizationBytes);
+        XElement? map = ResolveSerializedMap(document, request.MapIndex, request.MapName, request.MapType);
+        XElement[] roots = map?.Element("Tree")?.Element("Nodes")?.Elements("Node").ToArray() ?? [];
+        int firstIndex = nodePath[0];
+        if (firstIndex < 0 || firstIndex >= roots.Length) throw new SourceFileChangedException();
+        XElement root = roots[firstIndex];
+        if ((string?)root.Attribute("Type") != "Root" ||
+            !string.Equals((string?)root.Attribute("Name"), locator.RootName, StringComparison.Ordinal))
+            throw new SourceFileChangedException();
+
+        XElement current = root;
+        for (int index = 1; index < nodePath.Length; index++)
+        {
+            XElement[] children = current.Elements("Node").ToArray();
+            int childIndex = nodePath[index];
+            if (childIndex < 0 || childIndex >= children.Length) throw new SourceFileChangedException();
+            current = children[childIndex];
+        }
+
+        string? persistedLayerName = (string?)current.Attribute("GdbLayerName");
+        string? persistedVectorType = (string?)current.Attribute("GdbVectorType");
+        if ((string?)current.Attribute("Type") != "GdbVectorLayer" ||
+            !string.Equals((string?)current.Attribute("Name"), locator.NodeName, StringComparison.Ordinal) ||
+            !string.Equals((string?)current.Attribute("MapType"), "GdbVectorLayer", StringComparison.Ordinal) ||
+            !string.Equals((string?)current.Attribute("Filename"), locator.Filename, StringComparison.Ordinal) ||
+            !string.Equals((string?)current.Attribute("FilenameRelative"), locator.FilenameRelative, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(persistedLayerName) ||
+            string.IsNullOrWhiteSpace(persistedVectorType))
+            throw new SourceFileChangedException();
+        layerName = persistedLayerName;
+        vectorType = persistedVectorType;
+
+        XElement? parent = current.Parent;
+        if (parent is null || (string?)parent.Attribute("Type") != "GdbDataset" ||
+            !string.Equals((string?)parent.Attribute("Filename"), locator.Filename, StringComparison.Ordinal) ||
+            !string.Equals((string?)parent.Attribute("FilenameRelative"), locator.FilenameRelative, StringComparison.Ordinal))
+            throw new SourceFileChangedException();
+
+        string projectDirectory = Path.GetDirectoryName(Path.GetFullPath(request.ProjectPath))!;
+        string relative = locator.FilenameRelative.Replace('\\', Path.DirectorySeparatorChar);
+        string filename = locator.Filename.Replace('\\', Path.DirectorySeparatorChar);
+        string resolved = Path.GetFullPath(Path.IsPathRooted(relative)
+            ? relative : Path.Combine(projectDirectory, relative));
+        if (!Directory.Exists(resolved) && Path.IsPathFullyQualified(filename))
+            resolved = Path.GetFullPath(filename);
+        if (!Directory.Exists(resolved)) throw new SourceFileChangedException();
+        string sourcePath = SourceFilePaths.Canonical(resolved);
+        string assetPath = SourceFilePaths.Canonical(locator.AssetID);
+        if (!PathComparer.Equals(sourcePath, assetPath) ||
+            !string.Equals(Path.GetExtension(sourcePath), ".gdb", StringComparison.OrdinalIgnoreCase) ||
             !PathComparer.Equals(SourceFilePaths.Canonical(visualizationAlias), mapCapture.VisualizationPath))
             throw new SourceFileChangedException();
         return sourcePath;

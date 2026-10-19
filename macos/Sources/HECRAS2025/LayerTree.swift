@@ -190,6 +190,7 @@ struct LayerTreeContext: Hashable, Sendable {
     /// Geometry/Boundary children are rebuilt from the same Result as the
     /// map raster workflow.
     var resultSelectionOverrides: [MapTreeResultSelectionOverride] = []
+    var coreLayerContext: CoreLayerRequestContext? = nil
     /// A selected exact Result that cannot be bound to the serialized
     /// MultiResult owner must fail tree reads instead of silently falling back
     /// to the source's default Latest Result.

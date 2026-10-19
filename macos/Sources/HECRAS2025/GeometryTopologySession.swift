@@ -818,6 +818,131 @@ final class GeometryTopologySession: ObservableObject {
             value: patchType, controlPointFeatureIDs: orderedFIDs))
     }
 
+    /// Applies the original Arc choice ForceSet command to the exact current
+    /// Arc selection. The edit is retained in this child draft and reaches the
+    /// source HDF only through the normal parent Geometry save.
+    @discardableResult
+    func forceSetArcChoice(rowIDs: [String], fieldID: String, value: String) async -> Bool {
+        guard let choice = GeometryTopologyArcChoice(fieldID: fieldID, value: value), canMutateTopology,
+              !rowIDs.isEmpty, Set(rowIDs).count == rowIDs.count,
+              Set(rowIDs) == selectedFeatureIDs["arc", default: []],
+              let orderedFIDs = sourceOrderedFeatureIDs(rowIDs, featureKind: "arc"),
+              !orderedFIDs.isEmpty,
+              let capture = toolRequestCapture(),
+              expectedSourceRevision == capture.sourceRevision,
+              toolCaptureIsCurrent(capture) else { return false }
+
+        let selectedRowIDs = Set(rowIDs)
+        let capturedArcRows = table(for: "arc").rows
+        isEditing = true
+        if let snapshot { self.snapshot = replacingCompletion(in: snapshot, with: nil) }
+        clearDiagnosticFocus()
+        error = nil
+        defer {
+            if capture.loadGeneration == loadGeneration && capture.modelGeneration == modelGeneration {
+                isEditing = false
+            }
+        }
+
+        do {
+            let updated = try await provider.forceSetArcChoice(capture.model, revision: capture.sourceRevision,
+                draftState: capture.draftState, selectedArcFIDs: orderedFIDs, choice: choice)
+
+            guard toolCaptureIsCurrent(capture), expectedSourceRevision == capture.sourceRevision,
+                  selectedFeatureIDs["arc", default: []] == selectedRowIDs,
+                  !Task.isCancelled else { return false }
+
+            guard Set(updated.arcs.rows.map(\.id)).count == updated.arcs.rows.count,
+                  Set(updated.arcs.rows.map(\.fid)).count == updated.arcs.rows.count,
+                  updated.arcs.featureKind == "arc",
+                  updated.arcs.rows.count == capturedArcRows.count,
+                  updated.revision == capture.sourceRevision,
+                  zip(capturedArcRows, updated.arcs.rows).allSatisfy({ oldRow, newRow in
+                      var expectedValues = oldRow.values
+                      if selectedRowIDs.contains(oldRow.id) { expectedValues[fieldID] = value }
+                      return oldRow.id == newRow.id && oldRow.fid == newRow.fid
+                          && expectedValues == newRow.values
+                  }),
+                  updated.draftState == capture.draftState
+                    || (updated.isDirty && updated.canUndo) else {
+                error = "The Arc Force Set response does not match the captured selection and draft."
+                return false
+            }
+
+            accept(updated)
+            if updated.draftState != capture.draftState { invalidateToolQueriesAfterDraftChange() }
+            onParentDraftChange(updated.isDirty)
+            return true
+        } catch {
+            guard toolCaptureIsCurrent(capture), selectedFeatureIDs["arc", default: []] == selectedRowIDs,
+                  !Task.isCancelled else { return false }
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Mirrors the original Arc Bias Clear command, which assigns NaN to every
+    /// selected Bias field. It is an ordinary undoable child-draft mutation;
+    /// parent Geometry save remains the only source HDF write boundary.
+    @discardableResult
+    func forceResetArcBias(rowIDs: [String]) async -> Bool {
+        guard canMutateTopology, !rowIDs.isEmpty, Set(rowIDs).count == rowIDs.count,
+              Set(rowIDs) == selectedFeatureIDs["arc", default: []],
+              let orderedFIDs = sourceOrderedFeatureIDs(rowIDs, featureKind: "arc"),
+              !orderedFIDs.isEmpty,
+              let capture = toolRequestCapture(),
+              expectedSourceRevision == capture.sourceRevision,
+              toolCaptureIsCurrent(capture) else { return false }
+
+        let selectedRowIDs = Set(rowIDs)
+        let capturedArcRows = table(for: "arc").rows
+        isEditing = true
+        if let snapshot { self.snapshot = replacingCompletion(in: snapshot, with: nil) }
+        clearDiagnosticFocus()
+        error = nil
+        defer {
+            if capture.loadGeneration == loadGeneration && capture.modelGeneration == modelGeneration {
+                isEditing = false
+            }
+        }
+
+        do {
+            let updated = try await provider.forceResetArcBias(capture.model, revision: capture.sourceRevision,
+                draftState: capture.draftState, selectedArcFIDs: orderedFIDs)
+
+            guard toolCaptureIsCurrent(capture), expectedSourceRevision == capture.sourceRevision,
+                  selectedFeatureIDs["arc", default: []] == selectedRowIDs,
+                  !Task.isCancelled else { return false }
+
+            guard Set(updated.arcs.rows.map(\.id)).count == updated.arcs.rows.count,
+                  Set(updated.arcs.rows.map(\.fid)).count == updated.arcs.rows.count,
+                  updated.arcs.featureKind == "arc",
+                  updated.arcs.rows.count == capturedArcRows.count,
+                  updated.revision == capture.sourceRevision,
+                  zip(capturedArcRows, updated.arcs.rows).allSatisfy({ oldRow, newRow in
+                      var expectedValues = oldRow.values
+                      if selectedRowIDs.contains(oldRow.id) { expectedValues["Bias"] = "NaN" }
+                      return oldRow.id == newRow.id && oldRow.fid == newRow.fid
+                          && expectedValues == newRow.values
+                  }),
+                  updated.draftState == capture.draftState
+                    || (updated.isDirty && updated.canUndo) else {
+                error = "The Arc Bias clear response does not match the captured selection and draft."
+                return false
+            }
+
+            accept(updated)
+            if updated.draftState != capture.draftState { invalidateToolQueriesAfterDraftChange() }
+            onParentDraftChange(updated.isDirty)
+            return true
+        } catch {
+            guard toolCaptureIsCurrent(capture), selectedFeatureIDs["arc", default: []] == selectedRowIDs,
+                  !Task.isCancelled else { return false }
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
     /// SourceField clear-command adapter for the six conceptual-mesh inputs.
     /// Stable row identities are resolved in the current source-table order;
     /// empty, duplicate, stale, and single-row selections cannot issue a
@@ -925,6 +1050,14 @@ final class GeometryTopologySession: ObservableObject {
 
     func createTag(featureKind: String, name: String, type: String) async {
         await submit(.init(operation: "createTag", featureKind: featureKind, featureIDs: [], tagName: name, tagType: type))
+    }
+
+    @discardableResult
+    func editMetadataColumn(operation: GeometryTopologyMetadataColumnOperation,
+                            featureKind: GeometryTopologyMetadataColumnKind,
+                            fieldID: String, value: String? = nil) async -> Bool {
+        await submit(.init(operation: operation.rawValue, featureKind: featureKind.rawValue,
+            featureIDs: [], fieldID: fieldID, value: value))
     }
 
     func setTag(featureKind: String, featureIDs: [Int], name: String, value: String) async {
@@ -1083,6 +1216,89 @@ final class GeometryTopologySession: ObservableObject {
             self.error = error.localizedDescription
             didLoad = false
         }
+    }
+
+    /// Reads real Shapefile features against this exact parent topology draft.
+    /// The source reader returns coordinates in the project's world space.
+    func inspectVectorImport(paths: [String]) async throws -> GeometryVectorImportInspection {
+        guard canMutateTopology, !parentSaveInProgress,
+              let capture = toolRequestCapture() else {
+            throw GeometryVectorImportSessionError.parentUnavailable
+        }
+        guard !paths.isEmpty, Set(paths).count == paths.count else {
+            throw GeometryVectorImportSessionError.invalidSelection
+        }
+        isEditing = true
+        error = nil
+        defer { if capture.loadGeneration == loadGeneration { isEditing = false } }
+
+        let request = GeometryVectorImportInspectRequest(model: capture.model,
+            revision: capture.sourceRevision, draftState: capture.draftState,
+            draftIdentity: capture.draftIdentity, paths: paths)
+        let inspection = try await provider.inspectVectorImport(request)
+        guard toolCaptureIsCurrent(capture), !Task.isCancelled else {
+            throw GeometryVectorImportSessionError.staleContext
+        }
+        guard inspection.revision == capture.sourceRevision,
+              inspection.draftIdentity == capture.draftIdentity,
+              Set(inspection.sources.map(\.path)).count == inspection.sources.count,
+              inspection.sources.allSatisfy({ source in
+                  source.family.family == "shapefile" && source.path == source.family.sourcePath
+                      && !source.path.isEmpty && source.featureCount == source.features.count
+                      && source.features.allSatisfy({ feature in
+                          ["polyline", "polygon"].contains(feature.geometryType)
+                              && feature.points.allSatisfy { $0.x.isFinite && $0.y.isFinite }
+                      })
+              }) else {
+            throw GeometryVectorImportSessionError.invalidResponse
+        }
+        return inspection
+    }
+
+    /// Re-reads the inspected file families, then records their actual
+    /// project-space coordinates as one replayable parent topology mutation.
+    @discardableResult
+    func applyVectorImport(_ inspection: GeometryVectorImportInspection,
+                           sourcePaths: [String], options: GeometryVectorImportOptions) async throws -> Bool {
+        guard canMutateTopology, !parentSaveInProgress,
+              let capture = toolRequestCapture() else {
+            throw GeometryVectorImportSessionError.parentUnavailable
+        }
+        guard !sourcePaths.isEmpty, Set(sourcePaths).count == sourcePaths.count,
+              inspection.revision == capture.sourceRevision,
+              inspection.draftIdentity == capture.draftIdentity,
+              toolCaptureIsCurrent(capture) else {
+            throw GeometryVectorImportSessionError.staleContext
+        }
+        let byPath = Dictionary(uniqueKeysWithValues: inspection.sources.map { ($0.path, $0) })
+        guard sourcePaths.allSatisfy({ byPath[$0] != nil }) else {
+            throw GeometryVectorImportSessionError.invalidSelection
+        }
+        let sources = sourcePaths.compactMap { path -> GeometryVectorImportSelectedSource? in
+            guard let source = byPath[path] else { return nil }
+            return GeometryVectorImportSelectedSource(path: source.path, family: source.family)
+        }
+
+        isEditing = true
+        error = nil
+        defer { if capture.loadGeneration == loadGeneration { isEditing = false } }
+        let request = GeometryVectorImportApplyRequest(model: capture.model,
+            revision: capture.sourceRevision, draftState: capture.draftState,
+            draftIdentity: capture.draftIdentity, sources: sources,
+            mode: options.mode.rawValue, mergeContiguousArcs: options.mergeContiguousArcs,
+            removeExternalArcs: options.removeExternalArcs)
+        let updated = try await provider.applyVectorImport(request)
+        guard toolCaptureIsCurrent(capture), !Task.isCancelled else {
+            throw GeometryVectorImportSessionError.staleContext
+        }
+        guard updated.revision == capture.sourceRevision, updated.isDirty,
+              updated.draftState != capture.draftState else {
+            throw GeometryVectorImportSessionError.invalidResponse
+        }
+        accept(updated)
+        invalidateToolQueriesAfterDraftChange()
+        onParentDraftChange(updated.isDirty)
+        return true
     }
 
     @discardableResult

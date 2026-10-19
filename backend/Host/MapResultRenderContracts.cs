@@ -14,7 +14,20 @@ public sealed record MapResultRenderRequest(
     int? ProfileIndex = null,
     RasterMapViewExtent? Viewport = null,
     int[]? BlockedSelectionIndices = null,
-    MapResultRenderLiveKeyframeAnchor? LiveKeyframeAnchor = null);
+    MapResultRenderLiveKeyframeAnchor? LiveKeyframeAnchor = null,
+    MapResultRenderOptionOverride[]? RenderOptions = null);
+
+/// <summary>
+/// Temporary per-map rendering preferences for one exact selected Result
+/// slot. These settings are intentionally not written to the project's .vis.
+/// </summary>
+public sealed record MapResultRenderOptionOverride(
+    int SelectionIndex,
+    string ResultPath,
+    string Revision,
+    string VelocityDisplay,
+    bool MapDiagnostics,
+    bool ForceRecomputeMapPoints);
 
 /// <summary>
 /// An exact compute-callback profile identity used only while the callback
@@ -69,7 +82,14 @@ public sealed record MapResultRenderLayerPayload(
     double MaxX,
     double MaxY,
     float NoDataValue,
-    MapResultRenderLegendStop[] LegendStops);
+    MapResultRenderLegendStop[] LegendStops,
+    int[]? SelectionIndices = null,
+    string VelocityDisplay = "Magnitude",
+    bool MapDiagnostics = false,
+    bool ForceRecomputeMapPoints = false,
+    MapResultRenderDiagnosticPoint[]? DiagnosticLabels = null);
+
+public sealed record MapResultRenderDiagnosticPoint(string Text, double X, double Y);
 
 public sealed record MapResultRenderResult(
     string ContextToken,

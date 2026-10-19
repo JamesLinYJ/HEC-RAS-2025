@@ -36,6 +36,7 @@ struct ProjectMapTopChrome: View {
     private var sourceControls: some View {
         HStack(spacing: 6) {
             MapSourceContextPicker(mapState: mapState)
+            CalculatorMapLayerMenu(store: store, mapID: mapID, viewport: mapState.resultViewport)
             if showMapOverlays { MapSourceLegendButton(store: store, mapState: mapState) }
             StoredCulvertParticleSettingsButton(session: mapState.storedCulvertProfile)
             MapSourceStatusControl(geometry: mapState.projectGeometryMap,

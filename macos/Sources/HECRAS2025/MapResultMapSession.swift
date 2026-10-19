@@ -49,6 +49,7 @@ final class MapResultMapSession: ObservableObject {
         let renderedViewport: RasterMapViewExtent?
         let availability: AvailabilityLookup
         let legendLookup: (@MainActor () -> [MapLegend]?)?
+        let diagnosticLookup: (@MainActor () -> [MapResultRenderDiagnosticAnnotation]?)?
         let velocityFieldSampler: MapResultVelocityFieldSampler?
 
         init(presentation: MapProfilePresentation, provider: any ProfileProvider,
@@ -57,6 +58,7 @@ final class MapResultMapSession: ObservableObject {
              initialSourceStatuses: [MapResultRenderSourceStatus],
              renderedViewport: RasterMapViewExtent?,
              legendLookup: (@MainActor () -> [MapLegend]?)? = nil,
+             diagnosticLookup: (@MainActor () -> [MapResultRenderDiagnosticAnnotation]?)? = nil,
              availability: @escaping AvailabilityLookup,
              velocityFieldSampler: MapResultVelocityFieldSampler? = nil) {
             self.presentation = presentation
@@ -67,6 +69,7 @@ final class MapResultMapSession: ObservableObject {
             self.initialSourceStatuses = initialSourceStatuses
             self.renderedViewport = renderedViewport
             self.legendLookup = legendLookup
+            self.diagnosticLookup = diagnosticLookup
             self.availability = availability
             self.velocityFieldSampler = velocityFieldSampler
         }
@@ -79,19 +82,22 @@ final class MapResultMapSession: ObservableObject {
         let viewport: ViewportLookup
         let blockedSelectionIndices: Set<Int>
         let liveKeyframeTimeline: MapResultRenderLiveKeyframeTimeline?
+        let renderOptions: [MapResultRenderOptionOverride]
 
         init(snapshot: MapResultSourcesSnapshot,
              node: MapResultChartActiveNode,
              mapID: UUID,
              viewport: @escaping ViewportLookup,
              blockedSelectionIndices: Set<Int> = [],
-             liveKeyframeTimeline: MapResultRenderLiveKeyframeTimeline? = nil) {
+             liveKeyframeTimeline: MapResultRenderLiveKeyframeTimeline? = nil,
+             renderOptions: [MapResultRenderOptionOverride] = []) {
             self.snapshot = snapshot
             self.node = node
             self.mapID = mapID
             self.viewport = viewport
             self.blockedSelectionIndices = blockedSelectionIndices
             self.liveKeyframeTimeline = liveKeyframeTimeline
+            self.renderOptions = renderOptions
         }
     }
 
@@ -103,6 +109,7 @@ final class MapResultMapSession: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var isReloading = false
     @Published private(set) var errorMessage: String?
+    @Published private(set) var renderOptionsByIdentity: [MapResultRenderOptionIdentity: MapResultRenderOptions] = [:]
     let velocityParticles = MapResultVelocityParticleSession()
 
     var didUpdate: (@MainActor ([MapRasterLayer], [MapLegend]) -> Void)?
@@ -134,6 +141,8 @@ final class MapResultMapSession: ObservableObject {
         var subscription: AnyCancellable?
         var availability: AvailabilityLookup?
         var legendLookup: (@MainActor () -> [MapLegend]?)?
+        var diagnosticLookup: (@MainActor () -> [MapResultRenderDiagnosticAnnotation]?)?
+        var diagnosticAnnotations: [MapResultRenderDiagnosticAnnotation] = []
         var velocityFieldSampler: MapResultVelocityFieldSampler?
         var initialLayers: [MapRasterLayer] = []
         var layers: [MapRasterLayer] = []
@@ -161,6 +170,10 @@ final class MapResultMapSession: ObservableObject {
         var computeReadableDuringLease = false
         var computeProtectedSourcePaths: Set<String> = []
         var computeBlockedSelectionIndices: Set<Int> = []
+        var renderOptionsTask: Task<Void, Never>?
+        var renderOptionsGeneration = 0
+        var renderOptionsRefreshPending = false
+        var renderOptionsFallbackByIdentity: [MapResultRenderOptionIdentity: MapResultRenderOptions] = [:]
 
         init(source: MapResultChartActiveNode) { self.source = source }
 
@@ -246,6 +259,7 @@ final class MapResultMapSession: ObservableObject {
         let legends: [MapLegend]?
         let sourceStatuses: [MapResultRenderSourceStatus]
         let unavailableReason: String?
+        let diagnosticAnnotations: [MapResultRenderDiagnosticAnnotation]
     }
 
     private var configuredSnapshot: MapResultSourcesSnapshot?
@@ -297,7 +311,8 @@ final class MapResultMapSession: ObservableObject {
                 sources: request.snapshot.sources, node: request.node, mapID: request.mapID,
                 viewport: request.viewport,
                 blockedSelectionIndices: request.blockedSelectionIndices,
-                liveKeyframeTimeline: request.liveKeyframeTimeline)
+                liveKeyframeTimeline: request.liveKeyframeTimeline,
+                renderOptions: request.renderOptions)
             return PreparedNode(
                 presentation: prepared.presentation,
                 provider: prepared.provider,
@@ -307,6 +322,7 @@ final class MapResultMapSession: ObservableObject {
                 initialSourceStatuses: prepared.provider.sourceStatuses,
                 renderedViewport: prepared.renderedViewport,
                 legendLookup: { prepared.provider.currentLegends },
+                diagnosticLookup: { prepared.provider.currentDiagnosticAnnotations },
                 availability: {
                     MapResultMapAvailability(
                         reason: prepared.provider.availabilityReason,
@@ -357,6 +373,70 @@ final class MapResultMapSession: ObservableObject {
               let selectedLayerID,
               runtime.presentationLayers.contains(where: { $0.id == selectedLayerID }) else { return nil }
         return runtime.presentationLegends.first { $0.id == selectedLayerID }
+    }
+
+    func renderOptions(mapID: UUID, node: CatalogTreeNodeLocator,
+                       selectionIndex: Int, resultPath: String,
+                       revision: String) -> MapResultRenderOptions {
+        let identity = MapResultRenderOptionIdentity(mapID: mapID, node: node,
+            selectionIndex: selectionIndex, resultPath: resultPath, revision: revision)
+        return renderOptionsByIdentity[identity] ?? .default
+    }
+
+    func canSetRenderOptions(mapID: UUID, node: CatalogTreeNodeLocator,
+                             mapType: String?,
+                             selectionIndex: Int, resultPath: String,
+                             revision: String) -> Bool {
+        guard !isSourceReadsSuspended, activeComputeCapture == nil,
+              !isLoading, !isReloading, currentCheck?() == true,
+              let snapshot = configuredSnapshot,
+              UUID(uuidString: snapshot.map.mapID) == mapID,
+              ownerProjectSessionID == profileProjectSessionID,
+              let runtime = runtimeByID.values.first(where: { $0.source.node == node }),
+              runtime.source.selectedMapType == mapType,
+              runtime.computeReadLease == nil,
+              runtime.computeProtectedSourcePaths.isEmpty,
+              runtime.computeBlockedSelectionIndices.isEmpty,
+              let selection = runtime.source.selections.first(where: {
+                  $0.selectionIndex == selectionIndex
+              }),
+              let selected = selection.selectedResult, !selected.isComputing,
+              SourceFilePaths.canonical(URL(fileURLWithPath: selected.resultPath))
+                == SourceFilePaths.canonical(URL(fileURLWithPath: resultPath)),
+              selected.revision.caseInsensitiveCompare(revision) == .orderedSame else { return false }
+        return true
+    }
+
+    func setRenderOptions(_ options: MapResultRenderOptions, mapID: UUID,
+                          node: CatalogTreeNodeLocator, mapType: String?,
+                          selectionIndex: Int, resultPath: String, revision: String) {
+        guard canSetRenderOptions(mapID: mapID, node: node,
+                                  mapType: mapType,
+                                  selectionIndex: selectionIndex,
+                                  resultPath: resultPath, revision: revision),
+              let identityRuntime = runtimeByID.values.first(where: { $0.source.node == node }) else { return }
+        let identity = MapResultRenderOptionIdentity(mapID: mapID, node: node,
+            selectionIndex: selectionIndex, resultPath: resultPath, revision: revision)
+        guard renderOptionsByIdentity[identity] != options else { return }
+        if identityRuntime.renderOptionsFallbackByIdentity[identity] == nil {
+            identityRuntime.renderOptionsFallbackByIdentity[identity] =
+                renderOptionsByIdentity[identity] ?? .default
+        }
+        renderOptionsByIdentity[identity] = options
+        scheduleRenderOptionsRefresh(runtime: identityRuntime)
+    }
+
+    func diagnosticAnnotations(visibleLayerIDs: Set<String>) -> [MapResultRenderDiagnosticAnnotation] {
+        guard !visibleLayerIDs.isEmpty else { return [] }
+        var installedIDs: Set<String> = []
+        return orderedNodeIDs.compactMap { runtimeByID[$0] }.flatMap { runtime in
+            let activeIDs = Set(runtime.presentationLayers.map(\.id))
+            return runtime.diagnosticAnnotations.filter { annotation in
+                visibleLayerIDs.contains(annotation.layerID)
+                    && activeIDs.contains(annotation.layerID)
+                    && installedIDs.insert(annotation.id).inserted
+            }
+        }
     }
 
     var unavailableMessage: String? {
@@ -583,6 +663,12 @@ final class MapResultMapSession: ObservableObject {
         isLoading = false
         isReloading = false
         for runtime in runtimeByID.values {
+            if runtime.renderOptionsTask != nil {
+                runtime.renderOptionsTask?.cancel()
+                runtime.renderOptionsTask = nil
+                runtime.renderOptionsGeneration &+= 1
+                runtime.renderOptionsRefreshPending = true
+            }
             runtime.isLoading = false
             runtime.isRefreshing = false
             runtime.profileSession.suspendSourceReads()
@@ -595,6 +681,7 @@ final class MapResultMapSession: ObservableObject {
         guard isSourceReadsSuspended else { return }
         isSourceReadsSuspended = false
         let mapID = configuredSnapshot.flatMap { UUID(uuidString: $0.map.mapID) }
+        var pendingOptionRefreshes: [NodeRuntime] = []
         for runtime in runtimeByID.values {
             if runtime.computeReadLease != nil {
                 runtime.profileSession.suspendSourceReads()
@@ -604,9 +691,15 @@ final class MapResultMapSession: ObservableObject {
                 bindRenderCallbacks(runtime: runtime, generation: sourceGeneration, mapID: mapID)
             }
             runtime.profileSession.resumeSourceReads()
+            if runtime.renderOptionsRefreshPending {
+                pendingOptionRefreshes.append(runtime)
+            }
         }
         refreshPublishedNodes()
         refreshVelocityParticles()
+        for runtime in pendingOptionRefreshes {
+            scheduleRenderOptionsRefresh(runtime: runtime)
+        }
     }
 
     func updateLiveComputeSelection(nodeID: String, selectionIndex: Int,
@@ -1034,6 +1127,18 @@ final class MapResultMapSession: ObservableObject {
         guard configuredSnapshot != nil else { return }
         let nextViewport = viewportLookup?()
         guard nextViewport != requestedViewport else { return }
+        for runtime in runtimeByID.values {
+            if runtime.renderOptionsTask != nil {
+                runtime.renderOptionsTask?.cancel()
+                runtime.renderOptionsTask = nil
+                runtime.renderOptionsGeneration &+= 1
+                runtime.renderOptionsRefreshPending = true
+                runtime.isRefreshing = false
+                if !isSourceReadsSuspended {
+                    runtime.profileSession.resumeSourceReads()
+                }
+            }
+        }
         requestedViewport = nextViewport
         viewportGeneration &+= 1
         refreshVelocityParticles()
@@ -1130,7 +1235,9 @@ final class MapResultMapSession: ObservableObject {
                 let request = PreparationRequest(snapshot: snapshot, node: requestedNode,
                     mapID: mapID, viewport: viewportLookup ?? { nil },
                     blockedSelectionIndices: runtime.computeBlockedSelectionIndices,
-                    liveKeyframeTimeline: liveKeyframeTimeline)
+                    liveKeyframeTimeline: liveKeyframeTimeline,
+                    renderOptions: renderOptionOverrides(snapshot: snapshot, node: requestedNode,
+                        mapID: mapID, blockedSelectionIndices: runtime.computeBlockedSelectionIndices))
                 let prepared = try await prepareNode(request)
                 guard computeRefreshIsCurrent(generation: generation, capture: capture,
                     entry: entry, lease: lease, snapshot: snapshot), !Task.isCancelled else { return }
@@ -1161,6 +1268,8 @@ final class MapResultMapSession: ObservableObject {
                 runtime.source = item.source
                 runtime.availability = item.prepared.availability
                 runtime.legendLookup = item.prepared.legendLookup
+                runtime.diagnosticLookup = item.prepared.diagnosticLookup
+                runtime.diagnosticAnnotations = item.prepared.diagnosticLookup?() ?? []
                 runtime.velocityFieldSampler = item.prepared.velocityFieldSampler
                 runtime.initialLayers = item.prepared.initialUpdate?.rasters ?? []
                 runtime.layers = runtime.initialLayers
@@ -1489,6 +1598,9 @@ final class MapResultMapSession: ObservableObject {
         computeHistoricalRefreshTask?.cancel(); computeHistoricalRefreshTask = nil
         computeHistoricalRefreshGeneration &+= 1
         for runtime in runtimeByID.values {
+            runtime.renderOptionsTask?.cancel()
+            runtime.renderOptionsTask = nil
+            runtime.renderOptionsGeneration &+= 1
             runtime.profileSession.invalidate()
             runtime.subscription = nil
         }
@@ -1516,6 +1628,7 @@ final class MapResultMapSession: ObservableObject {
         isLoading = false
         isReloading = false
         errorMessage = nil
+        renderOptionsByIdentity = [:]
         nodes = []
         velocityParticles.invalidate()
         didUpdate?([], [])
@@ -1564,10 +1677,28 @@ final class MapResultMapSession: ObservableObject {
         let generation = sourceGeneration
         sourceTask?.cancel(); sourceTask = nil
         refreshTask?.cancel(); refreshTask = nil
-        for runtime in runtimeByID.values { runtime.profileSession.invalidate() }
+        for runtime in runtimeByID.values {
+            runtime.renderOptionsTask?.cancel()
+            runtime.renderOptionsTask = nil
+            runtime.renderOptionsGeneration &+= 1
+            runtime.profileSession.invalidate()
+        }
 
         configuredSnapshot = snapshot
         profileProjectSessionID = ownerProjectSessionID ?? Self.contextID(for: snapshot.identity)
+        if let mapID = UUID(uuidString: snapshot.map.mapID) {
+            let validIdentities = Set(snapshot.sources.activeNodes.flatMap { node in
+                node.selections.compactMap { selection -> MapResultRenderOptionIdentity? in
+                    guard let selected = selection.selectedResult else { return nil }
+                    return MapResultRenderOptionIdentity(mapID: mapID, node: node.node,
+                        selectionIndex: selection.selectionIndex,
+                        resultPath: selected.resultPath, revision: selected.revision)
+                }
+            })
+            renderOptionsByIdentity = renderOptionsByIdentity.filter { validIdentities.contains($0.key) }
+        } else {
+            renderOptionsByIdentity = [:]
+        }
         orderedNodeIDs = snapshot.sources.activeNodes.map(\.id)
         let activeNodeIDs = Set(orderedNodeIDs)
         for (nodeID, request) in restoredLiveProfileSelections where pendingLiveProfileSelections[nodeID] == nil {
@@ -1697,13 +1828,18 @@ final class MapResultMapSession: ObservableObject {
                     }
                 }
                 let request = PreparationRequest(snapshot: snapshot, node: preparedNode,
-                    mapID: mapID, viewport: viewportLookup ?? { nil })
+                    mapID: mapID, viewport: viewportLookup ?? { nil },
+                    blockedSelectionIndices: runtime.computeBlockedSelectionIndices,
+                    renderOptions: renderOptionOverrides(snapshot: snapshot, node: preparedNode,
+                        mapID: mapID, blockedSelectionIndices: runtime.computeBlockedSelectionIndices))
                 let prepared = try await prepareNode(request)
                 guard generation == sourceGeneration, !Task.isCancelled else { return }
                 guard currentCheck?() == true else { invalidate(); return }
 
                 runtime.availability = prepared.availability
                 runtime.legendLookup = prepared.legendLookup
+                runtime.diagnosticLookup = prepared.diagnosticLookup
+                runtime.diagnosticAnnotations = prepared.diagnosticLookup?() ?? []
                 runtime.velocityFieldSampler = prepared.velocityFieldSampler
                 runtime.initialLayers = prepared.initialUpdate?.rasters ?? []
                 runtime.rasterSelectionIndicesByLayerID = prepared.initialUpdate?.rasterSelectionIndicesByLayerID
@@ -1755,6 +1891,7 @@ final class MapResultMapSession: ObservableObject {
                 guard let runtime = runtimeByID[id] else { continue }
                 runtime.layers = runtime.initialLayers
                 runtime.sourceStatuses = runtime.availability?().sourceStatuses ?? runtime.sourceStatuses
+                runtime.diagnosticAnnotations = runtime.diagnosticLookup?() ?? []
                 ensureSelectedLayer(runtime)
             }
             appliedViewport = initialViewport
@@ -1802,7 +1939,8 @@ final class MapResultMapSession: ObservableObject {
             rasterSourceIdentityByLayerID: update.rasterSourceIdentityByLayerID,
             legends: runtime.legendLookup?(),
             sourceStatuses: runtime.availability?().sourceStatuses ?? runtime.sourceStatuses,
-            unavailableReason: runtime.availability?().reason ?? runtime.unavailableReason)
+            unavailableReason: runtime.availability?().reason ?? runtime.unavailableReason,
+            diagnosticAnnotations: runtime.diagnosticLookup?() ?? [])
         if let generation = activeViewportGeneration {
             guard generation == viewportGeneration,
                   runtime.isRefreshing,
@@ -1813,6 +1951,7 @@ final class MapResultMapSession: ObservableObject {
         runtime.layers = frame.layers
         runtime.rasterSelectionIndicesByLayerID = frame.rasterSelectionIndicesByLayerID
         runtime.rasterSourceIdentityByLayerID = frame.rasterSourceIdentityByLayerID
+        runtime.diagnosticAnnotations = frame.diagnosticAnnotations
         if let legends = frame.legends { runtime.legends = legends }
         runtime.sourceStatuses = frame.sourceStatuses
         runtime.unavailableReason = frame.unavailableReason
@@ -1976,6 +2115,12 @@ final class MapResultMapSession: ObservableObject {
                 activeViewportGeneration = nil
                 for runtime in runtimeByID.values { runtime.isRefreshing = false }
                 refreshPublishedNodes()
+                let pendingOptionRefreshes = runtimeByID.values.filter {
+                    $0.renderOptionsRefreshPending
+                }
+                for runtime in pendingOptionRefreshes {
+                    scheduleRenderOptionsRefresh(runtime: runtime)
+                }
             }
         }
         isReloading = true
@@ -2003,7 +2148,8 @@ final class MapResultMapSession: ObservableObject {
                         rasterSourceIdentityByLayerID: runtime.rasterSourceIdentityByLayerID,
                         legends: runtime.legends,
                         sourceStatuses: runtime.sourceStatuses,
-                        unavailableReason: runtime.unavailableReason)
+                        unavailableReason: runtime.unavailableReason,
+                        diagnosticAnnotations: runtime.diagnosticAnnotations)
                 }
                 runtime.isRefreshing = false
                 if generation != viewportGeneration { break }
@@ -2036,6 +2182,7 @@ final class MapResultMapSession: ObservableObject {
                 runtime.layers = frame.layers
                 runtime.rasterSelectionIndicesByLayerID = frame.rasterSelectionIndicesByLayerID
                 runtime.rasterSourceIdentityByLayerID = frame.rasterSourceIdentityByLayerID
+                runtime.diagnosticAnnotations = frame.diagnosticAnnotations
                 if let legends = frame.legends { runtime.legends = legends }
                 runtime.sourceStatuses = frame.sourceStatuses
                 runtime.unavailableReason = frame.unavailableReason
@@ -2053,6 +2200,168 @@ final class MapResultMapSession: ObservableObject {
     private func waitForProfileSession(_ session: MapProfileSession) async {
         while session.busy, !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    private func renderOptionOverrides(snapshot: MapResultSourcesSnapshot,
+                                       node: MapResultChartActiveNode,
+                                       mapID: UUID,
+                                       blockedSelectionIndices: Set<Int>) -> [MapResultRenderOptionOverride] {
+        node.selections.compactMap { selection in
+            guard !blockedSelectionIndices.contains(selection.selectionIndex),
+                  let selected = selection.selectedResult,
+                  !selected.isComputing else { return nil }
+            let identity = MapResultRenderOptionIdentity(mapID: mapID, node: node.node,
+                selectionIndex: selection.selectionIndex,
+                resultPath: selected.resultPath, revision: selected.revision)
+            let options = renderOptionsByIdentity[identity] ?? .default
+            return MapResultRenderOptionOverride(selectionIndex: selection.selectionIndex,
+                resultPath: selected.resultPath, revision: selected.revision, options: options)
+        }
+    }
+
+    private func scheduleRenderOptionsRefresh(runtime: NodeRuntime) {
+        guard !isSourceReadsSuspended, activeComputeCapture == nil,
+              let snapshot = configuredSnapshot,
+              let mapID = UUID(uuidString: snapshot.map.mapID),
+              let isCurrent = currentCheck, isCurrent(),
+              runtimeByID[runtime.id] === runtime else { return }
+
+        runtime.renderOptionsRefreshPending = false
+        runtime.renderOptionsTask?.cancel()
+        runtime.renderOptionsGeneration &+= 1
+        let generation = runtime.renderOptionsGeneration
+        let sourceGeneration = self.sourceGeneration
+        let profileIndex = runtime.profileSession.currentID ?? runtime.source.profileIndex
+        let requestedNode = MapResultChartActiveNode(node: runtime.source.node,
+            nodeKind: runtime.source.nodeKind, name: runtime.source.name,
+            selections: runtime.source.selections,
+            selectedMapType: runtime.source.selectedMapType,
+            profileIndex: profileIndex)
+        let options = renderOptionOverrides(snapshot: snapshot, node: requestedNode,
+            mapID: mapID, blockedSelectionIndices: [])
+
+        runtime.isRefreshing = true
+        runtime.initialLayers = []
+        runtime.layers = []
+        runtime.rasterSelectionIndicesByLayerID = [:]
+        runtime.rasterSourceIdentityByLayerID = [:]
+        runtime.legends = []
+        runtime.diagnosticAnnotations = []
+        runtime.unavailableReason = L10n.text("Updating result map options.")
+        runtime.profileSession.suspendSourceReads()
+        ensureSelectedLayer(runtime)
+        if selectedNodeID == runtime.id { selectedLayerID = runtime.selectedLayerID }
+        refreshPublishedNodes()
+        publishFrames()
+        liveRenderTargetsDidChange?()
+
+        let request = PreparationRequest(snapshot: snapshot, node: requestedNode,
+            mapID: mapID, viewport: viewportLookup ?? { nil },
+            renderOptions: options)
+        let task = Task { @MainActor [weak self, weak runtime] in
+            guard let self, let runtime else { return }
+            do {
+                let prepared = try await self.prepareNode(request)
+                guard !Task.isCancelled,
+                      sourceGeneration == self.sourceGeneration,
+                      runtime.renderOptionsGeneration == generation,
+                      self.runtimeByID[runtime.id] === runtime,
+                      self.configuredSnapshot == snapshot,
+                      self.currentCheck?() == true else { return }
+                guard prepared.renderedViewport == self.viewportLookup?() else {
+                    if self.requestedViewport != self.viewportLookup?() {
+                        self.viewportChanged()
+                    } else {
+                        self.failRenderOptionsRefresh(runtime: runtime,
+                            message: L10n.text("The map viewport changed while updating result options."))
+                    }
+                    return
+                }
+
+                let context = MapProfileContext(
+                    projectSessionID: self.profileProjectSessionID ?? UUID(),
+                    mapID: mapID, sourceID: prepared.presentation.sourceID)
+                let preferredID = profileIndex.flatMap { requested in
+                    prepared.presentation.steps.contains(where: { $0.id == requested })
+                        ? requested : nil
+                } ?? prepared.presentation.selectedID
+                let presentation = MapProfilePresentation(
+                    sourceID: prepared.presentation.sourceID,
+                    steps: prepared.presentation.steps, selectedID: preferredID)
+                try runtime.profileSession.configure(presentation,
+                    provider: prepared.provider, context: context)
+
+                runtime.source = requestedNode
+                runtime.availability = prepared.availability
+                runtime.legendLookup = prepared.legendLookup
+                runtime.diagnosticLookup = prepared.diagnosticLookup
+                runtime.diagnosticAnnotations = prepared.diagnosticLookup?() ?? []
+                runtime.velocityFieldSampler = prepared.velocityFieldSampler
+                runtime.initialLayers = prepared.initialUpdate?.rasters ?? []
+                runtime.layers = runtime.initialLayers
+                runtime.rasterSelectionIndicesByLayerID =
+                    prepared.initialUpdate?.rasterSelectionIndicesByLayerID
+                runtime.rasterSourceIdentityByLayerID =
+                    prepared.initialUpdate?.rasterSourceIdentityByLayerID
+                runtime.legends = prepared.initialLegends
+                runtime.sourceStatuses = prepared.initialSourceStatuses
+                runtime.unavailableReason = prepared.initialUnavailableReason
+                runtime.renderedViewport = prepared.renderedViewport
+                if prepared.initialUpdate == nil {
+                    runtime.unavailableReason = L10n.text("The result renderer returned an invalid raster.")
+                }
+                self.bindRenderCallbacks(runtime: runtime,
+                    generation: sourceGeneration, mapID: mapID)
+                runtime.profileSession.didChooseMetadataOnlyProfile = { [weak self, weak runtime] index, context in
+                    guard let self, let runtime else { return }
+                    self.chooseLiveProfile(index, context: context, runtime: runtime)
+                }
+                runtime.subscription = runtime.profileSession.objectWillChange.sink { [weak self] _ in
+                    Task { @MainActor [weak self] in self?.refreshPublishedNodes() }
+                }
+                runtime.isLoading = false
+                runtime.isRefreshing = false
+                runtime.renderOptionsTask = nil
+                runtime.renderOptionsRefreshPending = false
+                runtime.renderOptionsFallbackByIdentity.removeAll()
+                self.ensureSelectedLayer(runtime)
+                if self.selectedNodeID == runtime.id {
+                    self.selectedLayerID = runtime.selectedLayerID
+                }
+                self.refreshPublishedNodes()
+                self.publishFrames()
+                self.liveRenderTargetsDidChange?()
+            } catch {
+                guard sourceGeneration == self.sourceGeneration,
+                      runtime.renderOptionsGeneration == generation,
+                      self.runtimeByID[runtime.id] === runtime else { return }
+                self.failRenderOptionsRefresh(runtime: runtime,
+                    message: L10n.text(error.localizedDescription))
+            }
+        }
+        runtime.renderOptionsTask = task
+    }
+
+    private func failRenderOptionsRefresh(runtime: NodeRuntime, message: String) {
+        guard runtimeByID[runtime.id] === runtime else { return }
+        var restoredOptions = renderOptionsByIdentity
+        for (identity, previousOptions) in runtime.renderOptionsFallbackByIdentity {
+            restoredOptions[identity] = previousOptions
+        }
+        renderOptionsByIdentity = restoredOptions
+        runtime.renderOptionsFallbackByIdentity.removeAll()
+        runtime.renderOptionsRefreshPending = false
+        runtime.isRefreshing = false
+        runtime.renderOptionsTask = nil
+        runtime.unavailableReason = message
+        runtime.profileSession.resumeSourceReads()
+        if runtime.profileSession.canSelect {
+            runtime.unavailableReason = nil
+        }
+        refreshPublishedNodes()
+        if runtime.profileSession.canSelect {
+            runtime.profileSession.reloadCurrent()
         }
     }
 

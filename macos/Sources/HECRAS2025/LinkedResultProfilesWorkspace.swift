@@ -36,6 +36,7 @@ struct LinkedResultProfilesRequest: Encodable, Sendable {
     let anchor: ResultPlanCandidate
     let selectedGroups: [ResultPlanCandidateGroup]
     let profileIndex: Int
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 @MainActor
@@ -57,7 +58,8 @@ final class LinkedResultProfilesSession: ObservableObject {
         snapshot = nil
         let request = LinkedResultProfilesRequest(projectPath: selection.projectPath,
             projectXml: projectXML, projectRevision: selection.projectRevision,
-            anchor: selection.anchor, selectedGroups: selection.selectedGroups, profileIndex: profileIndex)
+            anchor: selection.anchor, selectedGroups: selection.selectedGroups, profileIndex: profileIndex,
+            coreLayerContext: selection.coreLayerContext)
         let client = self.client
         let task = Task {
             try await client.request("result.linkedProfiles", parameters: request, as: LinkedResultProfilesSnapshot.self)
@@ -133,6 +135,7 @@ struct LinkedResultProfilesWorkspace: View {
             return "\(group.hasPlan)|\(group.planName ?? "")|\(identities)"
         }.joined(separator: "\n--group--\n")
         return selection.projectPath + "|" + selection.projectRevision + "|" + projectContextID +
+            "|" + (selection.coreLayerContext?.identityToken ?? "") +
             "|" + xmlHash + "|" + resultIdentity + "|" + groupsIdentity
     }
     private var taskIdentity: String {

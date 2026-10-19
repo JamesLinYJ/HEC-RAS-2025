@@ -5,6 +5,9 @@ import RASWorkspaceCore
 struct AttributeTableRoute: Codable, Hashable {
     var id = UUID()
     var path = ""
+    /// Stable source row selected by a map feature context action, such as
+    /// "feature/12" for source record ordinal 12.
+    var focusRowID: String? = nil
 }
 struct AttributeColumn: Codable, Equatable, Identifiable, Sendable {
     let id: String

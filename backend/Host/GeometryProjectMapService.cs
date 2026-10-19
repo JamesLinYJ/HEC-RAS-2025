@@ -78,7 +78,8 @@ public static partial class ModelEditorAdapter
             try
             {
                 using var context = new ModelContext(new ModelRequest(assetPath, "Geometry",
-                    request.Map.ProjectPath, request.Map.ProjectXml));
+                    request.Map.ProjectPath, request.Map.ProjectXml,
+                    CoreLayerContext: request.Map.CoreLayerContext));
                 ObservableGeometry geometry = context.Observable as ObservableGeometry
                     ?? throw new InvalidDataException("The selected source is not an ObservableGeometry.");
 
@@ -652,7 +653,8 @@ public static partial class ModelEditorAdapter
             return new(FlowAreaExtent(areas), ToFlowAreaSources(areas), 0, 0, 0, 0, [], true, null);
 
         using var context = new ModelContext(new ModelRequest(assetPath, "Geometry",
-            request.Map.ProjectPath, request.Map.ProjectXml));
+            request.Map.ProjectPath, request.Map.ProjectXml,
+            CoreLayerContext: request.Map.CoreLayerContext));
         ObservableGeometry geometry = context.Observable as ObservableGeometry
             ?? throw new InvalidDataException("The selected source is not an ObservableGeometry.");
         return BuildFlowAreasPage(areas, state, request, contextToken, geometry);

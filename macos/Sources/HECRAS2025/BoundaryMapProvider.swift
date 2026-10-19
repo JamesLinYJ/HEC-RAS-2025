@@ -6,6 +6,29 @@ import RASWorkspaceCore
 protocol BoundaryMapProvider {
     func load(_ capture: BoundaryMapCapture, boundarySourceState: String?,
               contextToken: String?) async throws -> BoundaryMapSnapshot
+    func load(_ capture: BoundaryMapCapture, boundarySourceState: String?,
+              contextToken: String?, attachedFacesViewport: RasterMapViewExtent?) async throws -> BoundaryMapSnapshot
+    func load(_ capture: BoundaryMapCapture, boundarySourceState: String?,
+              contextToken: String?, attachedFacesViewport: RasterMapViewExtent?,
+              renderScale: Double) async throws -> BoundaryMapSnapshot
+}
+
+extension BoundaryMapProvider {
+    func load(_ capture: BoundaryMapCapture, boundarySourceState: String?,
+              contextToken: String?, attachedFacesViewport: RasterMapViewExtent?,
+              renderScale: Double) async throws -> BoundaryMapSnapshot {
+        guard attachedFacesViewport == nil, renderScale == 1 else { throw BoundaryMapError.unavailable }
+        return try await load(capture, boundarySourceState: boundarySourceState,
+            contextToken: contextToken, attachedFacesViewport: nil)
+    }
+}
+
+extension BoundaryMapProvider {
+    func load(_ capture: BoundaryMapCapture, boundarySourceState: String?,
+              contextToken: String?, attachedFacesViewport: RasterMapViewExtent?) async throws -> BoundaryMapSnapshot {
+        guard attachedFacesViewport == nil else { throw BoundaryMapError.unavailable }
+        return try await load(capture, boundarySourceState: boundarySourceState, contextToken: contextToken)
+    }
 }
 
 /// Reads source BoundaryConditionLine polylines for one exact saved-map row.
@@ -25,7 +48,21 @@ final class BackendBoundaryMapProvider: BoundaryMapProvider {
 
     func load(_ capture: BoundaryMapCapture, boundarySourceState: String?,
               contextToken: String?) async throws -> BoundaryMapSnapshot {
+        try await load(capture, boundarySourceState: boundarySourceState,
+            contextToken: contextToken, attachedFacesViewport: nil, renderScale: 1)
+    }
+
+    func load(_ capture: BoundaryMapCapture, boundarySourceState: String?,
+              contextToken: String?, attachedFacesViewport: RasterMapViewExtent?) async throws -> BoundaryMapSnapshot {
+        try await load(capture, boundarySourceState: boundarySourceState,
+            contextToken: contextToken, attachedFacesViewport: attachedFacesViewport, renderScale: 1)
+    }
+
+    func load(_ capture: BoundaryMapCapture, boundarySourceState: String?,
+              contextToken: String?, attachedFacesViewport: RasterMapViewExtent?,
+              renderScale: Double) async throws -> BoundaryMapSnapshot {
         guard isCurrent(capture), !Task.isCancelled else { throw BoundaryMapError.staleContext }
+        guard renderScale.isFinite, renderScale > 0, renderScale <= 64 else { throw BoundaryMapError.unavailable }
         let sourceURL = URL(fileURLWithPath: capture.sourcePath)
         let projectURL = URL(fileURLWithPath: SourceFilePaths.canonical(URL(fileURLWithPath: capture.map.projectPath)))
         let sourceRevisionBefore = try await Self.sourceRevision(at: sourceURL)
@@ -37,14 +74,16 @@ final class BackendBoundaryMapProvider: BoundaryMapProvider {
         let request = BoundaryMapRequest(map: capture.map, boundaryNode: capture.boundaryNode,
             expectedBoundaryRevision: capture.sourceRevision,
             boundarySourceState: boundarySourceState, expectedContextToken: contextToken,
-            resultOwner: capture.resultOwner)
+            resultOwner: capture.resultOwner, attachedFacesViewport: attachedFacesViewport,
+            renderScale: renderScale)
         let snapshot: BoundaryMapSnapshot = try await client.request(
             "map.boundary.geometry.load", parameters: request, as: BoundaryMapSnapshot.self)
 
         guard isCurrent(capture), !Task.isCancelled else { throw CancellationError() }
         try validate(snapshot, capture: capture, requestedBoundarySourceState: boundarySourceState,
                      previousContextToken: contextToken,
-                     projectRevision: projectRevisionBefore)
+                     projectRevision: projectRevisionBefore,
+                     attachedFacesViewport: attachedFacesViewport)
         let sourceRevisionAfter = try await Self.sourceRevision(at: sourceURL)
         let projectRevisionAfter = try await Self.sourceRevision(at: projectURL)
         guard isCurrent(capture), !Task.isCancelled else { throw CancellationError() }
@@ -57,7 +96,8 @@ final class BackendBoundaryMapProvider: BoundaryMapProvider {
 
     private func validate(_ snapshot: BoundaryMapSnapshot, capture: BoundaryMapCapture,
                           requestedBoundarySourceState: String?, previousContextToken: String?,
-                          projectRevision: String) throws {
+                          projectRevision: String,
+                          attachedFacesViewport: RasterMapViewExtent?) throws {
         let map = capture.map
         guard SourceFilePaths.canonical(URL(fileURLWithPath: snapshot.projectCanonicalPath))
                 == SourceFilePaths.canonical(URL(fileURLWithPath: map.projectPath)),
@@ -76,6 +116,7 @@ final class BackendBoundaryMapProvider: BoundaryMapProvider {
               snapshot.boundaryEffectiveVisible == capture.effectiveVisible,
               Self.matchesResultOwner(snapshot.resultOwner, expected: capture.resultOwner),
               !snapshot.boundarySourceState.isEmpty,
+              attachedFacesViewport == nil ? snapshot.attachedFaces == nil : snapshot.attachedFaces != nil,
               Self.uniqueLines(snapshot.lines) else {
             throw BoundaryMapError.mismatchedReply
         }
@@ -90,10 +131,14 @@ final class BackendBoundaryMapProvider: BoundaryMapProvider {
            !["available", "hidden", "empty", "unavailable", "failed"].contains(status) {
             throw BoundaryMapError.mismatchedReply
         }
+        if let attachedFacesViewport {
+            _ = try snapshot.attachedFaces?.validated(for: attachedFacesViewport)
+        }
     }
 
     static func sourceState(from snapshot: BoundaryMapSnapshot,
-                            capture: BoundaryMapCapture) throws -> BoundaryMapSourceState {
+                            capture: BoundaryMapCapture,
+                            attachedFacesViewport: RasterMapViewExtent? = nil) throws -> BoundaryMapSourceState {
         guard Self.uniqueLines(snapshot.lines) else { throw BoundaryMapError.invalidGeometry }
         var invalidGeometryCount = 0
         let lines = snapshot.lines.map { item -> BoundaryMapLine in
@@ -129,9 +174,15 @@ final class BackendBoundaryMapProvider: BoundaryMapProvider {
         } else {
             diagnostic = nil
         }
+        let attachedFaces: MapSourceRasterFrame?
+        if let attachedFacesViewport {
+            attachedFaces = try snapshot.attachedFaces?.validated(for: attachedFacesViewport)
+        } else {
+            attachedFaces = nil
+        }
         return BoundaryMapSourceState(capture: capture, contextToken: snapshot.contextToken,
             boundarySourceState: snapshot.boundarySourceState, lines: lines,
-            status: status, diagnostic: diagnostic)
+            status: status, diagnostic: diagnostic, attachedFaces: attachedFaces)
     }
 
     private static func uniqueLines(_ lines: [BoundaryMapLineData]) -> Bool {

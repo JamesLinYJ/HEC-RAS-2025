@@ -190,7 +190,8 @@ final class BackendCatalogTreeProvider: LayerTreeProvider {
             focusedGeometryIds: context.focusedGeometryIDs,
             focusedPlanIds: context.focusedPlanIDs,
             mapId: context.mapID.uuidString,
-            maps: currentMaps
+            maps: currentMaps,
+            coreLayerContext: context.coreLayerContext
         )
         let method = context.mode == "Catalog" ? "catalog.tree.load" : "project.tree.load"
         let response = try await client.request(method, parameters: request, as: CatalogTreeSnapshotResponse.self)
@@ -249,7 +250,8 @@ final class BackendCatalogTreeProvider: LayerTreeProvider {
             expectedBackupRevision: revision,
             parentGeometryPath: parentPath,
             expectedParentGeometryRevision: parentRevision,
-            expectedProjectRevision: expectedProjectRevision
+            expectedProjectRevision: expectedProjectRevision,
+            coreLayerContext: context.coreLayerContext
         )
         let receipt = try await client.request("geometry.backup.restore", parameters: request,
             as: GeometryBackupRestoreResponse.self)
@@ -325,6 +327,7 @@ final class BackendCatalogTreeProvider: LayerTreeProvider {
         let parentGeometryPath: String
         let expectedParentGeometryRevision: String
         let expectedProjectRevision: String
+        var coreLayerContext: CoreLayerRequestContext? = nil
     }
 
     private struct GeometryBackupRestoreResponse: Decodable, Sendable {
@@ -349,6 +352,7 @@ final class BackendCatalogTreeProvider: LayerTreeProvider {
         let focusedPlanIds: [String]
         let mapId: String
         let maps: [CatalogMapDocument]
+        var coreLayerContext: CoreLayerRequestContext? = nil
     }
 
 }

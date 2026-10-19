@@ -75,8 +75,10 @@ internal static class GeometryTopologyToolChecks
         Check(File.ReadAllBytes(assetPath).SequenceEqual(sourceBytes),
             "Factor, recipe, filter and arc-point drafts leave source bytes unchanged until explicit save");
 
+        GeometryTopologySnapshot arcChoiceDraft = await CheckArcChoiceAndBiasResetOperations(
+            model, recipeDraft, assetPath, sourceBytes);
         GeometryTopologySnapshot saved = await ModelEditorAdapter.SaveGeometryTopologyAsync(
-            new GeometryTopologySaveRequest(model, recipeDraft.Revision, recipeDraft.DraftState));
+            new GeometryTopologySaveRequest(model, arcChoiceDraft.Revision, arcChoiceDraft.DraftState));
         Check(!saved.IsDirty && saved.Revision != baseline.Revision
             && !File.ReadAllBytes(assetPath).SequenceEqual(sourceBytes),
             "An explicit topology save commits the raw recipe draft and returns a fresh clean revision");
@@ -85,12 +87,29 @@ internal static class GeometryTopologyToolChecks
         foreach (int fid in baseline.Regions.Rows.Select(row => row.FID))
             Check(saved.Regions.Rows.Single(row => row.FID == fid).Values["Recipe"] == InvalidRecipe,
                 "Saved HDF readback preserves the exact invalid recipe text for control point " + fid.ToString(CultureInfo.InvariantCulture));
+        int[] forceSetArcFIDs = baseline.Arcs.Rows.OrderBy(row => row.FID).Take(2).Select(row => row.FID).ToArray();
+        foreach (int fid in forceSetArcFIDs)
+        {
+            GeometryTopologyFeatureRow persistedArc = saved.Arcs.Rows.Single(row => row.FID == fid);
+            Check(persistedArc.Values["ConstrainStretching"] == "Default"
+                && persistedArc.Values["LaplaceBC"] == "Default"
+                && persistedArc.Values["Bias"] == "NaN",
+                "Parent Geometry save and HDF reopen preserve Arc Force Set choices and Bias Clear for arc "
+                    + fid.ToString(CultureInfo.InvariantCulture));
+        }
         using (var reader = new H5Assist.H5Reader(assetPath))
             Check(reader.TryReadStringAttributeScalar(Geometry.HDF5Group, "Unknown Topology Tools Metadata") == "Retain this attribute",
                 "Explicit topology save preserves unknown source HDF attributes");
 
         await Expect<SourceFileChangedException>(() => ModelEditorAdapter.EditGeometryTopologyAsync(new(model,
             baseline.Revision, baseline.DraftState, FactorMutation("2"))));
+        int[] staleArcFIDs = baseline.Arcs.Rows.OrderBy(row => row.FID).Take(2).Select(row => row.FID).ToArray();
+        await Expect<SourceFileChangedException>(() => ModelEditorAdapter.EditGeometryTopologyAsync(new(model,
+            baseline.Revision, baseline.DraftState, new GeometryTopologyMutation("forceSetArcChoice", "arc",
+                staleArcFIDs, FieldID: "ConstrainStretching", Value: "Default"))));
+        await Expect<SourceFileChangedException>(() => ModelEditorAdapter.EditGeometryTopologyAsync(new(model,
+            baseline.Revision, baseline.DraftState, new GeometryTopologyMutation("forceResetArcBias", "arc",
+                staleArcFIDs, FieldID: "Bias"))));
         await Expect<SourceFileChangedException>(() => ModelEditorAdapter.LoadGeometryTopologyArcPointsAsync(
             new GeometryTopologyArcPointsRequest(model, baseline.Revision, baseline.DraftState,
                 baseline.Arcs.Rows[0].FID)));
@@ -100,6 +119,113 @@ internal static class GeometryTopologyToolChecks
             new GeometryTopologyFilterRequest(model, baseline.Revision, baseline.DraftState, "arc", [])));
 
         Console.WriteLine("Geometry topology factor, recipe, arc-point and source TagFilter checks passed.");
+    }
+
+    private static async Task<GeometryTopologySnapshot> CheckArcChoiceAndBiasResetOperations(
+        GeometryTopologyModelRequest model, GeometryTopologySnapshot source, string assetPath, byte[] sourceBytes)
+    {
+        int[] selectedFIDs = source.Arcs.Rows.OrderBy(row => row.FID).Take(2).Select(row => row.FID).ToArray();
+        Check(selectedFIDs.Length == 2, "The source Arc choice fixture has a two-Arc mixed selection");
+
+        GeometryTopologySnapshot mixed = await Edit(model, source, new GeometryTopologyMutation("setField", "arc",
+            [selectedFIDs[0]], "ConstrainStretching", "Constrained"));
+        mixed = await Edit(model, mixed, new GeometryTopologyMutation("setField", "arc",
+            [selectedFIDs[1]], "ConstrainStretching", "Floating"));
+        mixed = await Edit(model, mixed, new GeometryTopologyMutation("setField", "arc",
+            [selectedFIDs[0]], "LaplaceBC", "ZeroFlux"));
+        mixed = await Edit(model, mixed, new GeometryTopologyMutation("setField", "arc",
+            [selectedFIDs[1]], "LaplaceBC", "Dirichlet"));
+        mixed = await Edit(model, mixed, new GeometryTopologyMutation("setField", "arc",
+            [selectedFIDs[0]], "Bias", "1.5"));
+        mixed = await Edit(model, mixed, new GeometryTopologyMutation("setField", "arc",
+            [selectedFIDs[1]], "Bias", "2.5"));
+
+        // The retained aggregate getters display Default when selected values
+        // are mixed. Choosing that displayed value must still force-assign all
+        // selected Arcs instead of taking the ordinary aggregate setter's
+        // equality/no-op path.
+        GeometryTopologySnapshot forcedStretching = await Edit(model, mixed,
+            new GeometryTopologyMutation("forceSetArcChoice", "arc", selectedFIDs,
+                FieldID: "ConstrainStretching", Value: "Default"));
+        Check(forcedStretching.CanUndo && forcedStretching.IsDirty
+            && selectedFIDs.All(fid => forcedStretching.Arcs.Rows.Single(row => row.FID == fid)
+                .Values["ConstrainStretching"] == "Default"),
+            "Arc Constrain Stretching Force Set applies the displayed Default choice to every mixed selected Arc");
+        foreach (GeometryTopologyFeatureRow row in source.Arcs.Rows.Where(row => !selectedFIDs.Contains(row.FID)))
+            Check(SameRow(row, forcedStretching.Arcs.Rows.Single(result => result.FID == row.FID)),
+                "Arc Constrain Stretching Force Set preserves unselected Arc " + row.FID.ToString(CultureInfo.InvariantCulture));
+        GeometryTopologyDraftState forcedDraftState = JsonSerializer.Deserialize<GeometryTopologyDraftState>(
+            forcedStretching.DraftState, BackendJson.Options) ?? throw new InvalidDataException("Missing Arc Force Set draft state.");
+        GeometryTopologySnapshot repeatedForceSet = await Edit(model, forcedStretching,
+            new GeometryTopologyMutation("forceSetArcChoice", "arc", selectedFIDs,
+                FieldID: "ConstrainStretching", Value: "Default"));
+        GeometryTopologyDraftState repeatedForceDraftState = JsonSerializer.Deserialize<GeometryTopologyDraftState>(
+            repeatedForceSet.DraftState, BackendJson.Options) ?? throw new InvalidDataException("Missing repeated Arc Force Set draft state.");
+        Check(repeatedForceDraftState.Mutations.Length == forcedDraftState.Mutations.Length,
+            "Repeating an already-satisfied Arc Force Set does not add draft history");
+        GeometryTopologySnapshot undoStretching = await Edit(model, forcedStretching,
+            new GeometryTopologyMutation("undo", "history", []));
+        Check(undoStretching.Arcs.Rows.Single(row => row.FID == selectedFIDs[0])
+                .Values["ConstrainStretching"] == "Constrained"
+            && undoStretching.Arcs.Rows.Single(row => row.FID == selectedFIDs[1]).Values["ConstrainStretching"] == "Floating"
+            && undoStretching.CanRedo,
+            "One Undo restores the mixed Arc choices atomically");
+        GeometryTopologySnapshot redoneStretching = await Edit(model, undoStretching,
+            new GeometryTopologyMutation("redo", "history", []));
+        Check(selectedFIDs.All(fid => redoneStretching.Arcs.Rows.Single(row => row.FID == fid)
+                .Values["ConstrainStretching"] == "Default"),
+            "One Redo reapplies the same Arc Force Set choice");
+
+        GeometryTopologySnapshot forcedLaplace = await Edit(model, redoneStretching,
+            new GeometryTopologyMutation("forceSetArcChoice", "arc", selectedFIDs,
+                FieldID: "LaplaceBC", Value: "Default"));
+        Check(selectedFIDs.All(fid => forcedLaplace.Arcs.Rows.Single(row => row.FID == fid)
+                .Values["LaplaceBC"] == "Default"),
+            "Arc Laplace BC Force Set applies the displayed Default choice to every mixed selected Arc");
+        GeometryTopologySnapshot undoLaplace = await Edit(model, forcedLaplace,
+            new GeometryTopologyMutation("undo", "history", []));
+        Check(undoLaplace.Arcs.Rows.Single(row => row.FID == selectedFIDs[0]).Values["LaplaceBC"] == "ZeroFlux"
+            && undoLaplace.Arcs.Rows.Single(row => row.FID == selectedFIDs[1]).Values["LaplaceBC"] == "Dirichlet",
+            "Undo restores the mixed Laplace BC choice");
+        GeometryTopologySnapshot redoneLaplace = await Edit(model, undoLaplace,
+            new GeometryTopologyMutation("redo", "history", []));
+
+        GeometryTopologySnapshot cleared = await Edit(model, redoneLaplace,
+            new GeometryTopologyMutation("forceResetArcBias", "arc", selectedFIDs, FieldID: "Bias"));
+        Check(cleared.CanUndo && selectedFIDs.All(fid => cleared.Arcs.Rows.Single(row => row.FID == fid)
+                .Values["Bias"] == "NaN"),
+            "Arc Bias Clear assigns NaN to every exact selected Arc rather than zero or empty text");
+        foreach (GeometryTopologyFeatureRow row in redoneLaplace.Arcs.Rows.Where(row => !selectedFIDs.Contains(row.FID)))
+            Check(SameRow(row, cleared.Arcs.Rows.Single(result => result.FID == row.FID)),
+                "Arc Bias Clear preserves unselected Arc " + row.FID.ToString(CultureInfo.InvariantCulture));
+        GeometryTopologySnapshot repeatedClear = await Edit(model, cleared,
+            new GeometryTopologyMutation("forceResetArcBias", "arc", selectedFIDs, FieldID: "Bias"));
+        GeometryTopologyDraftState clearDraftState = JsonSerializer.Deserialize<GeometryTopologyDraftState>(
+            cleared.DraftState, BackendJson.Options) ?? throw new InvalidDataException("Missing Arc Bias clear draft state.");
+        GeometryTopologyDraftState repeatedClearDraftState = JsonSerializer.Deserialize<GeometryTopologyDraftState>(
+            repeatedClear.DraftState, BackendJson.Options) ?? throw new InvalidDataException("Missing repeated Arc Bias clear draft state.");
+        Check(repeatedClearDraftState.Mutations.Length == clearDraftState.Mutations.Length,
+            "Clearing already-reset Arc Bias values is a no-op and does not add draft history");
+        GeometryTopologySnapshot undoBias = await Edit(model, cleared,
+            new GeometryTopologyMutation("undo", "history", []));
+        Check(undoBias.Arcs.Rows.Single(row => row.FID == selectedFIDs[0]).Values["Bias"] == "1.5"
+            && undoBias.Arcs.Rows.Single(row => row.FID == selectedFIDs[1]).Values["Bias"] == "2.5",
+            "Undo restores each selected Arc's exact pre-clear Bias");
+        GeometryTopologySnapshot redoneBias = await Edit(model, undoBias,
+            new GeometryTopologyMutation("redo", "history", []));
+
+        await Expect<ArgumentException>(() => Edit(model, source,
+            new GeometryTopologyMutation("forceSetArcChoice", "arc", selectedFIDs,
+                FieldID: "ConstrainStretching", Value: "1")));
+        await Expect<ArgumentException>(() => Edit(model, source,
+            new GeometryTopologyMutation("forceSetArcChoice", "region", selectedFIDs,
+                FieldID: "ConstrainStretching", Value: "Constrained")));
+        await Expect<ArgumentException>(() => Edit(model, source,
+            new GeometryTopologyMutation("forceResetArcBias", "arc", [selectedFIDs[0], int.MaxValue],
+                FieldID: "Bias")));
+        Check(File.ReadAllBytes(assetPath).SequenceEqual(sourceBytes),
+            "Arc Force Set, Bias Clear, Undo, Redo, no-op and rejected commands leave the source HDF unchanged");
+        return redoneBias;
     }
 
     private static Topology CreateTopology()

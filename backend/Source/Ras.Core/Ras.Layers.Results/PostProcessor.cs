@@ -135,6 +135,21 @@ public class PostProcessor : IVerticalOutputBlock, IOutputBlock, IDiscreteTimest
 		return CreateNew(res, filename, fileSHA);
 	}
 
+	/// <summary>
+	/// Creates a caller-owned derived cache without touching the Result's shared
+	/// export directory. The caller owns a unique path and must dispose this
+	/// processor before removing the cache.
+	/// </summary>
+	public static PostProcessor CreateReadCache(Result result, string filename)
+	{
+		ArgumentNullException.ThrowIfNull(result);
+		if (string.IsNullOrWhiteSpace(filename) || !Path.IsPathFullyQualified(filename))
+			throw new ArgumentException("An absolute private cache path is required.", nameof(filename));
+		if (File.Exists(filename))
+			throw new IOException("The private postprocess cache path already exists.");
+		return CreateNew(result, filename, result.GetFileSHA256());
+	}
+
 	internal static async Task<PostProcessor> EnsureAsync(Result res, string filename)
 	{
 		string fileSHA256Async = await res.GetFileSHA256Async();

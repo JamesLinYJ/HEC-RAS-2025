@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 
 namespace Ras.Engine.Structures;
@@ -17,11 +18,17 @@ public static class StructureTSLogger
 
 	private static void OpenNewLogFile()
 	{
-		string now = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-		_writer = new StreamWriter(Path.Combine("C:\\Temp", "struct_ts_" + now + ".log"), append: false)
+		string directory = Path.Combine(Path.GetTempPath(), "HEC", "RAS", "StructureTimeSeries");
+		Directory.CreateDirectory(directory);
+		string now = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fffffff", CultureInfo.InvariantCulture);
+		string path = Path.Combine(directory, "struct_ts_" + now + "_" + Environment.ProcessId + "_" + Guid.NewGuid().ToString("N") + ".log");
+		var next = new StreamWriter(new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
 		{
 			AutoFlush = true
 		};
+		StreamWriter previous = _writer;
+		_writer = next;
+		previous?.Dispose();
 	}
 
 	public static void Log(string message)
@@ -36,7 +43,6 @@ public static class StructureTSLogger
 	{
 		lock (_lock)
 		{
-			_writer?.Close();
 			OpenNewLogFile();
 		}
 	}
@@ -45,8 +51,9 @@ public static class StructureTSLogger
 	{
 		lock (_lock)
 		{
-			_writer?.Close();
+			StreamWriter previous = _writer;
 			_writer = null;
+			previous?.Dispose();
 		}
 	}
 }

@@ -19,6 +19,7 @@
     <ProjectReference Include="../Source/Testing.Core/Testing.Core.csproj" />
     <ProjectReference Include="../Source/Utility.Core/Utility.Core.csproj" />
     <ProjectReference Include="../Source/Geospatial.IO/Geospatial.IO.csproj" />
+    <ProjectReference Include="../Source/Geospatial.Rendering/Geospatial.Rendering.csproj" />
     <ProjectReference Include="../Source/Utility.Communication/Utility.Communication.csproj" />
     <EmbeddedResource Include="../../macos/Sources/HECRAS2025/Resources/editor-schemas.json" LogicalName="editor-schemas.json" />
   </ItemGroup>

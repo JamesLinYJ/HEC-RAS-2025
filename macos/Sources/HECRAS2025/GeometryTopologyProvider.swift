@@ -7,6 +7,7 @@ struct GeometryTopologyModelRequest: Codable, Hashable, Sendable {
     let kind: String
     let projectPath: String?
     let projectXml: String?
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 struct GeometryTopologyMutation: Codable, Sendable {
@@ -33,13 +34,15 @@ struct GeometryTopologyMutation: Codable, Sendable {
     var endpointNodeIndex: Int? = nil
     var axis: String? = nil
     var rawValue: String? = nil
+    var importPayload: GeometryTopologyImportPayload? = nil
 
     init(operation: String, featureKind: String, featureIDs: [Int], fieldID: String? = nil,
          value: String? = nil, tagName: String? = nil, tagType: String? = nil, tagValue: String? = nil,
          applyToSelectedOnly: Bool = false, factorText: String? = nil,
          arcFeatureIDs: [Int] = [], controlPointFeatureIDs: [Int] = [], nodeFeatureIDs: [Int] = [], recipeText: String? = nil,
          forceSet: Bool = false, pointKind: String? = nil, internalPointIndex: Int? = nil,
-         endpointNodeIndex: Int? = nil, axis: String? = nil, rawValue: String? = nil) {
+         endpointNodeIndex: Int? = nil, axis: String? = nil, rawValue: String? = nil,
+         importPayload: GeometryTopologyImportPayload? = nil) {
         self.operation = operation
         self.featureKind = featureKind
         self.featureIDs = featureIDs
@@ -60,12 +63,13 @@ struct GeometryTopologyMutation: Codable, Sendable {
         self.endpointNodeIndex = endpointNodeIndex
         self.axis = axis
         self.rawValue = rawValue
+        self.importPayload = importPayload
     }
 
     private enum CodingKeys: String, CodingKey {
         case operation, featureKind, featureIDs, fieldID, value, tagName, tagType, tagValue
         case applyToSelectedOnly, factorText, arcFeatureIDs, controlPointFeatureIDs, nodeFeatureIDs
-        case recipeText, forceSet, pointKind, internalPointIndex, endpointNodeIndex, axis, rawValue
+        case recipeText, forceSet, pointKind, internalPointIndex, endpointNodeIndex, axis, rawValue, importPayload
     }
 
     init(from decoder: Decoder) throws {
@@ -90,6 +94,7 @@ struct GeometryTopologyMutation: Codable, Sendable {
         endpointNodeIndex = try container.decodeIfPresent(Int.self, forKey: .endpointNodeIndex)
         axis = try container.decodeIfPresent(String.self, forKey: .axis)
         rawValue = try container.decodeIfPresent(String.self, forKey: .rawValue)
+        importPayload = try container.decodeIfPresent(GeometryTopologyImportPayload.self, forKey: .importPayload)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -114,6 +119,51 @@ struct GeometryTopologyMutation: Codable, Sendable {
         try container.encodeIfPresent(endpointNodeIndex, forKey: .endpointNodeIndex)
         try container.encodeIfPresent(axis, forKey: .axis)
         try container.encodeIfPresent(rawValue, forKey: .rawValue)
+        try container.encodeIfPresent(importPayload, forKey: .importPayload)
+    }
+}
+
+enum GeometryTopologyArcChoice: Hashable, Sendable {
+    enum ConstrainStretching: String, Hashable, Sendable {
+        case `default` = "Default"
+        case constrained = "Constrained"
+        case floating = "Floating"
+    }
+
+    enum LaplaceBoundary: String, Hashable, Sendable {
+        case `default` = "Default"
+        case zeroFlux = "ZeroFlux"
+        case dirichlet = "Dirichlet"
+    }
+
+    case constrainStretching(ConstrainStretching)
+    case laplaceBC(LaplaceBoundary)
+
+    var fieldID: String {
+        switch self {
+        case .constrainStretching: "ConstrainStretching"
+        case .laplaceBC: "LaplaceBC"
+        }
+    }
+
+    var value: String {
+        switch self {
+        case .constrainStretching(let value): value.rawValue
+        case .laplaceBC(let value): value.rawValue
+        }
+    }
+
+    init?(fieldID: String, value: String) {
+        switch fieldID {
+        case "ConstrainStretching":
+            guard let choice = ConstrainStretching(rawValue: value) else { return nil }
+            self = .constrainStretching(choice)
+        case "LaplaceBC":
+            guard let choice = LaplaceBoundary(rawValue: value) else { return nil }
+            self = .laplaceBC(choice)
+        default:
+            return nil
+        }
     }
 }
 
@@ -131,6 +181,7 @@ struct GeometryTopologyColumn: Codable, Identifiable, Sendable {
     let sourceType: String
     let readOnly: Bool
     let isTag: Bool
+    var isUserDefined: Bool? = nil
 }
 
 struct GeometryTopologyFeatureRow: Codable, Identifiable, Sendable {
@@ -297,9 +348,37 @@ protocol GeometryTopologyProvider {
     func inspectRecipe(_ model: GeometryTopologyModelRequest, revision: String, draftState: String,
                        controlPointFIDs: [Int], recipeText: String?) async throws -> GeometryTopologyRecipeSnapshot
     func filter(_ request: GeometryTopologyFilterRequest) async throws -> GeometryTopologyFilterSnapshot
+    func inspectVectorImport(_ request: GeometryVectorImportInspectRequest) async throws -> GeometryVectorImportInspection
+    func applyVectorImport(_ request: GeometryVectorImportApplyRequest) async throws -> GeometryTopologySnapshot
+    func forceSetArcChoice(_ model: GeometryTopologyModelRequest, revision: String, draftState: String,
+                           selectedArcFIDs: [Int], choice: GeometryTopologyArcChoice) async throws -> GeometryTopologySnapshot
+    func forceResetArcBias(_ model: GeometryTopologyModelRequest, revision: String, draftState: String,
+                           selectedArcFIDs: [Int]) async throws -> GeometryTopologySnapshot
 }
 
 extension GeometryTopologyProvider {
+    func forceSetArcChoice(_ model: GeometryTopologyModelRequest, revision: String, draftState: String,
+                           selectedArcFIDs: [Int], choice: GeometryTopologyArcChoice) async throws -> GeometryTopologySnapshot {
+        guard !selectedArcFIDs.isEmpty, Set(selectedArcFIDs).count == selectedArcFIDs.count,
+              selectedArcFIDs.allSatisfy({ $0 >= 0 }) else {
+            throw GeometryTopologyProviderError.invalidArcChoiceRequest
+        }
+        return try await edit(model, revision: revision, draftState: draftState,
+            mutation: GeometryTopologyMutation(operation: "forceSetArcChoice", featureKind: "arc",
+                featureIDs: selectedArcFIDs, fieldID: choice.fieldID, value: choice.value))
+    }
+
+    func forceResetArcBias(_ model: GeometryTopologyModelRequest, revision: String, draftState: String,
+                           selectedArcFIDs: [Int]) async throws -> GeometryTopologySnapshot {
+        guard !selectedArcFIDs.isEmpty, Set(selectedArcFIDs).count == selectedArcFIDs.count,
+              selectedArcFIDs.allSatisfy({ $0 >= 0 }) else {
+            throw GeometryTopologyProviderError.invalidArcChoiceRequest
+        }
+        return try await edit(model, revision: revision, draftState: draftState,
+            mutation: GeometryTopologyMutation(operation: "forceResetArcBias", featureKind: "arc",
+                featureIDs: selectedArcFIDs, fieldID: "Bias"))
+    }
+
     func arcPoints(_ model: GeometryTopologyModelRequest, revision: String, draftState: String,
                    arcFID: Int) async throws -> GeometryTopologyArcPointsSnapshot {
         throw GeometryTopologyProviderError.toolUnavailable
@@ -313,28 +392,41 @@ extension GeometryTopologyProvider {
     func filter(_ request: GeometryTopologyFilterRequest) async throws -> GeometryTopologyFilterSnapshot {
         throw GeometryTopologyProviderError.toolUnavailable
     }
+
+    func inspectVectorImport(_ request: GeometryVectorImportInspectRequest) async throws -> GeometryVectorImportInspection {
+        throw GeometryTopologyProviderError.toolUnavailable
+    }
+
+    func applyVectorImport(_ request: GeometryVectorImportApplyRequest) async throws -> GeometryTopologySnapshot {
+        throw GeometryTopologyProviderError.toolUnavailable
+    }
 }
 
 enum GeometryTopologyProviderError: Error {
     case toolUnavailable
+    case invalidArcChoiceRequest
 }
 
 @MainActor
 final class BackendGeometryTopologyProvider: GeometryTopologyProvider {
     private let client: BackendProcessClient
     private let currentProject: @MainActor () -> ProjectDocument?
+    private let currentCoreLayerContext: @MainActor () -> CoreLayerRequestContext?
 
     init(client: BackendProcessClient? = nil,
-         currentProject: @escaping @MainActor () -> ProjectDocument? = { nil }) {
+         currentProject: @escaping @MainActor () -> ProjectDocument? = { nil },
+         currentCoreLayerContext: @escaping @MainActor () -> CoreLayerRequestContext? = { nil }) {
         self.client = client ?? BackendProcessClient(executableURL: Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/Backend/HECRASBackend"))
         self.currentProject = currentProject
+        self.currentCoreLayerContext = currentCoreLayerContext
     }
 
     func modelRequest(for asset: ProjectAsset) -> GeometryTopologyModelRequest {
         let project = currentProject()
         return GeometryTopologyModelRequest(assetPath: asset.url.path, kind: "Geometry",
-            projectPath: project?.url?.path, projectXml: project?.editorXML)
+            projectPath: project?.url?.path, projectXml: project?.editorXML,
+            coreLayerContext: currentCoreLayerContext())
     }
 
     func load(_ model: GeometryTopologyModelRequest, expectedRevision: String? = nil) async throws -> GeometryTopologySnapshot {
@@ -384,5 +476,15 @@ final class BackendGeometryTopologyProvider: GeometryTopologyProvider {
     func filter(_ request: GeometryTopologyFilterRequest) async throws -> GeometryTopologyFilterSnapshot {
         try await client.request("topology.filter", parameters: request,
             as: GeometryTopologyFilterSnapshot.self)
+    }
+
+    func inspectVectorImport(_ request: GeometryVectorImportInspectRequest) async throws -> GeometryVectorImportInspection {
+        try await client.request("geometry.vectorImport.inspect", parameters: request,
+            as: GeometryVectorImportInspection.self)
+    }
+
+    func applyVectorImport(_ request: GeometryVectorImportApplyRequest) async throws -> GeometryTopologySnapshot {
+        try await client.request("geometry.vectorImport.apply", parameters: request,
+            as: GeometryTopologySnapshot.self)
     }
 }

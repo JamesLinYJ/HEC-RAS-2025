@@ -33,7 +33,8 @@ public sealed record StableChannelDebugOpenRequest(
     string RequestID,
     string? ProjectPath,
     string? InMemorySourceID = null,
-    StableChannelDebugState? InMemoryState = null);
+    StableChannelDebugState? InMemoryState = null,
+    CoreLayerRequestContext? CoreLayerContext = null);
 
 public sealed record StableChannelDebugOpenResponse(
     string RequestID,
@@ -44,7 +45,8 @@ public sealed record StableChannelDebugComputeRequest(
     string RequestID,
     StableChannelDebugSource Source,
     StableChannelDebugState State,
-    string[] SolveFor);
+    string[] SolveFor,
+    CoreLayerRequestContext? CoreLayerContext = null);
 
 public sealed record StableChannelDebugComputeResponse(
     string RequestID,
@@ -57,7 +59,8 @@ public sealed record StableChannelDebugComputeResponse(
 public sealed record StableChannelDebugSaveRequest(
     string RequestID,
     StableChannelDebugSource Source,
-    StableChannelDebugState State);
+    StableChannelDebugState State,
+    CoreLayerRequestContext? CoreLayerContext = null);
 
 public sealed record StableChannelDebugSaveResponse(
     string RequestID,

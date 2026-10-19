@@ -36,7 +36,11 @@ struct ResultPlanComparisonTool: View {
     }
     private var sourceContextRevision: String { "\(store.projectSessionID):\(store.assetsRevision)" }
     private var requestIdentity: String {
+        makeRequestIdentity(coreLayerContext: store.captureCoreLayerRequestContext())
+    }
+    private func makeRequestIdentity(coreLayerContext: CoreLayerRequestContext?) -> String {
         [sourceContextRevision, store.document?.url?.path ?? "", projectXML ?? "",
+         coreLayerContext?.identityToken ?? "",
          anchor?.id ?? "", String(refreshGeneration)].joined(separator: "\n")
     }
     private var isBusy: Bool { inspector.isLoading || plans.isLoading }
@@ -97,15 +101,18 @@ struct ResultPlanComparisonTool: View {
         .padding(20)
         .frame(minWidth: 540, idealWidth: 650, minHeight: 400, idealHeight: 540)
         .task(id: requestIdentity) {
+            let coreLayerContext = store.captureCoreLayerRequestContext()
             inspector.invalidate()
             plans.invalidate()
-            let capture = requestIdentity
+            let capture = makeRequestIdentity(coreLayerContext: coreLayerContext)
+            guard capture == requestIdentity else { return }
             await inspector.ensureLoaded(asset: anchor, projectPath: store.document?.url,
                 projectXML: projectXML, sourceContextRevision: sourceContextRevision)
             guard !Task.isCancelled, capture == requestIdentity else { return }
             await plans.ensureLoaded(asset: anchor, projectPath: store.document?.url,
                 projectXml: projectXML, inspectorSnapshot: inspector.snapshot,
-                sourceContextRevision: sourceContextRevision)
+                sourceContextRevision: sourceContextRevision,
+                coreLayerContext: coreLayerContext)
         }
         .onChange(of: requestIdentity) { _, _ in
             selection = nil
@@ -132,6 +139,6 @@ struct ResultPlanComparisonTool: View {
             return
         }
         selectionError = nil
-        selection = value
+        selection = value.withCoreLayerContext(plans.coreLayerContext)
     }
 }

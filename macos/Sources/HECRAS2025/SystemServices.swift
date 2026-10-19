@@ -184,10 +184,13 @@ final class MacSystemServices: WorkspaceSystemServices {
     }
     func chooseMapLayer() -> URL? {
         let panel = NSOpenPanel(); panel.title = L10n.text("Add Map Layer")
-        panel.canChooseFiles = true; panel.canChooseDirectories = false
+        // A File Geodatabase is a directory package, while its manifest/data
+        // members may be selected in Finder-style navigation. Accept either
+        // and normalize the result to the containing .gdb root downstream.
+        panel.canChooseFiles = true; panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.json, .tiff, UTType(filenameExtension: "geojson") ?? .data,
-                                     UTType(filenameExtension: "shp") ?? .data]
+                                     UTType(filenameExtension: "shp") ?? .data, .data]
         return panel.runModal() == .OK ? panel.url : nil
     }
     func chooseConnectionFile() -> URL? {

@@ -14,6 +14,7 @@ struct PlanAnalysisProjectCapture: Codable, Hashable, Sendable {
     let projectRevision: String
     let projectXml: String
     let projectXmlFingerprint: String
+    var coreLayerContext: CoreLayerRequestContext? = nil
 
     @MainActor
     static func capture(store: WorkspaceStore) -> (projectSessionID: UUID, capture: Self)? {
@@ -21,7 +22,8 @@ struct PlanAnalysisProjectCapture: Codable, Hashable, Sendable {
               let revision = document.sourceRevision else { return nil }
         let xml = document.editorXML(overridingDescription: store.descriptionDraft)
         return (store.projectSessionID, .init(projectPath: SourceFilePaths.canonical(url),
-            projectRevision: revision, projectXml: xml, projectXmlFingerprint: fingerprint(xml)))
+            projectRevision: revision, projectXml: xml, projectXmlFingerprint: fingerprint(xml),
+            coreLayerContext: store.captureCoreLayerRequestContext()))
     }
 
     static func fingerprint(_ xml: String) -> String {
@@ -36,7 +38,9 @@ struct PlanAnalysisProjectCapture: Codable, Hashable, Sendable {
               samePlanAnalysisPath(SourceFilePaths.canonical(url), projectPath),
               revision.caseInsensitiveCompare(projectRevision) == .orderedSame else { return false }
         let currentXML = document.editorXML(overridingDescription: store.descriptionDraft)
-        return currentXML == projectXml && Self.fingerprint(currentXML).caseInsensitiveCompare(
+        return currentXML == projectXml &&
+            store.captureCoreLayerRequestContext()?.identityToken == coreLayerContext?.identityToken &&
+            Self.fingerprint(currentXML).caseInsensitiveCompare(
             projectXmlFingerprint) == .orderedSame
     }
 }

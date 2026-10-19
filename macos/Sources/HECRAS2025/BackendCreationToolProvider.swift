@@ -11,6 +11,7 @@ final class BackendCreationToolProvider: ToolProvider {
     var onRunningChanged: (@MainActor (Bool) -> Void)?
     var onCreated: (@MainActor (ProjectAsset, Bool) -> Void)?
     var projectXML: @MainActor () -> String? = { nil }
+    var coreLayerContext: @MainActor () -> CoreLayerRequestContext? = { nil }
 
     init(client: BackendProcessClient? = nil) {
         self.client = client ?? BackendProcessClient(executableURL: Bundle.main.bundleURL
@@ -30,7 +31,8 @@ final class BackendCreationToolProvider: ToolProvider {
         guard let project, let url = project.url, request.context?.projectSessionID == projectSessionID else {
             throw BackendServiceError(code: "sourceChanged", message: "Open a saved project before creating a model.")
         }
-        return Request(kind: kind, projectPath: url.path, projectXml: projectXML() ?? project.editorXML, fields: request.fields)
+        return Request(kind: kind, projectPath: url.path, projectXml: projectXML() ?? project.editorXML,
+            fields: request.fields, coreLayerContext: coreLayerContext())
     }
     func prepare(_ request: ToolRequest) async throws -> DataToolPresentation {
         guard !executing else { throw DataToolError.unavailable }
@@ -79,6 +81,7 @@ final class BackendCreationToolProvider: ToolProvider {
     private struct Request: Encodable, Equatable, Sendable {
         let kind: String; let projectPath: String; let projectXml: String
         let fields: [String: String]; var revision: String? = nil
+        var coreLayerContext: CoreLayerRequestContext? = nil
     }
     private struct Choice: Decodable, Sendable { let id: String; let title: String }
     private static func parseDate(_ value: String) -> Date? {

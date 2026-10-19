@@ -403,7 +403,8 @@ public static partial class ModelEditorAdapter
     }
 
     private static ModelRequest ToModelRequest(GeometryMeshModelRequest model) =>
-        new(model.AssetPath, model.Kind, model.ProjectPath, model.ProjectXml);
+        new(model.AssetPath, model.Kind, model.ProjectPath, model.ProjectXml,
+            CoreLayerContext: model.CoreLayerContext);
 
     private static void VerifyGeometryMeshModel(GeometryMeshModelRequest model)
     {
@@ -459,50 +460,104 @@ public static partial class ModelEditorAdapter
     }
 
     private static async Task<GeometryMeshGenerationReport?> ApplyGeometryMeshMutationsAsync(ModelContext context,
-        string assetPath, string revision, GeometryMeshDraftState state, bool replayPropertyTableComputations)
+        string assetPath, string revision, GeometryMeshDraftState state, bool replayPropertyTableComputations,
+        Action<BackendOperationProgress>? report = null,
+        BackendDuplexControlReader? duplexControls = null)
     {
         if (Revision(assetPath) != revision) throw new SourceFileChangedException();
         GeometryMeshGenerationReport? generation = null;
-        foreach (GeometryMeshMutation mutation in state.Mutations)
+        bool hasPropertyTableReplay = replayPropertyTableComputations &&
+            state.Mutations.Any(mutation => mutation.Operation == "computePropertyTables");
+        ProgressReporter? replayReporter = null;
+        CancellationTokenSource? stopControls = null;
+        Task? controlPump = null;
+        if (hasPropertyTableReplay)
         {
-            // Prepare is a request marker, not a replayed mutation. The parent
-            // invokes the actual source workflow after all geometry drafts.
-            if (mutation.Operation == "prepare") continue;
-            if (mutation.Operation == "computePropertyTables")
+            ProgressReporter currentReplayReporter = new();
+            replayReporter = currentReplayReporter;
+            currentReplayReporter.ProgressReported += (sender, percent) => report?.Invoke(new BackendOperationProgress(
+                Fraction: Math.Clamp(percent / 100.0, 0, 1), TaskName: sender.FullyQualifiedTaskName));
+            currentReplayReporter.MessageReported += (sender, message) => report?.Invoke(new BackendOperationProgress(
+                Message: message.EvaluatedMessage, TaskName: sender.FullyQualifiedTaskName));
+            report?.Invoke(new BackendOperationProgress(TaskName: "Replaying Geometry property-table computation"));
+            if (duplexControls is not null)
             {
-                // Ordinary previews only retain the user's successful source
-                // computation intent. Replaying it there would repeatedly run
-                // the expensive terrain/mesh algorithm. It runs in order once
-                // in the parent's isolated staged HDF context.
-                if (!replayPropertyTableComputations) continue;
-                var (geometry, _) = GeometryMeshTopologyFor(context);
-                if (!geometry.CanMutate)
-                    throw new NotSupportedException("This geometry is a result or is currently being updated and cannot be edited.");
-                var replayJob = new BatchJob(new ProgressReporter(),
-                    "Processing property tables for " + geometry.Name);
-                OperationResult result = await geometry.FlowAreaLayer.ComputePropertyTablesAsync(replayJob)
-                    .ConfigureAwait(false);
-                replayJob.MarkComplete(result.Result);
-                if (!result.Result)
-                    throw new InvalidOperationException("Property table computation failed: "
-                        + result.GetConcatenatedMessages("; "));
-                continue;
+                CancellationTokenSource currentStopControls = new();
+                stopControls = currentStopControls;
+                controlPump = Task.Run(async () =>
+                {
+                    await foreach (BackendDuplexControlFrame frame in duplexControls
+                                       .ReadAllAsync(currentStopControls.Token).ConfigureAwait(false))
+                    {
+                        if (frame.Control.TryGetProperty("type", out JsonElement typeValue) &&
+                            string.Equals(typeValue.GetString(), "cancel", StringComparison.Ordinal))
+                            currentReplayReporter.RequestCancel();
+                    }
+                }, currentStopControls.Token);
             }
-            if (mutation.Operation == "generate")
+        }
+
+        try
+        {
+            foreach (GeometryMeshMutation mutation in state.Mutations)
             {
-                if (mutation.GeneratedMeshPayload is null || mutation.GeneratedReport is null
-                    || !mutation.GeneratedReport.MeshWasReplaced)
-                    throw new InvalidOperationException("The mesh draft does not contain the exact generated preview.");
-                ApplyGeometryMeshArtifact(context, mutation.GeneratedMeshPayload, mutation.GeneratedReport);
-                generation = mutation.GeneratedReport;
-                string actual = GeometryMeshFlowAreaFingerprint(context);
-                if (!string.Equals(actual, mutation.ExpectedMeshFingerprint, StringComparison.Ordinal))
-                    throw new InvalidOperationException("The saved mesh preview payload failed its source fingerprint check.");
+                // Prepare is a request marker, not a replayed mutation. The parent
+                // invokes the actual source workflow after all geometry drafts.
+                if (mutation.Operation == "prepare") continue;
+                if (mutation.Operation == "computePropertyTables")
+                {
+                    // Ordinary previews retain the user's successful source computation
+                    // intent. Chart reads replay it in an isolated ModelContext so an
+                    // unsaved child draft can be plotted without committing its source HDF.
+                    if (!replayPropertyTableComputations) continue;
+                    var (geometry, _) = GeometryMeshTopologyFor(context);
+                    if (!geometry.CanMutate)
+                        throw new NotSupportedException("This geometry is a result or is currently being updated and cannot be edited.");
+                    ProgressReporter reporter = replayReporter ?? new ProgressReporter();
+                    var replayJob = new BatchJob(reporter,
+                        "Processing property tables for " + geometry.Name);
+                    OperationResult result = await geometry.FlowAreaLayer.ComputePropertyTablesAsync(replayJob)
+                        .ConfigureAwait(false);
+                    replayJob.MarkComplete(result.Result);
+                    if (!result.Result)
+                    {
+                        bool cancelled = reporter.CancelRequested || result.Messages.Any(message =>
+                            string.Equals(message.MessageType.Code, "Generic_TaskCancelled", StringComparison.Ordinal));
+                        if (cancelled) throw new PropertyTableReplayCancelledException();
+                        throw new InvalidOperationException("Property table computation failed: "
+                            + result.GetConcatenatedMessages("; "));
+                    }
+                    continue;
+                }
+                if (mutation.Operation == "generate")
+                {
+                    if (mutation.GeneratedMeshPayload is null || mutation.GeneratedReport is null
+                        || !mutation.GeneratedReport.MeshWasReplaced)
+                        throw new InvalidOperationException("The mesh draft does not contain the exact generated preview.");
+                    ApplyGeometryMeshArtifact(context, mutation.GeneratedMeshPayload, mutation.GeneratedReport);
+                    generation = mutation.GeneratedReport;
+                    string actual = GeometryMeshFlowAreaFingerprint(context);
+                    if (!string.Equals(actual, mutation.ExpectedMeshFingerprint, StringComparison.Ordinal))
+                        throw new InvalidOperationException("The saved mesh preview payload failed its source fingerprint check.");
+                }
+                else _ = ApplyGeometryMeshMutation(context, mutation);
             }
-            else _ = ApplyGeometryMeshMutation(context, mutation);
+        }
+        finally
+        {
+            if (stopControls is not null)
+            {
+                stopControls.Cancel();
+                try { if (controlPump is not null) await controlPump.ConfigureAwait(false); }
+                catch (OperationCanceledException) when (stopControls.IsCancellationRequested) { }
+                finally { stopControls.Dispose(); }
+            }
         }
         return generation;
     }
+
+    private sealed class PropertyTableReplayCancelledException()
+        : OperationCanceledException("The Geometry property-table replay was cancelled.");
 
     private static bool ApplyGeometryMeshMutation(ModelContext context, GeometryMeshMutation mutation)
     {

@@ -56,7 +56,12 @@ public static partial class ModelEditorAdapter
                 return new MapResultCulvertBarrel(
                     "barrel:source:" + ordinal.ToString(CultureInfo.InvariantCulture), ordinal,
                     barrel.Name ?? string.Empty,
-                    barrel.Polyline.Points.Select(point => new MapResultCulvertCoordinate(point.X, point.Y)).ToArray());
+                    barrel.Polyline.Points.Select(point => new MapResultCulvertCoordinate(point.X, point.Y)).ToArray(),
+                    barrel.BarrelPropertyName ?? string.Empty,
+                    barrel.UpstreamInvert.ToString("R", CultureInfo.InvariantCulture),
+                    barrel.DownstreamInvert.ToString("R", CultureInfo.InvariantCulture),
+                    barrel.UpstreamOpeningName ?? string.Empty,
+                    barrel.DownstreamOpeningName ?? string.Empty);
             }).ToArray();
         }
 

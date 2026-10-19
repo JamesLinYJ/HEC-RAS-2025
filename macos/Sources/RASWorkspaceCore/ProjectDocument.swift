@@ -34,19 +34,21 @@ public enum ProjectSection: String, CaseIterable, Codable, Identifiable, Sendabl
 public struct ProjectAsset: Identifiable, Hashable, Sendable {
     public let url: URL
     public let section: ProjectSection
+    public let displayName: String?
     // Freeze identity while the entry exists. Foundation path standardization
     // can resolve /var differently after the file is moved to Trash; selection
     // and editor dictionaries must keep the original key during cleanup.
     public let id: String
-    public var name: String { url.deletingPathExtension().lastPathComponent }
+    public var name: String { displayName ?? url.deletingPathExtension().lastPathComponent }
     // The project browser also lists backing rasters and vectors. Retained
     // model collections load HDF files; those inputs are not model choices.
     public var isModelFile: Bool {
         [.plans, .results, .geometries, .terrains, .surfaceLayers, .boundaryConditions].contains(section)
             && url.pathExtension.lowercased() == "h5"
     }
-    public init(url: URL, section: ProjectSection) {
-        self.url = url; self.section = section; self.id = url.standardizedFileURL.path
+    public init(url: URL, section: ProjectSection, displayName: String? = nil) {
+        self.url = url; self.section = section; self.displayName = displayName
+        self.id = url.standardizedFileURL.path
     }
 }
 

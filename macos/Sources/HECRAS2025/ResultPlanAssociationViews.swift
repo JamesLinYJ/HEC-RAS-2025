@@ -17,6 +17,7 @@ struct ResultPlanAssociationPanel: View {
     private var identity: String {
         [snapshot?.projectPath ?? "", snapshot?.projectRevision ?? "",
          snapshot?.resultPath ?? "", snapshot?.revision ?? "",
+         session.coreLayerContext?.identityToken ?? "",
          snapshot?.candidateGroups.flatMap(\.results).map(\.id).joined(separator: "\n") ?? ""]
             .joined(separator: "\n")
     }
@@ -77,7 +78,7 @@ struct ResultPlanAssociationPanel: View {
     private func finishPicker() {
         guard let selection = pendingSelection else { return }
         pendingSelection = nil
-        onLinkedResultSelection(selection)
+        onLinkedResultSelection(selection.withCoreLayerContext(session.coreLayerContext))
     }
 
     private var header: some View {

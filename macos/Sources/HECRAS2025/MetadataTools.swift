@@ -3,6 +3,8 @@ import SwiftUI
 struct AttributeToolContext: Sendable {
     let modelAssetID: String
     let tableID: String
+    var projectSessionID: UUID? = nil
+    var parentEditorSessionID: UUID? = nil
     var columnID: String? = nil
 }
 enum TagValueType: String, Sendable { case string = "String", integer = "Integer", numeric = "Numeric", boolean = "Boolean" }

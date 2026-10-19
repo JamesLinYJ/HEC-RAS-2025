@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Xml.Linq;
 using Ras.Layers;
 using Ras.Observables;
 using Utility.Files;
@@ -15,7 +14,8 @@ public sealed record GeometryBackupRestoreRequest(
     string ExpectedBackupRevision,
     string ParentGeometryPath,
     string ExpectedParentGeometryRevision,
-    string ExpectedProjectRevision);
+    string ExpectedProjectRevision,
+    CoreLayerRequestContext? CoreLayerContext = null);
 
 public sealed record GeometryBackupRestoreReceipt(
     string ProjectPath,
@@ -37,7 +37,8 @@ public sealed record GeometryNamedBackupRequest(
     string GeometryPath,
     string GeometryCanonicalPath,
     string ExpectedGeometryRevision,
-    string Name);
+    string Name,
+    CoreLayerRequestContext? CoreLayerContext = null);
 
 public sealed record GeometryNamedBackupReceipt(
     string ProjectPath,
@@ -199,12 +200,12 @@ public static class GeometryBackupService
             !HashEquals(projectFileBefore.Revision, request.ExpectedProjectRevision))
             throw new SourceFileChangedException();
 
-        Project project = new(projectPath);
+        Project project = CoreLayerImportService.OpenProject(projectPath, request.ProjectXml,
+            request.CoreLayerContext);
         string? createdBackupPath = null;
         string? expectedBackupDirectory = null;
         try
         {
-            project.ApplyEditorMetadata(XElement.Parse(request.ProjectXml));
             var observableProject = new ObservableProject(project, Utility.SynchronizationContext.None);
             ObservableGeometry[] matches = observableProject.Geometries.Where(geometry =>
                 PathComparer.Equals(SourceFilePaths.Canonical(geometry.Filename), geometryCanonicalPath)).ToArray();
@@ -378,10 +379,10 @@ public static class GeometryBackupService
             string projectPath = Path.GetFullPath(request.ProjectPath);
             if (!File.Exists(projectPath)) throw new FileNotFoundException("The project file was not found.", projectPath);
 
-            Project = new Project(projectPath);
+            Project = CoreLayerImportService.OpenProject(projectPath, request.ProjectXml,
+                request.CoreLayerContext);
             try
             {
-                Project.ApplyEditorMetadata(XElement.Parse(request.ProjectXml));
                 Geometry[] matches = Project.Geometries.Where(item =>
                     SourceFilePaths.SameSourceFile(item.Filename, request.ParentGeometryPath)).ToArray();
                 if (matches.Length != 1) throw new SourceFileChangedException();

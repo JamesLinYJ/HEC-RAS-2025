@@ -134,11 +134,12 @@ public static class MapWindVelocityFieldService
                 StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
 
-        Project project = new(projectPath);
+        Project project = CoreLayerImportService.OpenProjectWithMetadata(projectPath,
+            ParseProjectXml(request.Map.ProjectXml
+                ?? throw new ArgumentException("The current project XML context is unavailable.", nameof(request))),
+            request.Map.CoreLayerContext);
         try
         {
-            project.ApplyEditorMetadata(ParseProjectXml(request.Map.ProjectXml
-                ?? throw new ArgumentException("The current project XML context is unavailable.", nameof(request))));
             BoundaryCondition boundary = project.BoundaryConditions.SingleOrDefault(condition =>
                 PathEquals(condition.Filename, boundaryPath) &&
                 string.Equals(condition.Name, request.BoundaryNode.NodeName, StringComparison.Ordinal))

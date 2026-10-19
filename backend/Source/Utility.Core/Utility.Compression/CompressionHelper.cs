@@ -140,7 +140,7 @@ public static class CompressionHelper
 		}
 	}
 
-	public static void ZipDirectory(string sourceDirectoryName, string destinationArchiveFileName, CompressionLevel baseCompressionLevel, Func<string, bool> includeFilePredicate, Func<string, bool> compressFilePredicate, ProgressReporter reporter = null)
+	public static void ZipDirectory(string sourceDirectoryName, string destinationArchiveFileName, CompressionLevel baseCompressionLevel, Func<string, bool> includeFilePredicate, Func<string, bool> compressFilePredicate, ProgressReporter? reporter = null)
 	{
 		if (string.IsNullOrEmpty(sourceDirectoryName))
 		{

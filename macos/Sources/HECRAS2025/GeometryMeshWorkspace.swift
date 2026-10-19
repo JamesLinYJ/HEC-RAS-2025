@@ -13,7 +13,7 @@ struct GeometryMeshWorkspacePage: View {
     @State private var section = "Flow Areas"
     @State private var isPreparingAndSaving = false
 
-    private let sections = ["Flow Areas", "Mesh Map", "Regions", "Mesh Diagnostics", "Prepare Summary"]
+    private let sections = ["Flow Areas", "Mesh Map", "Mesh Tools", "Regions", "Mesh Diagnostics", "Prepare Summary"]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -115,6 +115,8 @@ struct GeometryMeshWorkspacePage: View {
                 case "Mesh Map": GeometryMeshMapWorkspaceView(session: session, store: store, navigate: navigate,
                     selectTopologyFeatures: selectTopologyFeatures,
                     showDiagnostics: { section = "Mesh Diagnostics" })
+                case "Mesh Tools": GeometryMeshToolsWorkspaceView(session: session, store: store,
+                    onFindCompleted: { section = "Mesh Map" })
                 case "Regions": GeometryMeshRegionsView(session: session)
                 case "Mesh Diagnostics": GeometryMeshDiagnosticsView(session: session, store: store, section: $section)
                 default: GeometryMeshPrepareSummaryView(session: session, store: store)

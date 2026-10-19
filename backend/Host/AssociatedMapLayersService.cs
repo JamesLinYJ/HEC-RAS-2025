@@ -47,12 +47,13 @@ public static class AssociatedMapLayersService
         MapTreeRequest selectedMap = request.Map;
         MapTreeSnapshot mapTree;
 
-        Project project = new(projectAliasPath);
+        Project project = CoreLayerImportService.OpenProjectWithMetadata(projectAliasPath,
+            request.Map.ProjectXml is { Length: > 0 } projectXml
+                ? XElement.Parse(projectXml, LoadOptions.PreserveWhitespace) : null,
+            request.Map.CoreLayerContext);
         ResolvedMapResultContext? resultContext = null;
         try
         {
-            if (request.Map.ProjectXml is { Length: > 0 } projectXml)
-                project.ApplyEditorMetadata(XElement.Parse(projectXml, LoadOptions.PreserveWhitespace));
 
             CatalogTreeNodeLocator[] requestedPlans = request.PlanNodes ?? [];
             MapResultGeometryOwner[] requestedResultOwners = request.ResultOwners ?? [];
@@ -1142,6 +1143,7 @@ public static class AssociatedMapLayersService
         AddToken(material, projectRevision);
         AddToken(material, projectXmlSHA);
         AddToken(material, visualizationRevision);
+        AddToken(material, request.Map.CoreLayerContext?.IdentityToken ?? "");
         AddToken(material, request.Width.ToString(CultureInfo.InvariantCulture));
         AddToken(material, request.Height.ToString(CultureInfo.InvariantCulture));
         AddToken(material, Number(request.Viewport.MinX));

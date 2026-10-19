@@ -123,6 +123,9 @@ public static class WorkspaceFileImportService
         string importKind;
         using (var reader = new H5Reader(sourcePath))
         {
+            if (!reader.SuccessfullyOpened)
+                throw new InvalidDataException("The selected file is not a readable HDF5 file.");
+
             Project.LoadProjectMetadataFromH5Header(reader, out projectName, out wkt, out units);
             // This order matches RasMainWindow.TryOpenQuickProjectFromCoreFile.
             // Some HDF files contain more than one recognized group; the source

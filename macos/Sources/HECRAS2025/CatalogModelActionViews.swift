@@ -26,6 +26,7 @@ private struct CatalogModelActionLoadIdentity: Hashable, Sendable {
     let projectXML: String?
     let projectSessionID: UUID
     let assetsRevision: Int
+    let coreLayerContext: CoreLayerRequestContext?
 }
 
 @MainActor
@@ -41,12 +42,14 @@ final class CatalogModelActionSession: ObservableObject {
     init(provider: BackendCatalogModelActionProvider?) { self.provider = provider }
 
     func inspect(asset: ProjectAsset, kind: String, projectPath: URL,
-                 projectXML: String, projectSessionID: UUID, assetsRevision: Int) async {
+                 projectXML: String, projectSessionID: UUID, assetsRevision: Int,
+                 coreLayerContext: CoreLayerRequestContext?) async {
         requestRevision += 1
         let generation = requestRevision
         let identity = CatalogModelActionLoadIdentity(assetID: asset.id, kind: kind,
             projectPath: CatalogModelActionDigest.canonical(projectPath), projectXML: projectXML,
-            projectSessionID: projectSessionID, assetsRevision: assetsRevision)
+            projectSessionID: projectSessionID, assetsRevision: assetsRevision,
+            coreLayerContext: coreLayerContext)
         requestIdentity = identity
         inspection = nil; error = nil; isLoading = true
         defer { if generation == requestRevision { isLoading = false } }
@@ -61,7 +64,8 @@ final class CatalogModelActionSession: ObservableObject {
             }.value
             let request = CatalogModelActionRequest(projectPath: projectPath.path,
                 projectXml: projectXML, assetPath: asset.url.path, kind: kind,
-                expectedAssetSHA: revision, action: "inspect", name: nil)
+                expectedAssetSHA: revision, action: "inspect", name: nil,
+                coreLayerContext: coreLayerContext)
             let snapshot = try await provider.inspect(request)
             guard generation == requestRevision, !Task.isCancelled,
                   requestIdentity == identity else { return }
@@ -79,11 +83,13 @@ final class CatalogModelActionSession: ObservableObject {
 
     func perform(asset: ProjectAsset, kind: String, projectPath: URL,
                  projectXML: String, projectSessionID: UUID, assetsRevision: Int,
+                 coreLayerContext: CoreLayerRequestContext?,
                  action: String, name: String?) async throws -> CatalogModelActionReceipt {
         guard let provider else { throw CatalogModelActionPresentationError.unavailable }
         let identity = CatalogModelActionLoadIdentity(assetID: asset.id, kind: kind,
             projectPath: CatalogModelActionDigest.canonical(projectPath), projectXML: projectXML,
-            projectSessionID: projectSessionID, assetsRevision: assetsRevision)
+            projectSessionID: projectSessionID, assetsRevision: assetsRevision,
+            coreLayerContext: coreLayerContext)
         guard requestIdentity == identity,
               let inspection,
               inspection.kind == kind,
@@ -103,7 +109,8 @@ final class CatalogModelActionSession: ObservableObject {
         }
         let request = CatalogModelActionRequest(projectPath: projectPath.path,
             projectXml: projectXML, assetPath: asset.url.path, kind: kind,
-            expectedAssetSHA: inspection.revision, action: action, name: name)
+            expectedAssetSHA: inspection.revision, action: action, name: name,
+            coreLayerContext: coreLayerContext)
         return try await provider.perform(request)
     }
 
@@ -157,7 +164,8 @@ struct CatalogModelActionBar: View {
         CatalogModelActionLoadIdentity(assetID: asset.id, kind: kind,
             projectPath: projectURL.map(CatalogModelActionDigest.canonical),
             projectXML: projectXML, projectSessionID: store.projectSessionID,
-            assetsRevision: store.assetsRevision)
+            assetsRevision: store.assetsRevision,
+            coreLayerContext: store.captureCoreLayerRequestContext())
     }
     private var availableActions: Set<String> { Set(session.inspection?.availableActions ?? []) }
     private var canManage: Bool {
@@ -219,7 +227,8 @@ struct CatalogModelActionBar: View {
             }
             await session.inspect(asset: asset, kind: kind, projectPath: projectURL,
                 projectXML: projectXML, projectSessionID: store.projectSessionID,
-                assetsRevision: store.assetsRevision)
+                assetsRevision: store.assetsRevision,
+                coreLayerContext: store.captureCoreLayerRequestContext())
         }
         .alert("Catalog Action", isPresented: Binding(
             get: { actionError != nil || session.error != nil },
@@ -238,7 +247,8 @@ struct CatalogModelActionBar: View {
         }
         await session.inspect(asset: asset, kind: kind, projectPath: projectURL,
             projectXML: projectXML, projectSessionID: store.projectSessionID,
-            assetsRevision: store.assetsRevision)
+            assetsRevision: store.assetsRevision,
+            coreLayerContext: store.captureCoreLayerRequestContext())
     }
 
     private func present(_ intent: CatalogModelActionIntent) {

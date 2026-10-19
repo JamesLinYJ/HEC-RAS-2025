@@ -14,6 +14,7 @@ namespace Ras.Backend;
 public sealed record TerrainInputExtent(double MinX, double MaxX, double MinY, double MaxY);
 public sealed record TerrainMapCoordinate(double X, double Y);
 public sealed record TerrainMapFeature(string Id, string TableId, TerrainMapCoordinate[] Points, string Kind = "line");
+public sealed record TerrainLeveePropertyForceSet(string Command, string Value, string[] RowIDs);
 public sealed record TerrainInputData(string Id, string Scope, string Name, string Type, string? Filename, string? Schema, string? Error,
     TerrainInputExtent? ValidExtent = null, int? OverviewCount = null, string[]? Overviews = null);
 public sealed record TerrainTableColumnData(string Id, string Title, string SourceType, bool ReadOnly = false,
@@ -31,7 +32,8 @@ public sealed record TerrainEditorData(
     Dictionary<string, SourceEditorChoice[]>? FieldChoices = null,
     Dictionary<string, string[]>? TextSuggestions = null);
 public sealed record TerrainTransformRequest(ModelSaveRequest Model, string Operation, string? ItemId = null, int? From = null, int? To = null,
-    string? InputKind = null, TerrainInputExtent? HintExtent = null, string? TableId = null, string[]? RowIDs = null);
+    string? InputKind = null, TerrainInputExtent? HintExtent = null, string? TableId = null, string[]? RowIDs = null,
+    TerrainLeveePropertyForceSet? LeveeForceSet = null);
 public sealed record TerrainMapRequest(ModelSaveRequest Model, string? InputId = null);
 public sealed record TerrainMapData(SpatialGridPreview? Raster, SpatialGridPreview? SelectedRaster = null,
     string? InputId = null, string? SourceRevision = null, TerrainMapFeature[]? Features = null);
@@ -1668,6 +1670,37 @@ public static partial class ModelEditorAdapter
                     throw new ArgumentException("Levee property names must identify distinct property sets.");
             }
         }
+        private void ForceSetLeveeProperty(TerrainLeveePropertyForceSet request)
+        {
+            const string changedSelection = "The selected Levee property sets changed. Select them again before applying this value.";
+            string[] requestedIDs = request.RowIDs ?? [];
+            string[] capturedIDs = selectedRows.GetValueOrDefault(LeveePropertyTable) ?? [];
+            if (requestedIDs.Length == 0 || requestedIDs.Distinct(StringComparer.Ordinal).Count() != requestedIDs.Length
+                || capturedIDs.Length != requestedIDs.Length
+                || !capturedIDs.ToHashSet(StringComparer.Ordinal).SetEquals(requestedIDs))
+                throw new ArgumentException(changedSelection);
+            if (selected == null || !inputs.TryGetValue(selected, out ITerrainInput? selectedInput)
+                || selectedInput is not LeveeModTerrainInput selectedLevee
+                || !TryResolveLeveeProperties(requestedIDs, out LeveeModTerrainInput owner, out LeveeModProperties[] properties)
+                || !ReferenceEquals(owner, selectedLevee) || properties.Length != requestedIDs.Length)
+                throw new ArgumentException(changedSelection);
+
+            switch (request.Command)
+            {
+                case "forceSetMode":
+                    if (!Enum.TryParse(request.Value, ignoreCase: false, out LeveeMode mode) || !Enum.IsDefined(mode))
+                        throw new ArgumentException("Invalid levee mode.");
+                    foreach (LeveeModProperties property in properties) property.Mode = mode;
+                    break;
+                case "forceSetModType":
+                    if (!Enum.TryParse(request.Value, ignoreCase: false, out Geospatial.Rasters.RasterModType modType) || !Enum.IsDefined(modType))
+                        throw new ArgumentException("Invalid levee modification type.");
+                    foreach (LeveeModProperties property in properties) property.ModType = modType;
+                    break;
+                default:
+                    throw new ArgumentException("Unknown Levee ForceSet command.");
+            }
+        }
         public void Apply(Dictionary<string, string> fields)
         {
             var expected = Fields(); var readOnly = ReadOnlyFields().ToHashSet(StringComparer.Ordinal);
@@ -1768,6 +1801,8 @@ public static partial class ModelEditorAdapter
                 CopyRows(request.TableId ?? throw new ArgumentException("The terrain table is missing."), request.RowIDs ?? []);
             else if (request.Operation == "removeRows")
                 RemoveRows(request.TableId ?? throw new ArgumentException("The terrain table is missing."), request.RowIDs ?? []);
+            else if (request.Operation == "forceSetLeveeProperty")
+                ForceSetLeveeProperty(request.LeveeForceSet ?? throw new ArgumentException("The Levee ForceSet request is missing."));
             else if (request.Operation == "selectRows")
             {
                 string tableID = request.TableId ?? throw new ArgumentException("The terrain table is missing.");

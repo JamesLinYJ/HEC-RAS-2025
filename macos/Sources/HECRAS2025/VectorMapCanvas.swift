@@ -1,5 +1,47 @@
+import AppKit
 import RASWorkspaceCore
 import SwiftUI
+
+enum MapVectorPlotFrameBinding {
+    static func visibleWorldViewport(transform: MapTransform,
+                                     size: CGSize) -> MapVectorPlotViewport? {
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0,
+              transform.factor.isFinite, transform.factor > 0 else { return nil }
+        let first = transform.world(.zero)
+        let second = transform.world(CGPoint(x: size.width, y: size.height))
+        let viewport = MapVectorPlotViewport(minX: min(first.x, second.x),
+            minY: min(first.y, second.y), maxX: max(first.x, second.x),
+            maxY: max(first.y, second.y))
+        return viewport.isFiniteAndOrdered ? viewport : nil
+    }
+
+    static func currentFrame(_ frame: VectorPlotRenderedLayer,
+                             mapID: UUID, layerID: String,
+                             sourceRevision: String?,
+                             expectedVisualizationRevision: String,
+                             requestedViewport: RasterMapViewExtent?,
+                             liveViewport: MapVectorPlotViewport?) -> VectorPlotRenderedLayer? {
+        guard let sourceRevision, !sourceRevision.isEmpty,
+              !expectedVisualizationRevision.isEmpty,
+              let requestedViewport, let liveViewport,
+              requestedViewport.minX.isFinite, requestedViewport.minY.isFinite,
+              requestedViewport.maxX.isFinite, requestedViewport.maxY.isFinite,
+              requestedViewport.minX < requestedViewport.maxX,
+              requestedViewport.minY < requestedViewport.maxY,
+              requestedViewport.pixelWidth > 0, requestedViewport.pixelHeight > 0 else { return nil }
+        let requestedWorld = MapVectorPlotViewport(minX: requestedViewport.minX,
+            minY: requestedViewport.minY, maxX: requestedViewport.maxX,
+            maxY: requestedViewport.maxY)
+        guard requestedWorld.matches(liveViewport),
+              frame.matches(mapID: mapID, layerID: layerID,
+                  sourceRevision: sourceRevision,
+                  visualizationRevision: expectedVisualizationRevision,
+                  viewport: requestedWorld,
+                  pixelWidth: requestedViewport.pixelWidth,
+                  pixelHeight: requestedViewport.pixelHeight) else { return nil }
+        return frame
+    }
+}
 
 struct MapViewportFit {
     let scale: CGFloat
@@ -117,18 +159,50 @@ struct VectorMapCanvas: View {
     @ObservedObject private var renderScaling = WorkspaceRenderScaling.shared
     @ObservedObject var store: WorkspaceStore
     @ObservedObject var mapState: MapState
+    @Environment(\.openWindow) private var openWindow
     let mapID: UUID
     let scale: CGFloat
     let offset: CGSize
     @Binding var pointer: MapPoint?
     var orderedLayers: [MapVectorLayer]? = nil
+    /// Exact source renderer replacements keyed by the original visual-layer
+    /// identity. They remain presentation-only and never enter map selection.
+    var plotFrames: [String: VectorPlotRenderedLayer] = [:]
+    /// The camera request used to produce `plotFrames`; pixel dimensions are
+    /// the bounded source request dimensions, not SwiftUI logical points.
+    var plotViewport: RasterMapViewExtent? = nil
+    /// Fully drawn source layers can be replaced by an exact transient overlay
+    /// while remaining present for source hit-testing, selection, and editing.
+    var suppressedDrawingLayerIDs: Set<String> = []
     private var visibleLayers: [MapVectorLayer] { orderedLayers ?? mapState.visibleVectors(store.mapLayers) }
+    private var featureActionCoordinator: MapVectorFeatureActionCoordinator {
+        MapVectorFeatureActionCoordinator(store: store, mapState: mapState, mapID: mapID)
+    }
     var body: some View {
         GeometryReader { proxy in
+            let actionCoordinator = featureActionCoordinator
+            let activeVectorLayers = visibleLayers
             let transform = MapTransform(points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers), size: proxy.size, scale: scale, offset: offset)
+            let requestedPlotViewport = plotViewport ?? mapState.resultViewport
+            let livePlotViewport = MapVectorPlotFrameBinding.visibleWorldViewport(
+                transform: transform, size: proxy.size)
+            let expectedVisualizationRevision = store.mapIdentityRequest(for: mapID)?.expectedVisualizationRevision
             let renderFactor = renderScaling.factor
             Canvas { context, _ in
-                for layer in visibleLayers {
+                for layer in activeVectorLayers {
+                    let frame: VectorPlotRenderedLayer? = plotFrames[layer.id].flatMap { candidate -> VectorPlotRenderedLayer? in
+                        guard let expectedVisualizationRevision else { return nil }
+                        return MapVectorPlotFrameBinding.currentFrame(candidate,
+                            mapID: mapID, layerID: layer.id,
+                            sourceRevision: layer.sourceRevision,
+                            expectedVisualizationRevision: expectedVisualizationRevision,
+                            requestedViewport: requestedPlotViewport,
+                            liveViewport: livePlotViewport)
+                    }
+                    let drawsBaseLayer = !suppressedDrawingLayerIDs.contains(layer.id) && frame == nil
+                    if let frame, let viewport = requestedPlotViewport {
+                        Self.draw(frame, viewport: viewport, transform: transform, in: &context)
+                    }
                     for feature in layer.features {
                         let definitionID = MapVectorStyleDefinitionIDs.primaryDefinition(for: feature.kind)
                         let style = MapVectorStyleResolver.values(layerID: layer.id, feature: feature,
@@ -139,20 +213,22 @@ struct VectorMapCanvas: View {
                         let fillColor = MapVectorStyleResolver.fillColor(style, definitionID: definitionID)
                         let lineWidth = WorkspaceRenderScaling.metric(Double(Self.safeLineWidth(style.penWidth)), factor: renderFactor)
                         let selected = layer.id == mapState.selectedLayerID && mapState.selectedFeatureIdentities.contains(feature.stableIdentity)
-                        if feature.kind == .polygon { context.fill(path, with: .color(fillColor), style: FillStyle(eoFill: true)) }
-                        if feature.kind == .point { context.fill(path, with: .color(fillColor)) }
-                        context.stroke(path, with: .color(penColor), lineWidth: lineWidth)
+                        if drawsBaseLayer {
+                            if feature.kind == .polygon { context.fill(path, with: .color(fillColor), style: FillStyle(eoFill: true)) }
+                            if feature.kind == .point { context.fill(path, with: .color(fillColor)) }
+                            context.stroke(path, with: .color(penColor), lineWidth: lineWidth)
 
-                        if let vertexDefinitionID = MapVectorStyleDefinitionIDs.vertexDefinition(for: feature.kind) {
-                            let vertexStyle = MapVectorStyleResolver.values(layerID: layer.id, feature: feature,
-                                definitionID: vertexDefinitionID, presentations: mapState.vectorStyles)
-                            let vertexPaths = feature.kind == .polygon
-                                ? feature.paths.map { points in points.first == points.last ? Array(points.dropLast()) : points }
-                                : feature.paths
-                            let vertices = transform.verticesPath(vertexPaths, diameter: WorkspaceRenderScaling.metric(Double(Self.safePointDiameter(vertexStyle.pointSize)), factor: renderFactor))
-                            context.fill(vertices, with: .color(MapVectorStyleResolver.fillColor(vertexStyle, definitionID: vertexDefinitionID)))
-                            context.stroke(vertices, with: .color(MapVectorStyleResolver.penColor(vertexStyle, definitionID: vertexDefinitionID)),
-                                lineWidth: WorkspaceRenderScaling.metric(Double(Self.safeLineWidth(vertexStyle.penWidth)), factor: renderFactor))
+                            if let vertexDefinitionID = MapVectorStyleDefinitionIDs.vertexDefinition(for: feature.kind) {
+                                let vertexStyle = MapVectorStyleResolver.values(layerID: layer.id, feature: feature,
+                                    definitionID: vertexDefinitionID, presentations: mapState.vectorStyles)
+                                let vertexPaths = feature.kind == .polygon
+                                    ? feature.paths.map { points in points.first == points.last ? Array(points.dropLast()) : points }
+                                    : feature.paths
+                                let vertices = transform.verticesPath(vertexPaths, diameter: WorkspaceRenderScaling.metric(Double(Self.safePointDiameter(vertexStyle.pointSize)), factor: renderFactor))
+                                context.fill(vertices, with: .color(MapVectorStyleResolver.fillColor(vertexStyle, definitionID: vertexDefinitionID)))
+                                context.stroke(vertices, with: .color(MapVectorStyleResolver.penColor(vertexStyle, definitionID: vertexDefinitionID)),
+                                    lineWidth: WorkspaceRenderScaling.metric(Double(Self.safeLineWidth(vertexStyle.penWidth)), factor: renderFactor))
+                            }
                         }
 
                         // Interaction highlighting remains a separate overlay;
@@ -176,6 +252,54 @@ struct VectorMapCanvas: View {
                 }
             }
             .allowsHitTesting(false)
+            .overlay {
+                MapVectorFeatureContextMenuInteraction(
+                    isEnabled: store.existingMapState(for: mapID) === mapState
+                        && mapState.kind != .unsupported,
+                    contextAt: { location, modifiers in
+                        actionCoordinator.captureCanvasFeature(at: location,
+                            transform: transform, modifiers: modifiers,
+                            visibleLayers: activeVectorLayers)
+                    },
+                    perform: { action, captured in
+                        actionCoordinator.performContextAction(action, captured: captured,
+                            openAttributeTable: { openWindow(value: $0) })
+                    },
+                    captureIdentity: "\(store.projectSessionID.uuidString)|\(mapID.uuidString)|\(store.mapWorkflowIdentity(mapID))",
+                    blankContextAt: { location in
+                        blankContextSnapshot(at: location, transform: transform)
+                    },
+                    performBlank: { action, captured in
+                        performBlankContextAction(action, captured: captured)
+                    }
+                )
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private static func draw(_ frame: VectorPlotRenderedLayer,
+                             viewport: RasterMapViewExtent,
+                             transform: MapTransform,
+                             in context: inout GraphicsContext) {
+        let topLeft = transform.screen(MapPoint(x: viewport.minX, y: viewport.maxY))
+        let bottomRight = transform.screen(MapPoint(x: viewport.maxX, y: viewport.minY))
+        let rect = CGRect(x: topLeft.x, y: topLeft.y,
+            width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y)
+        guard rect.origin.x.isFinite, rect.origin.y.isFinite,
+              rect.width.isFinite, rect.height.isFinite, rect.width > 0, rect.height > 0 else { return }
+        context.draw(Image(decorative: frame.image, scale: 1), in: rect)
+        for label in frame.labels {
+            if label.polyline.count > 1 {
+                var leader = Path()
+                leader.move(to: transform.screen(MapPoint(x: label.polyline[0].x, y: label.polyline[0].y)))
+                for point in label.polyline.dropFirst() {
+                    leader.addLine(to: transform.screen(MapPoint(x: point.x, y: point.y)))
+                }
+                context.stroke(leader, with: .color(.secondary), lineWidth: 1)
+            }
+            context.draw(Text(label.text).font(.system(size: 10)).foregroundColor(.primary),
+                at: transform.screen(MapPoint(x: label.point.x, y: label.point.y)), anchor: .center)
         }
     }
 
@@ -216,6 +340,77 @@ struct VectorMapCanvas: View {
         return false
     }
 
+    @MainActor
+    private func blankContextSnapshot(at location: CGPoint,
+                                      transform: MapTransform) -> MapBlankContextCapture? {
+        guard store.existingMapState(for: mapID) === mapState,
+              mapState.kind != .unsupported else { return nil }
+        let session = mapState.backgroundMapSession
+        return MapBlankContextCapture.make(projectSessionID: store.projectSessionID,
+            mapID: mapID, mapState: mapState,
+            mapIdentity: store.mapIdentityRequest(for: mapID),
+            backgroundSession: session, settings: session.settings,
+            projectionType: store.document?.projectionType ?? "",
+            projectionValue: store.document?.projectionValue ?? "",
+            location: location, transform: transform)
+    }
+
+    @MainActor
+    private func performBlankContextAction(_ action: MapBlankContextMenuAction,
+                                           captured: MapBlankContextCapture) {
+        guard action == .copyHoveredTileJSON,
+              captured.canCopyHoveredTileJSON,
+              isCurrentBlankContext(captured) else { return }
+        let session = mapState.backgroundMapSession
+        let point = BackgroundMapCoordinate(x: captured.worldPoint.x, y: captured.worldPoint.y)
+        Task { @MainActor in
+            var didCopy = false
+            do {
+                let result = try await session.copyHoveredTileJSON(at: point) { rawJSON in
+                    guard self.isCurrentBlankContext(captured) else { return }
+                    self.store.system.copy(rawJSON)
+                    didCopy = true
+                }
+                guard self.isCurrentBlankContext(captured) else { return }
+                if didCopy { return }
+                if result.status != "available" {
+                    self.store.errorMessage = L10n.text(result.message
+                        ?? (result.status == "outsideCoverage"
+                            ? "The hovered tile is outside the background map coverage."
+                            : "The background map tile is unavailable."))
+                } else {
+                    self.store.errorMessage = L10n.text("The map or camera changed before the hovered tile could be copied.")
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.isCurrentBlankContext(captured) else { return }
+                self.store.errorMessage = L10n.text(error.localizedDescription)
+            }
+        }
+    }
+
+    @MainActor
+    private func isCurrentBlankContext(_ captured: MapBlankContextCapture) -> Bool {
+        guard captured.mapID == mapID,
+              store.projectSessionID == captured.projectSessionID,
+              store.existingMapState(for: mapID) === mapState,
+              mapState.kind != .unsupported else { return false }
+        let points = mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers)
+        let currentTransform = MapTransform(points: points,
+            size: mapState.canvasPixelSize, scale: mapState.scale, offset: mapState.offset)
+        let currentPoint = currentTransform.world(CGPoint(x: CGFloat(captured.screenX), y: CGFloat(captured.screenY)))
+        return MapBlankContextCurrentness.matches(captured,
+            projectSessionID: store.projectSessionID, mapID: mapID, mapState: mapState,
+            mapIdentity: store.mapIdentityRequest(for: mapID),
+            backgroundSession: mapState.backgroundMapSession,
+            settings: mapState.backgroundMapSession.settings,
+            projectionType: store.document?.projectionType ?? "",
+            projectionValue: store.document?.projectionValue ?? "",
+            currentViewport: MapBlankContextCapture.viewport(transform: currentTransform),
+            currentWorldPoint: currentPoint)
+    }
+
     private func scaledMetric(_ value: CGFloat) -> CGFloat {
         WorkspaceRenderScaling.metric(Double(value), factor: renderScaling.factor)
     }
@@ -227,5 +422,16 @@ struct VectorMapCanvas: View {
 
     static func safePointDiameter(_ value: Int) -> CGFloat {
         CGFloat(max(value, 0))
+    }
+}
+
+private extension Collection {
+    var only: Element? {
+        count == 1 ? first : nil
+    }
+
+    func only(where predicate: (Element) throws -> Bool) rethrows -> Element? {
+        let matches = try filter(predicate)
+        return matches.count == 1 ? matches.first : nil
     }
 }

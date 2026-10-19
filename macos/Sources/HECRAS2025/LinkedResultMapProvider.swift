@@ -37,6 +37,7 @@ struct LinkedResultMapRequest: Encodable, Sendable {
     let mapType: String
     let frameMode: String
     let viewport: RasterMapViewExtent?
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 struct LinkedResultMapSourceStatus: Decodable, Identifiable, Sendable {
@@ -127,7 +128,8 @@ final class LinkedResultMapSession: ObservableObject {
             projectXml: projectXML, projectRevision: selection.projectRevision,
             anchor: selection.anchor, selectedGroups: selection.selectedGroups,
             profileIndex: profileIndex, mapType: mapType.rawValue,
-            frameMode: frameMode.rawValue, viewport: viewport)
+            frameMode: frameMode.rawValue, viewport: viewport,
+            coreLayerContext: selection.coreLayerContext)
         let client = self.client
         let task = Task {
             try await client.request("result.linkedMap", parameters: request,

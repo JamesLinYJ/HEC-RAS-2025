@@ -13,6 +13,9 @@ struct MapTreeMapIdentity: Codable, Hashable, Sendable {
     let mapName: String
     let mapType: String
     let expectedVisualizationRevision: String
+    var coreLayerContext: CoreLayerRequestContext? = nil
+
+    var coreLayerContextIdentity: String { coreLayerContext?.identityToken ?? "" }
 }
 
 struct SourceMapLayerRow: Sendable {
@@ -177,7 +180,7 @@ extension WorkspaceStore {
             let isAssociationContext = associatedTypes.contains(kind ?? "")
                 && (hasAssociationIdentity || insideGeometry || insideMatchingLayers)
             let row: [SourceMapLayerRow]
-            if ["MapLayer", "Plan", "Result", "MultiResult", "Geometry", "ConceptualMesh", "FlowAreaLayer",
+            if ["MapLayer", "GdbVectorLayer", "Plan", "Result", "MultiResult", "Geometry", "ConceptualMesh", "FlowAreaLayer",
                 "CulvertBarrelLayer", "Terrain", "NValue", "Classification", "BoundaryCondition", "WindLayer"].contains(kind ?? "") {
                 row = [.init(node: node, treeOrdinal: treeOrdinal, isChecked: ownChecked,
                     isEffectivelyVisible: effective, isGeometryAssociationContext: isAssociationContext)]
@@ -227,7 +230,7 @@ extension WorkspaceStore {
             case "Result", "MultiResult", "Raster", "DiscreteRaster": family = 3
             case "Geometry", "ConceptualMesh", "FlowAreaLayer", "CulvertBarrelLayer": family = 4
             case "BoundaryCondition", "WindLayer": family = 5
-            case "MapLayer": family = 6
+            case "MapLayer", "GdbVectorLayer": family = 6
             default: family = 7
             }
             let contextIdentity = "\(mapID.uuidString)|\(locator.sourceIdentity)"
@@ -261,7 +264,7 @@ extension WorkspaceStore {
                 // paint layer. Its exact child locator is retained in the row.
                 payloadIDs = []
                 activeOrdinal = nil
-            case "MapLayer":
+            case "MapLayer", "GdbVectorLayer":
                 let vectorID = sourceVectorInstanceID(row.node, mapID: mapID)
                 if sourceMapVectorKind(row.node) != nil {
                     payloadIDs = state.vectors(mapLayers).contains(where: { $0.id == vectorID }) ? [vectorID] : []
@@ -291,26 +294,75 @@ extension WorkspaceStore {
         guard !isSavingAll, !isRunningProjectTool, !isOpeningProject, !isClosingTab,
               let provider = layerTreeProvider as? BackendMapTreeProvider else { return false }
         let project = projectSessionID
+        let context = sourceMapTreeContext(mapID)
+        let workflowIdentity = mapWorkflowIdentity(mapID)
         let removedLayerIDs = rasterMapSources.filter {
             $0.sourceMapID == mapID && $0.nodePath == node.sourceLocator?.nodePath
-                && node.sourceLocator?.mapType == "SingleBandRasterMapLayer"
+                && ["SingleBandRasterMapLayer", "ImageRasterMapLayer", "DiscreteRasterMapLayer"]
+                    .contains(node.sourceLocator?.mapType ?? "")
         }.map(\.id)
         do {
             var sourcePath: String?
             var revision: String?
-            if node.sourceLocator?.nodeType == "MapLayer" {
+            let locator = node.sourceLocator
+            let isGdbDatasetOrVector = locator?.nodeType == "GdbDataset"
+                || locator?.nodeType == "GdbVectorLayer"
+            let isGdbRasterLeaf = locator?.nodeType == "MapLayer"
+                && locator?.mapType == "SingleBandRasterMapLayer"
+                && URL(fileURLWithPath: node.assetID ?? "").pathExtension.caseInsensitiveCompare("gdb") == .orderedSame
+            if isGdbDatasetOrVector || isGdbRasterLeaf {
+                guard let locator, let assetID = node.assetID, !assetID.isEmpty,
+                      let directory = document?.directory,
+                      let url = try? PlatformPaths.resolve(assetID, relativeTo: directory, mappings: pathMappings),
+                      GdbFileGeodatabasePath.root(for: url) == url.standardizedFileURL.resolvingSymlinksInPath(),
+                      (locator.nodeType == "MapLayer" || locator.mapType == locator.nodeType) else { return false }
+                let canonicalPath = SourceFilePaths.canonical(url)
+                let capture = try await BackendGdbMapSourceProvider(client: runtimeInfoClient)
+                    .catalog(sourcePath: canonicalPath, expectedSourceRevision: nil)
+                try capture.source.validate(expectedPath: url)
+                guard project == projectSessionID,
+                      mapWorkflowIdentity(mapID) == workflowIdentity,
+                      sourceMapTreeContext(mapID) == context,
+                      capture.source.sourcePath == canonicalPath else { return false }
+                sourcePath = canonicalPath
+                revision = capture.source.revision
+            } else if locator?.nodeType == "MapLayer" {
+                guard let locator else { return false }
                 let file = node.assetID ?? node.sourceLocator?.filename ?? node.sourceLocator?.filenameRelative
                 guard let file, let directory = document?.directory else { return false }
                 let url = file.hasPrefix("/") ? URL(fileURLWithPath: file) : directory.appendingPathComponent(file)
-                sourcePath = SourceFilePaths.canonical(url)
+                let canonicalSourcePath = SourceFilePaths.canonical(url)
+                sourcePath = canonicalSourcePath
                 let editor = mapState(for: mapID).polylineEditor
-                guard !(editor.hasUnsavedChanges || editor.isBusy) || editor.currentScope?.canonicalPath != sourcePath else {
+                guard !(editor.hasUnsavedChanges || editor.isBusy) || editor.currentScope?.canonicalPath != canonicalSourcePath else {
                     errorMessage = L10n.text("Save or discard the line edits before removing their map layer."); return false
                 }
-                revision = try await Self.mapSourceRevision(url)
+                if ["SingleBandRasterMapLayer", "ImageRasterMapLayer", "DiscreteRasterMapLayer"]
+                    .contains(locator.mapType ?? "") {
+                    if let descriptor = rasterMapSources.first(where: {
+                        $0.sourceMapID == mapID && $0.nodePath == locator.nodePath &&
+                            $0.mapLayerType == locator.mapType &&
+                            SourceFilePaths.canonical(URL(fileURLWithPath: $0.sourcePath)) == canonicalSourcePath
+                    }), let sourceRevision = descriptor.sourceRevision {
+                        revision = sourceRevision
+                    } else {
+                        let inspected = try await BackendMapRasterLayerProvider(client: runtimeInfoClient)
+                            .inspect(sourcePath: url.standardizedFileURL.path)
+                        guard inspected.supportedMapLayerTypes.contains(locator.mapType ?? ""),
+                              SourceFilePaths.canonical(URL(fileURLWithPath: inspected.sourceCanonicalPath)) == canonicalSourcePath else {
+                            throw BackendServiceError(code: "sourceChanged", message: "The raster source no longer matches this map node.")
+                        }
+                        revision = inspected.sourceRevision
+                    }
+                } else {
+                    revision = try await Self.mapSourceRevision(url)
+                }
             }
+            guard project == projectSessionID,
+                  mapWorkflowIdentity(mapID) == workflowIdentity,
+                  sourceMapTreeContext(mapID) == context else { return false }
             _ = try await provider.removeSourceNode(nodeID: node.id, sourcePath: sourcePath, revision: revision,
-                context: sourceMapTreeContext(mapID))
+                context: context)
             guard project == projectSessionID else { return false }
             mapState(for: mapID).removeLayer(sourceVectorInstanceID(node, mapID: mapID))
             for layerID in removedLayerIDs { mapState(for: mapID).removeLayer(layerID) }
@@ -332,7 +384,8 @@ extension WorkspaceStore {
             projectXmlSHA: identity.projectXmlSHA, mapID: identity.mapID, mapIndex: identity.mapIndex,
             mapName: identity.mapName, mapType: identity.mapType,
             expectedVisualizationRevision: identity.expectedVisualizationRevision,
-            computeReadLease: mapResultComputeReadLease)
+            computeReadLease: mapResultComputeReadLease,
+            coreLayerContext: identity.coreLayerContext)
     }
 
     /// Builds a current, exact .vis map identity for tree/geometry/associated
@@ -346,7 +399,73 @@ extension WorkspaceStore {
         let sha = SHA256.hash(data: Data(xml.utf8)).map { String(format: "%02X", $0) }.joined()
         return .init(projectPath: url.standardizedFileURL.path, projectXml: xml, projectXmlSHA: sha,
             mapID: mapID.uuidString, mapIndex: index, mapName: map.name, mapType: map.kind,
-            expectedVisualizationRevision: revision)
+            expectedVisualizationRevision: revision,
+            coreLayerContext: captureCoreLayerRequestContext())
+    }
+
+    /// Re-captures the exact GDB directory manifest and persisted raster leaf
+    /// before an existing `.vis` child is reopened. Display names are labels;
+    /// the source connection string and node path identify the subdataset.
+    func prepareGdbRasterSourceForRead(_ descriptor: RasterMapSourceDescriptor) async throws
+        -> RasterMapSourceDescriptor {
+        guard let mapID = descriptor.sourceMapID,
+              let gdbContext = descriptor.gdbSourceContext,
+              let map = mapIdentityRequest(for: mapID),
+              let client = runtimeInfoClient else {
+            throw BackendServiceError(code: "sourceChanged", message: "The exact File Geodatabase map source is unavailable.")
+        }
+        let sourceURL = URL(fileURLWithPath: descriptor.sourcePath).standardizedFileURL.resolvingSymlinksInPath()
+        guard GdbFileGeodatabasePath.root(for: sourceURL) == sourceURL,
+              SourceFilePaths.canonical(URL(fileURLWithPath: gdbContext.node.assetID ?? ""))
+                == SourceFilePaths.canonical(sourceURL),
+              gdbContext.node.nodeType == "MapLayer",
+              gdbContext.node.mapType == "SingleBandRasterMapLayer",
+              gdbContext.node.filename == descriptor.filename,
+              gdbContext.node.filenameRelative == descriptor.filenameRelative,
+              gdbContext.node.nodePath == descriptor.nodePath,
+              let connectionString = descriptor.filename, !connectionString.isEmpty,
+              let state = existingMapState(for: mapID),
+              isCurrentMapState(state, mapID: mapID, projectSessionID: projectSessionID) else {
+            throw BackendServiceError(code: "sourceChanged", message: "The exact File Geodatabase raster node changed. Refresh the map tree.")
+        }
+        let expectedSession = projectSessionID
+        let expectedWorkflow = mapWorkflowIdentity(mapID)
+        let treeContext = sourceMapTreeContext(mapID)
+        if let error = treeContext.resultSelectionError {
+            throw BackendServiceError(code: "invalidInput", message: error)
+        }
+        let response = try await BackendGdbMapSourceProvider(client: client).catalog(
+            sourcePath: SourceFilePaths.canonical(sourceURL), expectedSourceRevision: nil)
+        try response.source.validate(expectedPath: sourceURL)
+        let matches = response.rasterSubdatasets.filter { $0.connectionString == connectionString }
+        guard matches.count == 1, let raster = matches.first,
+              raster.canRender, raster.status == "available",
+              raster.width > 0, raster.height > 0, raster.bandCount > 0,
+              expectedSession == projectSessionID,
+              isCurrentMapState(state, mapID: mapID, projectSessionID: expectedSession),
+              mapIdentityRequest(for: mapID) == map,
+              mapWorkflowIdentity(mapID) == expectedWorkflow,
+              existingMapState(for: mapID) === state else {
+            throw BackendServiceError(code: "sourceChanged", message: "The File Geodatabase raster source changed or is not available for rendering.")
+        }
+
+        let mapCapture = GdbRasterSymbologyMapCapture(projectPath: map.projectPath,
+            projectXml: map.projectXml, projectXmlSHA: map.projectXmlSHA,
+            mapID: map.mapID, mapIndex: map.mapIndex, mapName: map.mapName,
+            mapType: map.mapType, expectedVisualizationRevision: map.expectedVisualizationRevision,
+            resultSelectionOverrides: treeContext.resultSelectionOverrides.map {
+                GdbRasterMapTreeResultSelectionOverride(planAssetID: $0.planAssetID,
+                    planName: $0.planName, selectedResultPath: $0.selectedResultPath,
+                    selectedResultRevision: $0.selectedResultRevision)
+            },
+            computeReadLease: mapResultComputeReadLease.map { lease in
+                GdbRasterComputeReadLease(projectSessionID: lease.projectSessionID,
+                    runID: lease.runID, projectPath: lease.projectPath,
+                    protectedSourcePaths: lease.protectedSourcePaths,
+                    callbackResultPath: lease.callbackResultPath)
+            })
+        let exactContext = GdbRasterSymbologyContext(map: mapCapture, node: gdbContext.node)
+        return descriptor.assigning(gdbSourceContext: exactContext, source: response.source)
     }
 
     /// A successful map-tree action advances the .vis revision. Compare the
@@ -360,13 +479,15 @@ extension WorkspaceStore {
             && current.mapName == original.mapName
             && current.mapType == original.mapType
             && current.projectPath == original.projectPath
+            && current.coreLayerContext == original.coreLayerContext
             && current.projectXmlSHA.caseInsensitiveCompare(original.projectXmlSHA) == .orderedSame
     }
 
     func mapWorkflowIdentity(_ mapID: UUID) -> String {
         guard let map = mapIdentityRequest(for: mapID) else { return projectSessionID.uuidString + "|unavailable|" + mapID.uuidString }
         return [projectSessionID.uuidString, String(assetsRevision), map.mapID, String(map.mapIndex), map.mapName, map.mapType,
-                map.projectPath, map.projectXmlSHA, map.expectedVisualizationRevision].joined(separator: "|")
+                map.projectPath, map.projectXmlSHA, map.expectedVisualizationRevision,
+                map.coreLayerContextIdentity].joined(separator: "|")
     }
 
     /// The selected MultiResult slot changes the actual embedded Geometry and
@@ -397,7 +518,8 @@ extension WorkspaceStore {
               let map = mapIdentityRequest(for: mapID) else { return nil }
         let base = [expectedSession.uuidString, String(assetsRevision), map.mapID,
             String(map.mapIndex), map.mapName, map.mapType, map.projectPath,
-            map.projectXmlSHA, map.expectedVisualizationRevision].joined(separator: "|")
+            map.projectXmlSHA, map.expectedVisualizationRevision,
+            map.coreLayerContextIdentity].joined(separator: "|")
         guard let snapshot = state.resultSources.snapshot else { return base + "|result-context:none" }
         return mapSourceWorkflowIdentity(base: base, snapshot: snapshot)
     }
@@ -425,7 +547,8 @@ extension WorkspaceStore {
         let encodedOverrides = (try? encoder.encode(overrides))?.base64EncodedString() ?? "invalid"
         let workflowIdentity = [expectedSession.uuidString, String(assetsRevision), map.mapID,
             String(map.mapIndex), map.mapName, map.mapType, map.projectPath,
-            map.projectXmlSHA, map.expectedVisualizationRevision].joined(separator: "|")
+            map.projectXmlSHA, map.expectedVisualizationRevision,
+            map.coreLayerContextIdentity].joined(separator: "|")
         return workflowIdentity + "|requested-slots:" + encodedOverrides
     }
 
@@ -835,7 +958,8 @@ extension WorkspaceStore {
                 mapIndex: mapIdentity.mapIndex, mapName: mapIdentity.mapName,
                 mapType: mapIdentity.mapType,
                 expectedVisualizationRevision: mapIdentity.expectedVisualizationRevision,
-                resultSelectionOverrides: treeContext.resultSelectionOverrides)
+                resultSelectionOverrides: treeContext.resultSelectionOverrides,
+                coreLayerContext: mapIdentity.coreLayerContext)
             let initialCapture = MapWindVelocityParticleSource(
                 projectSessionID: capturedSession, mapWorkflowIdentity: workflowIdentity,
                 map: map, contextToken: resultSnapshot.sources.contextToken,
@@ -1744,15 +1868,29 @@ extension WorkspaceStore {
     }
 
     func sourceMapVectorKind(_ node: LayerTreeNode) -> MapFeature.Kind? {
+        if node.sourceLocator?.nodeType == "GdbVectorLayer",
+           node.sourceLocator?.mapType == "GdbVectorLayer" {
+            switch node.properties.first(where: { $0.id == "Source/GdbVectorType" })?.value {
+            case "Point", "PointCollection": return .point
+            case "Line", "LineCollection": return .line
+            case "Polygon", "PolygonCollection": return .polygon
+            default: return nil
+            }
+        }
         switch node.sourceLocator?.mapType {
-        case "PointsVector": .point
-        case "PolylinesVector": .line
-        case "PolygonsVector": .polygon
-        default: nil
+        case "PointsVector": return MapFeature.Kind.point
+        case "PolylinesVector": return MapFeature.Kind.line
+        case "PolygonsVector": return MapFeature.Kind.polygon
+        default: return nil
         }
     }
 
     func sourceMapVectorURL(_ node: LayerTreeNode) -> URL? {
+        if isGdbVectorLayerNode(node) {
+            guard let url = sourceMapVectorIdentityURL(node),
+                  GdbFileGeodatabasePath.root(for: url) == url.standardizedFileURL.resolvingSymlinksInPath() else { return nil }
+            return url
+        }
         guard let locator = node.sourceLocator, locator.nodeType == "MapLayer",
               ["PointsVector", "PolylinesVector", "PolygonsVector"].contains(locator.mapType ?? ""),
               let directory = document?.directory,
@@ -1771,6 +1909,13 @@ extension WorkspaceStore {
     /// file is unavailable. Callers may use this to retain a hidden binding;
     /// only `sourceMapVectorURL` admits it to readers or style providers.
     func sourceMapVectorIdentityURL(_ node: LayerTreeNode) -> URL? {
+        if isGdbVectorLayerNode(node) {
+            guard let directory = document?.directory,
+                  let assetID = node.assetID,
+                  let url = try? PlatformPaths.resolve(assetID, relativeTo: directory, mappings: pathMappings),
+                  GdbFileGeodatabasePath.root(for: url) == url.standardizedFileURL.resolvingSymlinksInPath() else { return nil }
+            return url.standardizedFileURL.resolvingSymlinksInPath()
+        }
         guard let locator = node.sourceLocator, locator.nodeType == "MapLayer",
               ["PointsVector", "PolylinesVector", "PolygonsVector"].contains(locator.mapType ?? ""),
               let directory = document?.directory else { return nil }
@@ -1793,6 +1938,12 @@ extension WorkspaceStore {
         // node identity; the readable-URL gate above still checks vector format,
         // existence, and equality with the Host-owned asset.
         return assetURL
+    }
+
+    private func isGdbVectorLayerNode(_ node: LayerTreeNode) -> Bool {
+        node.sourceClass == "GdbVectorLayerVisualContext"
+            && node.sourceLocator?.nodeType == "GdbVectorLayer"
+            && node.sourceLocator?.mapType == "GdbVectorLayer"
     }
 
     func sourceMapVectorReadRequests(_ nodes: [LayerTreeNode], mapID: UUID) -> MapVectorSourceReadRequests {
@@ -1919,16 +2070,20 @@ extension WorkspaceStore {
               let projectURL = document?.url,
               let backend = layerTreeProvider as? BackendMapTreeProvider,
               let asset = geometryAsset(assetID: assetID) else { return false }
+        let coreLayerContext = captureCoreLayerRequestContext()
         let projectSession = projectSessionID
         do {
             let path = asset.url.standardizedFileURL.path
             let revision = try await Self.mapSourceRevision(asset.url)
             guard projectSessionID == projectSession, document?.url == projectURL,
+                  captureCoreLayerRequestContext() == coreLayerContext,
                   let currentAsset = geometryAsset(assetID: assetID),
                   SourceFilePaths.canonical(currentAsset.url) == SourceFilePaths.canonical(asset.url) else { return false }
             let receipt = try await backend.createMap(projectPath: projectURL.standardizedFileURL.path,
-                kind: "Geometry", initialGeometryPath: path, initialGeometryRevision: revision)
+                kind: "Geometry", initialGeometryPath: path, initialGeometryRevision: revision,
+                coreLayerContext: coreLayerContext)
             guard projectSessionID == projectSession,
+                  captureCoreLayerRequestContext() == coreLayerContext,
                   receipt.mapType == "Geometry",
                   let map = catalogMapDocuments.first(where: {
                       $0.sourceIndex == receipt.mapIndex && $0.name == receipt.mapName && $0.kind == "Geometry"
@@ -2040,6 +2195,7 @@ extension WorkspaceStore {
         guard !isSavingAll, !isRunningProjectTool, !isOpeningProject, !isClosingTab,
               let projectURL = document?.url,
               let backend = layerTreeProvider as? BackendMapTreeProvider else { return false }
+        let coreLayerContext = captureCoreLayerRequestContext()
         let projectSession = projectSessionID
         do {
             let plan = focusedPlanAssetID.flatMap(planAsset(assetID:))
@@ -2051,12 +2207,15 @@ extension WorkspaceStore {
                 planRevision = nil
             }
             guard projectSessionID == projectSession, document?.url == projectURL,
+                  captureCoreLayerRequestContext() == coreLayerContext,
                   focusedPlanAssetID == nil
                     || focusedPlanAssetID.flatMap(planAsset(assetID:))?.url == plan?.url else { return false }
             let receipt = try await backend.createMap(projectPath: projectURL.standardizedFileURL.path,
                 kind: "Plan", initialPlanPath: plan?.url.standardizedFileURL.path,
-                initialPlanRevision: planRevision)
-            guard projectSessionID == projectSession, receipt.mapType == "Plan",
+                initialPlanRevision: planRevision, coreLayerContext: coreLayerContext)
+            guard projectSessionID == projectSession,
+                  captureCoreLayerRequestContext() == coreLayerContext,
+                  receipt.mapType == "Plan",
                   let map = catalogMapDocuments.first(where: {
                       $0.sourceIndex == receipt.mapIndex && $0.name == receipt.mapName && $0.kind == "Plan"
                   }), let id = UUID(uuidString: map.id), let document = mapDocument(for: id),
@@ -2243,7 +2402,8 @@ extension WorkspaceStore {
             mapIndex: map.mapIndex, mapName: map.mapName, mapType: map.mapType,
             visualizationRevision: map.expectedVisualizationRevision, layerID: layerID, vectorPath: url,
             vectorRevision: revision, stableFeatureIdentity: lineID,
-            coordinates: points.map { .init(x: $0.x, y: $0.y) }, draftGeneration: generation))
+            coordinates: points.map { .init(x: $0.x, y: $0.y) }, draftGeneration: generation,
+            coreLayerContext: map.coreLayerContext))
     }
 
     func openMapLineChart(mapID: UUID, mode: MapResultChartMode, editingSelection: Bool = false) -> DetachedDocumentRoute? {

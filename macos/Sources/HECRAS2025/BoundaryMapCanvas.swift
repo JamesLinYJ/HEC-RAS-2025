@@ -1,3 +1,4 @@
+import CoreGraphics
 import RASWorkspaceCore
 import SwiftUI
 
@@ -27,7 +28,17 @@ struct BoundaryMapCanvas: View {
         GeometryReader { proxy in
             let renderScale = renderScaling.factor
             let transform = MapTransform(points: points, size: proxy.size, scale: scale, offset: offset)
+            let renderViewport = MapSourceRenderViewport.capture(points: points, size: proxy.size,
+                scale: scale, offset: offset, deviceRenderScale: renderScale)
             Canvas { context, _ in
+                var renderedOwners = Set<String>()
+                for entry in session.entries where entry.status == .available {
+                    let capture = entry.capture
+                    guard renderedOwners.insert(capture.sourceIdentity).inserted,
+                          let frame = session.attachedFacesFrame(for: capture),
+                          let image = session.attachedFacesImage(for: capture) else { continue }
+                    Self.draw(frame, image: image, in: &context, transform: transform)
+                }
                 for presentation in session.visibleLines {
                     let coordinates = presentation.line.coordinates
                     guard coordinates.count >= 2,
@@ -90,6 +101,9 @@ struct BoundaryMapCanvas: View {
                     }
                 }
             }
+            .task(id: renderViewport?.identity ?? "unavailable") {
+                await session.updateAttachedFacesViewport(renderViewport)
+            }
             .contentShape(Rectangle())
             .gesture(SpatialTapGesture().onEnded { value in
                 let transform = MapTransform(points: points, size: proxy.size, scale: scale, offset: offset)
@@ -117,6 +131,20 @@ struct BoundaryMapCanvas: View {
 
     private static func isFinite(_ point: MapPoint) -> Bool {
         point.x.isFinite && point.y.isFinite
+    }
+
+    private static func draw(_ frame: MapSourceRasterFrame, image: CGImage,
+                             in context: inout GraphicsContext, transform: MapTransform) {
+        let upperLeft = transform.screen(MapPoint(x: frame.minX, y: frame.maxY))
+        let lowerRight = transform.screen(MapPoint(x: frame.maxX, y: frame.minY))
+        let rect = CGRect(x: min(upperLeft.x, lowerRight.x), y: min(upperLeft.y, lowerRight.y),
+            width: abs(lowerRight.x - upperLeft.x), height: abs(lowerRight.y - upperLeft.y))
+        guard rect.width.isFinite, rect.height.isFinite, rect.width > 0, rect.height > 0 else { return }
+        context.draw(Image(decorative: image, scale: 1), in: rect)
+        for label in frame.labels {
+            let text = context.resolve(Text(verbatim: label.text).font(.caption2))
+            context.draw(text, at: transform.screen(MapPoint(x: label.x, y: label.y)), anchor: .bottomLeading)
+        }
     }
 
     private static func safeWidth(_ value: Double, fallback: Double) -> CGFloat {

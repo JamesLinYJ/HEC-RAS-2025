@@ -72,8 +72,9 @@ internal static class StreamModeChecks
         Task writer = WriteFragmentedAndCloseAsync(server, wireRecord);
 
         var frames = new List<StreamModeMapFrame>();
+        Guid sessionID = Guid.NewGuid();
         StreamModeConnectResult result = await MapStreamModeService.RunAsync(
-            new StreamModeConnectRequest(server.Endpoint), frames.Add, controls: null)
+            new StreamModeConnectRequest(server.Endpoint, sessionID), frames.Add, controls: null)
             .WaitAsync(TimeSpan.FromSeconds(10));
         await writer.WaitAsync(TimeSpan.FromSeconds(10));
         Check(result.ObjectsReceived == 1 && frames.Count == 1 &&
@@ -95,16 +96,31 @@ internal static class StreamModeChecks
         Task writer = WriteFragmentedAndCloseAsync(server, wireRecord);
 
         var frames = new List<StreamModeMapFrame>();
-        StreamModeConnectResult result = await MapStreamModeService.RunAsync(
-            new StreamModeConnectRequest(server.Endpoint), frames.Add, controls: null)
-            .WaitAsync(TimeSpan.FromSeconds(10));
-        await writer.WaitAsync(TimeSpan.FromSeconds(10));
-        Check(result.ObjectsReceived == 1 && frames.Count == 1 &&
-            frames[0].ObjectType == nameof(Tin) && frames[0].Triangles.Length == 1 &&
-            frames[0].Triangles[0].SequenceEqual([0, 1, 2]) &&
-            frames[0].HasZ && frames[0].HasM &&
-            frames[0].Coordinates[0].Z == 100.25 && frames[0].Coordinates[2].M == 2.0,
-            "The streamed BandedTin profile preserves source connectivity and per-point Z/M samples.");
+        StreamModeTinAssetReference? asset = null;
+        Guid sessionID = Guid.NewGuid();
+        try
+        {
+            StreamModeConnectResult result = await MapStreamModeService.RunAsync(
+                new StreamModeConnectRequest(server.Endpoint, sessionID), frame =>
+                {
+                    frames.Add(frame);
+                    asset = frame.TinAsset;
+                }, controls: null)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            await writer.WaitAsync(TimeSpan.FromSeconds(10));
+            Check(result.ObjectsReceived == 1 && frames.Count == 1 &&
+                frames[0].ObjectType == nameof(Tin) && frames[0].Triangles.Length == 1 &&
+                frames[0].Triangles[0].SequenceEqual([0, 1, 2]) &&
+                frames[0].HasZ && frames[0].HasM &&
+                frames[0].Coordinates[0].Z == 100.25 && frames[0].Coordinates[2].M == 2.0 &&
+                asset is { SessionID: var owner } && owner == sessionID && asset.Sequence == 0,
+                "The streamed BandedTin profile preserves source connectivity, per-point Z/M samples and its owner identity.");
+        }
+        finally
+        {
+            if (asset is not null)
+                _ = StreamModeTinRenderingService.Release(new StreamModeTinAssetRequest(asset));
+        }
     }
 
     private static async Task CancelEndpointReadAsync()
@@ -113,7 +129,7 @@ internal static class StreamModeChecks
         Task<Stream> connected = server.AcceptAsync();
         using var cancellation = new CancellationTokenSource();
         Task<StreamModeConnectResult> reading = MapStreamModeService.RunAsync(
-            new StreamModeConnectRequest(server.Endpoint), onFrame: null, controls: null,
+            new StreamModeConnectRequest(server.Endpoint, Guid.NewGuid()), onFrame: null, controls: null,
             cancellationToken: cancellation.Token);
         using Stream accepted = await connected.WaitAsync(TimeSpan.FromSeconds(10));
         cancellation.Cancel();
@@ -132,7 +148,7 @@ internal static class StreamModeChecks
 
         try
         {
-            await MapStreamModeService.RunAsync(new StreamModeConnectRequest(path), onFrame: null, controls: null);
+            await MapStreamModeService.RunAsync(new StreamModeConnectRequest(path, Guid.NewGuid()), onFrame: null, controls: null);
         }
         catch (ArgumentException error) when (error.Message.Contains("endpoint length", StringComparison.OrdinalIgnoreCase))
         {

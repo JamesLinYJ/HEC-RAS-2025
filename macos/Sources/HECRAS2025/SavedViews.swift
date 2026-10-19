@@ -161,6 +161,7 @@ final class MapState: ObservableObject {
     @Published var showsPolylineEditor = false
     @Published var canvasPixelSize = CGSize.zero
     @Published private(set) var referencePoints: [MapPoint]?
+    @Published var calculatorSourceReferencePoints: [MapPoint] = []
     @Published private(set) var referenceRevision = 0
     @Published private(set) var draftVector: MapVectorLayer?
     @Published var vectorStyles: [String: MapVectorStylePresentation] = [:]
@@ -358,7 +359,7 @@ final class MapState: ObservableObject {
         // Camera bounds use source extents, never viewport raster corners.
         referencePoints ?? (self.visibleVectors(vectors).flatMap(\.points)
             + self.rasters(rasters).flatMap(\.points) + projectGeometryMap.visiblePoints
-            + associatedMapLayers.sourceReferencePoints + boundaryMap.visiblePoints
+            + associatedMapLayers.sourceReferencePoints + calculatorSourceReferencePoints + boundaryMap.visiblePoints
             + storedCulvertProfile.visiblePoints
             + terrainInputMap.features.flatMap { $0.points.map { MapPoint(x: $0.x, y: $0.y) } })
     }
@@ -366,7 +367,7 @@ final class MapState: ObservableObject {
         guard referencePoints == nil else { return }
         let points = self.visibleVectors(vectors).flatMap(\.points)
             + self.rasters(rasters).flatMap(\.points) + projectGeometryMap.visiblePoints
-            + associatedMapLayers.sourceReferencePoints + boundaryMap.visiblePoints
+            + associatedMapLayers.sourceReferencePoints + calculatorSourceReferencePoints + boundaryMap.visiblePoints
             + storedCulvertProfile.visiblePoints
             + terrainInputMap.features.flatMap { $0.points.map { MapPoint(x: $0.x, y: $0.y) } }
         guard let minX = points.map(\.x).min(), let maxX = points.map(\.x).max(),
@@ -467,7 +468,21 @@ final class MapState: ObservableObject {
             layers = sourceVectorBindings.compactMap { binding in
                 let boundPath = SourceFilePaths.canonical(URL(fileURLWithPath: binding.sourcePath))
                 guard binding.sourcePath == boundPath else { return nil }
-                guard let source = scopedSources.first(where: { SourceFilePaths.canonical($0.url) == boundPath }) else { return nil }
+                let pathMatches = scopedSources.filter { SourceFilePaths.canonical($0.url) == boundPath }
+                let source: MapVectorLayer
+                if URL(fileURLWithPath: boundPath).pathExtension.caseInsensitiveCompare("gdb") == .orderedSame {
+                    // A File Geodatabase may contain several same-kind layers.
+                    // A path-only match would render the first for every saved
+                    // child, so require the exact persisted node binding.
+                    let exact = pathMatches.filter {
+                        $0.sourceMapID == id && $0.visualIdentity == binding.id
+                    }
+                    guard exact.count == 1, let only = exact.first else { return nil }
+                    source = only
+                } else {
+                    guard let first = pathMatches.first else { return nil }
+                    source = first
+                }
                 let staged = draftVector.flatMap { SourceFilePaths.canonical($0.url) == boundPath ? $0 : nil }
                 return (staged ?? source).instanced(binding: binding, sourceMapID: id)
             }

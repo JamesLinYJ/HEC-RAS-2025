@@ -12,6 +12,7 @@ struct MapTreeMeshErrorMapRequest: Encodable, Sendable {
     let expectedVisualizationRevision: String
     let resultSelectionOverrides: [MapTreeResultSelectionOverride]
     let computeReadLease: MapResultComputeReadLease?
+    let coreLayerContext: CoreLayerRequestContext?
 
     init(map: MapTreeMapIdentity, resultOwner: MapResultGeometryOwner?,
          computeReadLease: MapResultComputeReadLease?) {
@@ -33,6 +34,7 @@ struct MapTreeMeshErrorMapRequest: Encodable, Sendable {
             resultSelectionOverrides = []
         }
         self.computeReadLease = computeReadLease
+        coreLayerContext = map.coreLayerContext
     }
 }
 

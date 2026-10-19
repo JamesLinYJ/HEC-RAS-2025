@@ -24,8 +24,10 @@ final class BackendMapResultRenderProvider: ProfileProvider {
     private let viewport: ViewportLookup
     private let blockedSelectionIndices: [Int]
     private let liveKeyframeTimeline: MapResultRenderLiveKeyframeTimeline?
+    private let renderOptions: [MapResultRenderOptionOverride]
     fileprivate let mapID: UUID
     private let expectedResultRevisions: [String: String]
+    private let expectedSelectionsByIndex: [Int: ExpectedSelection]
     private var expectedTerrainFingerprints: [String: TerrainFingerprint] = [:]
     private let sourceID: String
     private let profileStepsByID: [Int: MapResultRenderStep]
@@ -34,6 +36,13 @@ final class BackendMapResultRenderProvider: ProfileProvider {
     private(set) var availabilityReason: String?
     private(set) var sourceStatuses: [MapResultRenderSourceStatus]
     private(set) var currentLegends: [MapLegend]
+    private(set) var currentDiagnosticAnnotations: [MapResultRenderDiagnosticAnnotation]
+
+    private struct ExpectedSelection {
+        let path: String
+        let revision: String
+        let options: MapResultRenderOptions
+    }
 
     private struct TerrainFingerprint: Equatable {
         let path: String
@@ -45,7 +54,9 @@ final class BackendMapResultRenderProvider: ProfileProvider {
                 node: MapResultChartActiveNode, mapID: UUID,
                 viewport: @escaping ViewportLookup, initialViewport: RasterMapViewExtent?,
                 initial: MapResultRenderResult, blockedSelectionIndices: [Int],
-                liveKeyframeTimeline: MapResultRenderLiveKeyframeTimeline?) {
+                liveKeyframeTimeline: MapResultRenderLiveKeyframeTimeline?,
+                renderOptions: [MapResultRenderOptionOverride],
+                expectedSelectionsByIndex: [Int: ExpectedSelection]) {
         self.client = client
         self.map = map
         self.selectionOverrides = selectionOverrides
@@ -55,6 +66,7 @@ final class BackendMapResultRenderProvider: ProfileProvider {
         self.viewport = viewport
         self.blockedSelectionIndices = blockedSelectionIndices
         self.liveKeyframeTimeline = liveKeyframeTimeline
+        self.renderOptions = renderOptions
         sourceID = MapResultSelectionOverride(node: node.node, mode: .latest).nodeIdentity
         profileStepsByID = (liveKeyframeTimeline?.profiles.map {
             MapResultRenderStep(id: $0.index, label: $0.name, time: $0.time)
@@ -64,11 +76,13 @@ final class BackendMapResultRenderProvider: ProfileProvider {
             guard let selected = slot.selectedResult else { return }
             revisions[Self.canonical(selected.resultPath)] = selected.revision
         }
+        self.expectedSelectionsByIndex = expectedSelectionsByIndex
         warmResponse = initial
         warmViewport = initialViewport
         availabilityReason = Self.availabilityReason(for: initial)
         sourceStatuses = initial.sources
         currentLegends = Self.legends(for: initial)
+        currentDiagnosticAnnotations = initial.diagnosticAnnotations
     }
 
     static func prepare(client: BackendProcessClient? = nil,
@@ -79,7 +93,8 @@ final class BackendMapResultRenderProvider: ProfileProvider {
                         mapID: UUID,
                         viewport: @escaping ViewportLookup,
                         blockedSelectionIndices: Set<Int> = [],
-                        liveKeyframeTimeline: MapResultRenderLiveKeyframeTimeline? = nil) async throws -> Prepared {
+                        liveKeyframeTimeline: MapResultRenderLiveKeyframeTimeline? = nil,
+                        renderOptions: [MapResultRenderOptionOverride] = []) async throws -> Prepared {
         let backend = client ?? BackendProcessClient(executableURL: Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/Backend/HECRASBackend"))
         guard UUID(uuidString: map.mapID) == mapID,
@@ -122,6 +137,10 @@ final class BackendMapResultRenderProvider: ProfileProvider {
             }
         }
 
+        let expectedSelections = try expectedSelectionIdentities(
+            node: node, blockedSelectionIndices: blockedIndices,
+            renderOptions: renderOptions)
+
         let firstViewport = viewport()
         let request = MapResultRenderRequest(map: map, selectionOverrides: selectionOverrides,
             contextToken: sources.contextToken, node: node.node,
@@ -129,12 +148,13 @@ final class BackendMapResultRenderProvider: ProfileProvider {
             blockedSelectionIndices: blockedIndices,
             liveKeyframeAnchor: liveKeyframeTimeline.flatMap { timeline in
                 timeline.anchor(for: node.profileIndex ?? 0)
-            })
+            }, renderOptions: renderOptions)
         let initial = try await backend.request("map.resultRender", parameters: request, as: MapResultRenderResult.self)
         let provider = BackendMapResultRenderProvider(client: backend, map: map,
             selectionOverrides: selectionOverrides, sources: sources, node: node,
             mapID: mapID, viewport: viewport, initialViewport: firstViewport, initial: initial,
-            blockedSelectionIndices: blockedIndices, liveKeyframeTimeline: liveKeyframeTimeline)
+            blockedSelectionIndices: blockedIndices, liveKeyframeTimeline: liveKeyframeTimeline,
+            renderOptions: renderOptions, expectedSelectionsByIndex: expectedSelections)
         try provider.validate(initial, requestedProfileIndex: node.profileIndex)
 
         let sourceSteps = liveKeyframeTimeline?.profiles.map {
@@ -177,12 +197,14 @@ final class BackendMapResultRenderProvider: ProfileProvider {
             contextToken: sources.contextToken, node: node.node,
             profileIndex: index, viewport: currentViewport,
             blockedSelectionIndices: blockedSelectionIndices,
-            liveKeyframeAnchor: liveKeyframeTimeline?.anchor(for: index))
+            liveKeyframeAnchor: liveKeyframeTimeline?.anchor(for: index),
+            renderOptions: renderOptions)
         let result = try await client.request("map.resultRender", parameters: request, as: MapResultRenderResult.self)
         try validate(result, requestedProfileIndex: index)
         availabilityReason = Self.availabilityReason(for: result)
         sourceStatuses = result.sources
         currentLegends = Self.legends(for: result)
+        currentDiagnosticAnnotations = result.diagnosticAnnotations
         return try result.mapUpdate(expectedMapID: mapID)
     }
 
@@ -267,14 +289,23 @@ final class BackendMapResultRenderProvider: ProfileProvider {
               Set(result.steps.map(\.id)).count == result.steps.count else {
             throw BackendServiceError(code: "sourceChanged", message: L10n.text("The result render reply no longer matches the selected map node or profile."))
         }
-        var sourceByPath: [String: MapResultRenderSourceStatus] = [:]
+        var statusBySelection: [Int: MapResultRenderSourceStatus] = [:]
         for source in result.sources {
             let path = Self.canonical(source.resultPath)
-            guard expectedResultRevisions[path] == source.revision,
-                  sourceByPath[path] == nil else {
+            let indices = source.selectionIndices
+            guard !indices.isEmpty, Set(indices).count == indices.count,
+                  indices.allSatisfy({ (0..<32).contains($0) }) else {
                 throw BackendServiceError(code: "sourceChanged", message: L10n.text("The result render reply no longer matches an active source result."))
             }
-            sourceByPath[path] = source
+            for index in indices {
+                guard let expected = expectedSelectionsByIndex[index],
+                      expected.path == path,
+                      expected.revision.caseInsensitiveCompare(source.revision) == .orderedSame,
+                      statusBySelection[index] == nil else {
+                    throw BackendServiceError(code: "sourceChanged", message: L10n.text("The result render reply no longer matches an active source result."))
+                }
+                statusBySelection[index] = source
+            }
 
             if let terrainPath = source.terrainPath, let terrainRevision = source.terrainRevision {
                 let fingerprint = TerrainFingerprint(path: Self.canonical(terrainPath), revision: terrainRevision)
@@ -286,23 +317,77 @@ final class BackendMapResultRenderProvider: ProfileProvider {
                 throw BackendServiceError(code: "protocolFailure", message: L10n.text("The result renderer returned incomplete terrain source identity."))
             }
         }
-        guard Set(sourceByPath.keys) == Set(expectedResultRevisions.keys) else {
+        guard Set(statusBySelection.keys) == Set(expectedSelectionsByIndex.keys) else {
             throw BackendServiceError(code: "sourceChanged", message: L10n.text("The result renderer returned a different set of active source results."))
         }
 
         for layer in result.layers {
             let path = Self.canonical(layer.resultPath)
-            guard expectedResultRevisions[path] == layer.revision,
-                  let source = sourceByPath[path],
-                  source.available,
-                  source.terrainPath.map(Self.canonical) == Self.canonical(layer.terrainPath),
-                  source.terrainRevision == layer.terrainRevision,
+            guard let modeRaw = layer.velocityDisplay,
+                  let mode = MapResultVelocityDisplay(rawValue: modeRaw),
+                  let mapDiagnostics = layer.mapDiagnostics,
+                  let forceRecompute = layer.forceRecomputeMapPoints,
+                  let indices = layer.selectionIndices, !indices.isEmpty,
+                  Set(indices).count == indices.count,
+                  indices.allSatisfy({ index in
+                      guard let expected = expectedSelectionsByIndex[index],
+                            expected.path == path,
+                            expected.revision.caseInsensitiveCompare(layer.revision) == .orderedSame,
+                            expected.options.velocityDisplay == mode,
+                            expected.options.mapDiagnostics == mapDiagnostics,
+                            expected.options.forceRecomputeMapPoints == forceRecompute,
+                            let source = statusBySelection[index] else { return false }
+                      return source.available
+                          && source.terrainPath.map(Self.canonical) == Self.canonical(layer.terrainPath)
+                          && source.terrainRevision == layer.terrainRevision
+                          && source.profileIndex == layer.profileIndex
+                  }),
                   layer.sourceID == sourceID,
                   layer.profileIndex >= 0,
-                  source.profileIndex == layer.profileIndex else {
+                  (layer.diagnosticLabels ?? []).allSatisfy({ !$0.text.isEmpty && $0.x.isFinite && $0.y.isFinite }),
+                  (mapDiagnostics && node.selectedMapType == "Velocity"
+                      ? layer.diagnosticLabels != nil : (layer.diagnosticLabels ?? []).isEmpty) else {
                 throw BackendServiceError(code: "sourceChanged", message: L10n.text("The result render reply no longer matches an active source result."))
             }
         }
+    }
+
+    private static func expectedSelectionIdentities(
+        node: MapResultChartActiveNode,
+        blockedSelectionIndices: [Int],
+        renderOptions: [MapResultRenderOptionOverride]
+    ) throws -> [Int: ExpectedSelection] {
+        guard Set(renderOptions.map(\.selectionIndex)).count == renderOptions.count else {
+            throw BackendServiceError(code: "invalidInput",
+                message: L10n.text("The result render options contain duplicate slot identities."))
+        }
+        var supplied = Dictionary(uniqueKeysWithValues: renderOptions.map { ($0.selectionIndex, $0) })
+        var expected: [Int: ExpectedSelection] = [:]
+        for slot in node.selections where !blockedSelectionIndices.contains(slot.selectionIndex) {
+            guard let selected = slot.selectedResult else { continue }
+            let options: MapResultRenderOptions
+            if let override = supplied.removeValue(forKey: slot.selectionIndex) {
+                guard Self.canonical(override.resultPath) == Self.canonical(selected.resultPath),
+                      override.revision.caseInsensitiveCompare(selected.revision) == .orderedSame,
+                      let mode = MapResultVelocityDisplay(rawValue: override.velocityDisplay) else {
+                    throw BackendServiceError(code: "sourceChanged",
+                        message: L10n.text("The result render options no longer match the selected source slot."))
+                }
+                options = MapResultRenderOptions(velocityDisplay: mode,
+                    mapDiagnostics: override.mapDiagnostics,
+                    forceRecomputeMapPoints: override.forceRecomputeMapPoints)
+            } else {
+                options = .default
+            }
+            expected[slot.selectionIndex] = ExpectedSelection(
+                path: Self.canonical(selected.resultPath), revision: selected.revision,
+                options: options)
+        }
+        guard supplied.isEmpty else {
+            throw BackendServiceError(code: "sourceChanged",
+                message: L10n.text("The result render options contain an inactive source slot."))
+        }
+        return expected
     }
 
     private static func sourceDate(_ value: String) -> Date? {

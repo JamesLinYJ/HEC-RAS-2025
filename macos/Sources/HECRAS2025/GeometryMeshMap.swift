@@ -64,6 +64,7 @@ struct GeometryMeshMapWorkspaceView: View {
                     showsNodes: showsNodes,
                     showsMeshCells: showsMeshCells, showsDegreeIssues: showsDegreeIssues,
                     selectedMapTargetID: session.selectedMapTargetID,
+                    elementFind: session.meshElementFind,
                     selectedRegionIDs: session.selectedRegionIDs,
                     cameraIdentity: session.mapCameraIdentity,
                     selectTarget: selectTarget)
@@ -148,6 +149,24 @@ struct GeometryMeshMapWorkspaceView: View {
                     Button("Open Mesh Diagnostics", systemImage: "waveform.path.ecg") {
                         session.selectDegreeIssue(issue.id)
                         showDiagnostics()
+                    }
+                }
+            }
+            .formStyle(.grouped)
+        } else if let find = session.meshElementFind, find.targetID == session.selectedMapTargetID {
+            Form {
+                Section(L10n.text("Source mesh element")) {
+                    LabeledContent(L10n.text("Element type"), value: L10n.text(find.result.elementKind))
+                    LabeledContent(L10n.text("Source index"), value: find.result.index.formatted())
+                    LabeledContent(L10n.text("Flow Area"), value: find.result.flowAreaName)
+                    LabeledContent(L10n.text("Flow Area ID"), value: find.result.flowAreaID).textSelection(.enabled)
+                    LabeledContent(L10n.text("Source coordinates"),
+                        value: "\(find.result.x.formatted()), \(find.result.y.formatted())")
+                        .textSelection(.enabled)
+                    Text(L10n.text("The highlighted shape and viewport come from the exact source mesh element, even when it is outside the sampled map preview."))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button(L10n.text("Clear found element"), systemImage: "xmark.circle") {
+                        session.clearMeshElementFindTarget()
                     }
                 }
             }
@@ -258,6 +277,7 @@ private struct GeometryMeshMapCanvas: View {
     let showsMeshCells: Bool
     let showsDegreeIssues: Bool
     let selectedMapTargetID: String?
+    let elementFind: GeometryMeshElementFindPresentation?
     let selectedRegionIDs: Set<Int>
     let cameraIdentity: String
     let selectTarget: (GeometryMeshMapHit?) -> Void
@@ -269,6 +289,14 @@ private struct GeometryMeshMapCanvas: View {
     @State private var draggingMap = false
     @State private var didFitExtent = false
     @State private var zoomAtMagnifyStart = 1.0
+    @State private var focusedFindIdentity: String?
+
+    private var cameraExtent: GeometryTopologyExtent? {
+        guard focusedFindIdentity == elementFind?.identity,
+              let viewport = elementFind?.result.viewport else { return map.extent }
+        return GeometryTopologyExtent(minX: viewport.minX, minY: viewport.minY,
+            maxX: viewport.maxX, maxY: viewport.maxY)
+    }
 
     private var currentPan: CGSize {
         CGSize(width: pan.width + dragOffset.width, height: pan.height + dragOffset.height)
@@ -292,7 +320,7 @@ private struct GeometryMeshMapCanvas: View {
                     .help(L10n.text("Zoom out")).disabled(zoom <= 0.55)
                 Button { zoom = min(6, zoom * 1.25) } label: { Image(systemName: "plus.magnifyingglass") }
                     .help(L10n.text("Zoom in")).disabled(zoom >= 6)
-                Button { fit() } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+                Button { fitFullExtent() } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
                     .help(L10n.text("Fit extent"))
                 Button { locateSelection(size: currentCanvasSize) } label: { Image(systemName: "scope") }
                     .help(L10n.text("Locate selection"))
@@ -309,15 +337,17 @@ private struct GeometryMeshMapCanvas: View {
             GeometryReader { geometry in
                 let renderScale = renderScaling.factor
                 Canvas { context, size in
-                    guard let projection = GeometryMeshMapProjection(extent: map.extent, size: size,
+                    guard let projection = GeometryMeshMapProjection(extent: cameraExtent, size: size,
                         zoom: zoom, pan: currentPan) else { return }
                     drawCells(in: &context, projection: projection, renderScale: renderScale)
                     drawTopology(in: &context, projection: projection, renderScale: renderScale)
                     drawIssues(in: &context, projection: projection, renderScale: renderScale)
+                    drawFoundElement(in: &context, projection: projection, renderScale: renderScale)
                 }
                 .background(Color(nsColor: .textBackgroundColor).opacity(0.55))
                 .overlay {
-                    if map.extent == nil || (map.cells.isEmpty && map.topology.features.isEmpty) {
+                    if cameraExtent == nil || (map.cells.isEmpty && map.topology.features.isEmpty
+                        && elementFind == nil) {
                         ContentUnavailableView("No source mesh or topology coordinates are available.",
                             systemImage: "map", description: Text("The map only draws coordinates supplied by this geometry source."))
                             .allowsHitTesting(false)
@@ -355,6 +385,12 @@ private struct GeometryMeshMapCanvas: View {
                     fitIfNeeded()
                     locateSelection(size: geometry.size)
                 }
+                .onChange(of: elementFind?.identity) { _, identity in
+                    focusedFindIdentity = identity
+                    didFitExtent = false
+                    fit()
+                    locateSelection(size: geometry.size)
+                }
                 .onChange(of: cameraIdentity) { _, _ in
                     didFitExtent = false
                     fit()
@@ -364,6 +400,7 @@ private struct GeometryMeshMapCanvas: View {
                 .onChange(of: selectedRegionIDs) { _, _ in locateSelection(size: geometry.size) }
                 .onAppear {
                     currentCanvasSize = geometry.size
+                    focusedFindIdentity = elementFind?.identity
                     fitIfNeeded()
                     locateSelection(size: geometry.size)
                 }
@@ -403,9 +440,14 @@ private struct GeometryMeshMapCanvas: View {
     private func coord(_ value: Double) -> String { value.formatted(.number.precision(.fractionLength(2...5))) }
 
     private func fitIfNeeded() {
-        guard !didFitExtent, map.extent != nil, currentCanvasSize.width > 1, currentCanvasSize.height > 1 else { return }
+        guard !didFitExtent, cameraExtent != nil, currentCanvasSize.width > 1, currentCanvasSize.height > 1 else { return }
         fit()
         didFitExtent = true
+    }
+
+    private func fitFullExtent() {
+        focusedFindIdentity = nil
+        fit()
     }
 
     private func fit() {
@@ -413,13 +455,13 @@ private struct GeometryMeshMapCanvas: View {
         pan = .zero
         dragOffset = .zero
         draggingMap = false
-        didFitExtent = map.extent != nil
+        didFitExtent = cameraExtent != nil
     }
 
     private func locateSelection(size: CGSize) {
         guard size.width > 1, size.height > 1,
               let coordinate = selectedCoordinate(),
-              let projection = GeometryMeshMapProjection(extent: map.extent, size: size,
+              let projection = GeometryMeshMapProjection(extent: cameraExtent, size: size,
                   zoom: zoom, pan: currentPan) else { return }
         let point = projection.project(coordinate)
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
@@ -430,6 +472,9 @@ private struct GeometryMeshMapCanvas: View {
     }
 
     private func selectedCoordinate() -> GeometryTopologyCoordinate? {
+        if let elementFind, selectedMapTargetID == elementFind.targetID {
+            return .init(x: elementFind.result.x, y: elementFind.result.y)
+        }
         if let issue = issues.first(where: { $0.id == selectedMapTargetID }) {
             if let x = issue.x, let y = issue.y, x.isFinite, y.isFinite { return .init(x: x, y: y) }
             if let extent = issue.cellsExtent {
@@ -580,11 +625,51 @@ private struct GeometryMeshMapCanvas: View {
         }
     }
 
+    private func drawFoundElement(in context: inout GraphicsContext,
+                                  projection: GeometryMeshMapProjection,
+                                  renderScale: Double) {
+        guard let elementFind, selectedMapTargetID == elementFind.targetID else { return }
+        let coordinates = elementFind.result.coordinates
+        switch elementFind.result.elementKind {
+        case GeometryMeshElementKind.cell.rawValue:
+            let path = GeometryMeshMapPath.make(paths: [coordinates], projection: projection, close: true)
+            guard !path.isEmpty else { return }
+            context.fill(path, with: .color(Color.accentColor.opacity(0.3)),
+                style: FillStyle(eoFill: true, antialiased: true))
+            context.stroke(path, with: .color(.white),
+                style: StrokeStyle(lineWidth: WorkspaceRenderScaling.metric(5, factor: renderScale),
+                    lineJoin: .round))
+            context.stroke(path, with: .color(.accentColor),
+                style: StrokeStyle(lineWidth: WorkspaceRenderScaling.metric(3, factor: renderScale),
+                    lineJoin: .round))
+        case GeometryMeshElementKind.face.rawValue:
+            let path = GeometryMeshMapPath.make(paths: [coordinates], projection: projection, close: false)
+            guard !path.isEmpty else { return }
+            context.stroke(path, with: .color(.white),
+                style: StrokeStyle(lineWidth: WorkspaceRenderScaling.metric(8, factor: renderScale),
+                    lineCap: .round, lineJoin: .round))
+            context.stroke(path, with: .color(.accentColor),
+                style: StrokeStyle(lineWidth: WorkspaceRenderScaling.metric(5, factor: renderScale),
+                    lineCap: .round, lineJoin: .round))
+        case GeometryMeshElementKind.node.rawValue:
+            guard let coordinate = coordinates.first else { return }
+            let center = projection.project(coordinate)
+            let radius = WorkspaceRenderScaling.metric(7, factor: renderScale)
+            let marker = Path(ellipseIn: CGRect(x: center.x - radius, y: center.y - radius,
+                width: radius * 2, height: radius * 2))
+            context.fill(marker, with: .color(.accentColor))
+            context.stroke(marker, with: .color(.white),
+                lineWidth: WorkspaceRenderScaling.metric(2, factor: renderScale))
+        default:
+            return
+        }
+    }
+
     private func hit(at location: CGPoint, canvasSize: CGSize) -> GeometryMeshMapHit? {
         let hitTolerance = max(WorkspaceRenderScaling.metric(10, factor: renderScaling.factor), 10)
         let lineTolerance = max(WorkspaceRenderScaling.metric(7, factor: renderScaling.factor), 7)
         let issueOutlineTolerance = max(WorkspaceRenderScaling.metric(8, factor: renderScaling.factor), 8)
-        guard let projection = GeometryMeshMapProjection(extent: map.extent, size: canvasSize,
+        guard let projection = GeometryMeshMapProjection(extent: cameraExtent, size: canvasSize,
             zoom: zoom, pan: currentPan) else { return nil }
 
         if showsDegreeIssues {

@@ -72,8 +72,10 @@ struct WorkspaceView: View {
                 let projectID = store.projectSessionID
                 SurfaceCreationDialog(kind: kind, projectSessionID: projectID,
                     projectPath: projectPath,
+                    coreLayerContext: store.surfaceCreationCoreLayerContext,
                     projectXML: { store.document?.editorXML(overridingDescription: store.descriptionDraft) ?? "" },
                     currentProjectSessionID: { store.projectSessionID },
+                    currentCoreLayerContext: { store.captureCoreLayerRequestContext() },
                     provider: BackendSurfaceCreationProvider(client: backend.client),
                     onRunningChanged: store.setSurfaceCreationRunning,
                     onCreated: { store.completeSurfaceCreation($0, kind: kind, projectID: projectID) })
@@ -108,7 +110,9 @@ struct WorkspaceView: View {
             Button("Cancel", role: .cancel, action: store.cancelReplacement)
         } message: { Text("Your unsaved edits will be lost if you continue without saving.") }
         .alert("Save changes to this model?", isPresented: $store.showCloseTabConfirmation) {
-            Button("Save") { Task { await store.saveAndCloseTab() } }
+            if store.pendingCloseTabAllowsSave {
+                Button("Save") { Task { await store.saveAndCloseTab() } }
+            }
             Button("Discard", role: .destructive, action: store.discardAndCloseTab)
             Button("Cancel", role: .cancel, action: store.cancelCloseTab)
         } message: { Text("Your unsaved edits will be lost if you close without saving.") }
@@ -195,7 +199,7 @@ struct WorkspaceToolbar: ToolbarContent {
                 Divider()
                 ForEach(["Create", "Import", "Export", "Map Tools", "Analysis", "Tags", "Support"], id: \.self) { group in
                     Menu {
-                        ForEach(ToolKind.allCases.filter { $0.group == group }) { tool in
+                        ForEach(ToolKind.generalMenuCases.filter { $0.group == group }) { tool in
                             Button { store.activeTool = tool } label: { Text(verbatim: tool.localizedTitle) }
                                 .disabled(tool.requiresProject && !store.hasProject)
                         }

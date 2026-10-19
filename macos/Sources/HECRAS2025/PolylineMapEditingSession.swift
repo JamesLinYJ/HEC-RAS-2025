@@ -516,6 +516,104 @@ final class PolylineMapEditingSession: ObservableObject {
         selectLine(line.id); return true
     }
 
+    /// Synchronizes the map's stable feature selection into this exact line
+    /// editor. Feature IDs are resolved through source path identities rather
+    /// than screen IDs, geometry coordinates, or row order.
+    @discardableResult
+    func selectMapFeatures(_ identities: Set<String>, in layer: MapVectorLayer) -> Bool {
+        guard !identities.isEmpty, let scope = currentScope,
+              scope.layerID == layer.id,
+              layer.sourceMapID == nil || layer.sourceMapID == scope.mapID,
+              SourceFilePaths.canonical(layer.url) == scope.canonicalPath,
+              layer.sourceRevision?.caseInsensitiveCompare(currentSourceRevision ?? "") == .orderedSame,
+              !isBusy, !isSourceStale else { return false }
+        let selected = layer.features.filter { identities.contains($0.stableIdentity) }
+        guard selected.count == identities.count,
+              selected.allSatisfy({ $0.kind == .line && $0.hasUniqueStableIdentity }),
+              Dictionary(grouping: layer.features, by: \.stableIdentity)
+                .allSatisfy({ identities.contains($0.key) ? $0.value.count == 1 : true }) else { return false }
+        let orderedPathIDs = selected.flatMap(\.pathStableIdentities)
+        guard !orderedPathIDs.isEmpty, Set(orderedPathIDs).count == orderedPathIDs.count,
+              Set(orderedPathIDs).isSubset(of: Set(lines.map(\.id))) else { return false }
+        selectLines(orderedPathIDs)
+        return true
+    }
+
+    /// Deletes a map-selected group as one undoable draft transaction. For a
+    /// Shapefile, selecting any multipart component removes its complete source
+    /// record and preserves the remaining record attributes and Z/M values.
+    @discardableResult
+    func deleteMapFeatures(_ identities: Set<String>, in layer: MapVectorLayer) async -> Bool {
+        guard canDeleteMapFeatures(identities, in: layer),
+              let scope = currentScope, let sourceRevision = currentSourceRevision else { return false }
+        let selected = layer.features.filter { identities.contains($0.stableIdentity) }
+        let pathIDs = Set(selected.flatMap(\.pathStableIdentities))
+        let matchedLines = lines.filter { pathIDs.contains($0.id) }
+        guard !matchedLines.isEmpty, Set(matchedLines.map(\.id)) == pathIDs else { return false }
+
+        if let currentDraft = shapefileDraft {
+            let capturedGeneration = draftMutationGeneration
+            isBusy = true; notifyChange()
+            let sourceVerified = await verifyCurrentSource()
+            isBusy = false; notifyChange()
+            guard sourceVerified, !Task.isCancelled, isEditAllowed,
+                  currentScope == scope, currentSourceRevision == sourceRevision,
+                  draftMutationGeneration == capturedGeneration, !isSourceStale, !isBusy,
+                  var latest = shapefileDraft, latest.family == currentDraft.family else {
+                if !isEditAllowed { showSharedEditGateError() }
+                return false
+            }
+            let sourceFeatureIdentities = Set(matchedLines.map(\.sourceFeatureIdentity))
+            guard !sourceFeatureIdentities.isEmpty,
+                  sourceFeatureIdentities.allSatisfy({ identity in
+                      latest.records.contains(where: { $0.sourceFeatureIdentity == identity })
+                  }) else { return false }
+            shapefileUndoStack.append(shapefileSnapshot(latest))
+            if shapefileUndoStack.count > 100 {
+                shapefileUndoStack.removeFirst(shapefileUndoStack.count - 100)
+            }
+            latest.records.removeAll { sourceFeatureIdentities.contains($0.sourceFeatureIdentity) }
+            shapefileDraft = latest
+            lines = Self.lines(from: latest.records, sourceName: latest.sourceLayer.name,
+                revision: sourceRevision)
+            selectedLineID = nil; selectedLineIDs = []; clearVertexSelection(); openedLineID = nil
+            shapefileRedoStack = []
+            draftMutationGeneration &+= 1
+            updateDirtyState(); errorMessage = nil; notifyChange()
+            return true
+        }
+
+        guard let document, document.supportsAddingLines else { return false }
+        let orderedPathIDs = selected.flatMap(\.pathStableIdentities)
+        let removed: Bool? = await mutateResult { document in
+            for identity in orderedPathIDs { try document.deleteLine(lineID: identity) }
+            return true
+        }
+        guard removed == true else { return false }
+        selectedLineID = nil; selectedLineIDs = []; clearVertexSelection(); openedLineID = nil
+        notifyChange()
+        return true
+    }
+
+    func canDeleteMapFeatures(_ identities: Set<String>, in layer: MapVectorLayer) -> Bool {
+        guard !identities.isEmpty, !isBusy, !isSourceStale, isEditAllowed,
+              previewPoints.isEmpty, endpointAttachDraft == nil,
+              let scope = currentScope,
+              scope.layerID == layer.id,
+              layer.sourceMapID == nil || layer.sourceMapID == scope.mapID,
+              SourceFilePaths.canonical(layer.url) == scope.canonicalPath,
+              layer.sourceRevision?.caseInsensitiveCompare(currentSourceRevision ?? "") == .orderedSame else { return false }
+        let selected = layer.features.filter { identities.contains($0.stableIdentity) }
+        guard selected.count == identities.count,
+              selected.allSatisfy({ $0.kind == .line && $0.hasUniqueStableIdentity }),
+              Dictionary(grouping: layer.features, by: \.stableIdentity)
+                .allSatisfy({ identities.contains($0.key) ? $0.value.count == 1 : true }) else { return false }
+        let pathIDs = selected.flatMap(\.pathStableIdentities)
+        guard !pathIDs.isEmpty, Set(pathIDs).count == pathIDs.count,
+              Set(pathIDs).isSubset(of: Set(lines.filter(\.canEdit).map(\.id))) else { return false }
+        return shapefileDraft != nil || document?.supportsAddingLines == true
+    }
+
     func selectLine(_ id: String?) {
         guard id == nil || lines.contains(where: { $0.id == id }) else { return }
         selectedLineID = id; selectedLineIDs = id.map { Set([$0]) } ?? []

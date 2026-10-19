@@ -1,5 +1,6 @@
 using Ras.Backend;
 using Ras.Updates;
+using System.Text.Json;
 
 internal static class WorkspaceUpdateChecks
 {
@@ -7,6 +8,25 @@ internal static class WorkspaceUpdateChecks
     {
         CheckMacPackageClassificationRequiresExplicitPlatformAndArchitecture();
         CheckInstalledVersionComparisonMatchesSourceVersionFields();
+        CheckClientHashWireNames();
+    }
+
+    private static void CheckClientHashWireNames()
+    {
+        string hash = new string('B', 64);
+        JsonElement release = JsonSerializer.SerializeToElement(new WorkspaceUpdateRelease(
+            "release", "1.0.0", null, "", null, "macOS", "arm64", "update.pkg",
+            hash, 42, "manifest", "ready"), BackendJson.Options);
+        Check(release.GetProperty("packageSha256").GetString() == hash,
+            "The update catalog exposes the exact packageSha256 key consumed by the Swift client.");
+        JsonElement update = JsonSerializer.SerializeToElement(new WorkspaceUpdatePackageReceipt(
+            "/fixture/update.pkg", "update.pkg", hash, 42, "macOS", "arm64"), BackendJson.Options);
+        JsonElement export = JsonSerializer.SerializeToElement(new ExportArtifactReceipt(
+            "/fixture/export.shp", 42, hash), BackendJson.Options);
+        foreach (JsonElement receipt in new[] { update, export })
+            Check(receipt.GetProperty("sha256").GetString() == hash &&
+                  !receipt.TryGetProperty("shA256", out _),
+                "Update and export receipts retain the strict sha256 wire key and original digest.");
     }
 
     private static void CheckMacPackageClassificationRequiresExplicitPlatformAndArchitecture()

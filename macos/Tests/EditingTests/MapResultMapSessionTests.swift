@@ -41,6 +41,17 @@ private final class DeferredMapProfileProvider: ProfileProvider {
             MapUpdate(vectors: nil, rasters: [layer], preview: [],
                 selectedLayerID: nil, selectedFeatureID: nil))
     }
+
+    func fail(_ requestID: Int) {
+        continuations.removeValue(forKey: requestID)?.resume(throwing: DeferredMapProfileFailure())
+    }
+}
+
+private struct DeferredMapProfileFailure: Error {}
+
+@MainActor
+private final class MapResultMapDiagnosticAnnotationsBox {
+    var values: [MapResultRenderDiagnosticAnnotation] = []
 }
 
 @MainActor
@@ -53,6 +64,32 @@ private final class ImmediateMapProfileProvider: ProfileProvider {
             width: 1, height: 1, rgba: Data([20, 30, 40, 255]),
             lowerLeft: MapPoint(x: 0, y: 0), upperRight: MapPoint(x: 1, y: 1),
             sourceMapID: mapID)
+        return MapUpdate(vectors: nil, rasters: [layer], preview: [],
+            selectedLayerID: nil, selectedFeatureID: nil)
+    }
+}
+
+@MainActor
+private final class OptionLifecycleMapProfileProvider: ProfileProvider {
+    private let mapID: UUID
+    private let viewport: MapResultMapSession.ViewportLookup
+    private let prefix: String
+    private(set) var requestCount = 0
+
+    init(mapID: UUID, viewport: @escaping MapResultMapSession.ViewportLookup,
+         prefix: String) {
+        self.mapID = mapID
+        self.viewport = viewport
+        self.prefix = prefix
+    }
+
+    func selectProfile(_ index: Int) async throws -> MapUpdate {
+        requestCount += 1
+        let x = viewport()?.minX ?? -1
+        let id = "\(prefix)-profile-\(index)-x\(x)"
+        let layer = try MapRasterLayer(id: id, name: id, width: 1, height: 1,
+            rgba: Data([20, 30, 40, 255]), lowerLeft: MapPoint(x: 0, y: 0),
+            upperRight: MapPoint(x: 1, y: 1), sourceMapID: mapID)
         return MapUpdate(vectors: nil, rasters: [layer], preview: [],
             selectedLayerID: nil, selectedFeatureID: nil)
     }
@@ -680,6 +717,186 @@ struct MapResultMapSessionTests {
         #expect(session.selectedTimeline?.currentID == 1)
         #expect(session.nodes.first(where: { $0.id == nodeA.id })?.profileIndex == 0)
         #expect(session.resultLayers.map(\.id) == [nodeA.name + "-latest", nodeB.name + "-profile-1"])
+    }
+
+    @Test @MainActor
+    func diagnosticAnnotationsCommitAtomicallyWithTheirViewportFrames() async throws {
+        let mapID = UUID(uuidString: "CA5DB39A-1D3C-4804-A1FA-5F85FD7AC9A1")!
+        let snapshot = makeSnapshot(mapID: mapID)
+        let nodeA = snapshot.sources.activeNodes[0]
+        let nodeB = snapshot.sources.activeNodes[1]
+        let viewport = MapResultMapViewportBox()
+        viewport.extent = extent(0)
+        let providerA = DeferredMapProfileProvider(viewport: { viewport.extent })
+        let providerB = DeferredMapProfileProvider(viewport: { viewport.extent })
+        let boxes = [nodeA.id: MapResultMapDiagnosticAnnotationsBox(),
+                     nodeB.id: MapResultMapDiagnosticAnnotationsBox()]
+
+        func raster(_ id: String, red: UInt8) throws -> MapRasterLayer {
+            try MapRasterLayer(id: id, name: id, width: 1, height: 1,
+                rgba: Data([red, 20, 30, 255]), lowerLeft: MapPoint(x: 0, y: 0),
+                upperRight: MapPoint(x: 1, y: 1), sourceMapID: mapID)
+        }
+        func annotation(_ node: MapResultChartActiveNode, text: String) -> MapResultRenderDiagnosticAnnotation {
+            MapResultRenderDiagnosticAnnotation(layerID: node.name + "-raster",
+                resultPath: "/tmp/map-result-map/\(node.name).hdf", revision: "source-sha",
+                selectionIndices: [0], text: text, x: 2, y: 3)
+        }
+
+        boxes[nodeA.id]?.values = [annotation(nodeA, text: "A initial")]
+        boxes[nodeB.id]?.values = [annotation(nodeB, text: "B initial")]
+        let session = MapResultMapSession(prepareNode: { request in
+            let node = request.node.id == nodeA.id ? nodeA : nodeB
+            let id = node.name + "-raster"
+            let initialLayer = try raster(id, red: 10)
+            let steps = [ProfileStep(id: 0, label: "T0"), ProfileStep(id: 1, label: "T1")]
+            return MapResultMapSession.PreparedNode(
+                presentation: MapProfilePresentation(sourceID: node.id, steps: steps, selectedID: 0),
+                provider: request.node.id == nodeA.id ? providerA : providerB,
+                initialUpdate: MapUpdate(vectors: nil, rasters: [initialLayer], preview: [],
+                    selectedLayerID: nil, selectedFeatureID: nil),
+                initialLegends: [legend(for: id)], initialUnavailableReason: nil,
+                initialSourceStatuses: [], renderedViewport: request.viewport(),
+                diagnosticLookup: { boxes[node.id]?.values ?? [] },
+                availability: { MapResultMapAvailability(reason: nil, sourceStatuses: []) })
+        })
+
+        session.configure(snapshot: snapshot, viewport: { viewport.extent }, isCurrent: { true })
+        try await waitUntil { !session.isLoading && session.resultLayers.count == 2 }
+        func visibleLabels() -> [String] {
+            session.diagnosticAnnotations(visibleLayerIDs: Set(session.resultLayers.map(\.id)))
+                .map(\.text).sorted()
+        }
+        #expect(visibleLabels() == ["A initial", "B initial"])
+
+        boxes[nodeA.id]?.values = [annotation(nodeA, text: "A viewport")]
+        boxes[nodeB.id]?.values = [annotation(nodeB, text: "B viewport")]
+        viewport.extent = extent(10)
+        session.viewportChanged()
+        try await waitUntil { providerA.requests.count == 1 }
+        providerA.finish(1, layer: try raster(nodeA.name + "-raster", red: 100))
+        try await waitUntil { providerB.requests.count == 1 }
+        #expect(visibleLabels() == ["A initial", "B initial"],
+            "A staged Result frame cannot replace diagnostic labels while another node still shows the previous viewport.")
+        #expect(session.resultLayers.allSatisfy { $0.rgba.first == 10 },
+            "The last complete viewport raster set remains visible while the next set is incomplete.")
+        providerB.finish(1, layer: try raster(nodeB.name + "-raster", red: 100))
+        try await waitUntil { !session.isReloading && session.resultLayers.allSatisfy { $0.rgba.first == 100 } }
+        #expect(visibleLabels() == ["A viewport", "B viewport"],
+            "The new annotations publish together with the complete new viewport frame set.")
+
+        boxes[nodeA.id]?.values = [annotation(nodeA, text: "A failed refresh")]
+        boxes[nodeB.id]?.values = [annotation(nodeB, text: "B failed refresh")]
+        viewport.extent = extent(20)
+        session.viewportChanged()
+        try await waitUntil { providerA.requests.count == 2 }
+        providerA.finish(2, layer: try raster(nodeA.name + "-raster", red: 200))
+        try await waitUntil { providerB.requests.count == 2 }
+        providerB.fail(2)
+        try await waitUntil { !session.isReloading }
+        #expect(session.resultLayers.allSatisfy { $0.rgba.first == 100 })
+        #expect(visibleLabels() == ["A viewport", "B viewport"],
+            "A failed multi-node refresh leaves both the prior raster set and its matching diagnostics installed.")
+        session.invalidate()
+    }
+
+    @Test @MainActor
+    func renderOptionRefreshRebindsAfterViewportCancellationAndRecoversPriorOptionsOnFailure() async throws {
+        let mapID = UUID(uuidString: "CA5DB39A-1D3C-4804-A1FA-5F85FD7AC9A1")!
+        let snapshot = makeSnapshot(mapID: mapID)
+        let node = snapshot.sources.activeNodes[0]
+        let choice = try #require(node.selections.first?.selectedResult)
+        let viewport = MapResultMapViewportBox()
+        viewport.extent = extent(0)
+        var calls: [(nodeID: String, mode: String, diagnostics: Bool,
+            viewport: RasterMapViewExtent?)] = []
+        var providers: [String: OptionLifecycleMapProfileProvider] = [:]
+        var delayNextVxPrepare = true
+        var failNextDiagnosticPrepare = false
+
+        let session = MapResultMapSession(prepareNode: { request in
+            let option = request.renderOptions.first
+            let mode = option?.velocityDisplay ?? "Magnitude"
+            let diagnostics = option?.mapDiagnostics ?? false
+            let requestedViewport = request.viewport()
+            calls.append((request.node.id, mode, diagnostics, requestedViewport))
+            if mode == MapResultVelocityDisplay.vx.rawValue && delayNextVxPrepare {
+                delayNextVxPrepare = false
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+            if diagnostics && failNextDiagnosticPrepare {
+                failNextDiagnosticPrepare = false
+                throw DeferredMapProfileFailure()
+            }
+
+            let suffix = requestedViewport.map { String($0.minX) } ?? "none"
+            let id = "\(mode)-initial-x\(suffix)-\(request.node.id)"
+            let layer = try MapRasterLayer(id: id, name: id, width: 1, height: 1,
+                rgba: Data([10, 20, 30, 255]), lowerLeft: MapPoint(x: 0, y: 0),
+                upperRight: MapPoint(x: 1, y: 1), sourceMapID: request.mapID)
+            let provider = OptionLifecycleMapProfileProvider(mapID: request.mapID,
+                viewport: request.viewport, prefix: mode)
+            providers[request.node.id] = provider
+            return MapResultMapSession.PreparedNode(
+                presentation: MapProfilePresentation(sourceID: request.node.id,
+                    steps: [.init(id: 0, label: "T0")], selectedID: 0),
+                provider: provider,
+                initialUpdate: MapUpdate(vectors: nil, rasters: [layer], preview: [],
+                    selectedLayerID: nil, selectedFeatureID: nil),
+                initialLegends: [], initialUnavailableReason: nil,
+                initialSourceStatuses: [], renderedViewport: requestedViewport,
+                availability: { MapResultMapAvailability(reason: nil, sourceStatuses: []) })
+        })
+        session.configure(snapshot: snapshot, viewport: { viewport.extent }, isCurrent: { true })
+        try await waitUntil { !session.isLoading && session.resultLayers.count == 2 }
+        let originalProvider = try #require(providers[node.id])
+
+        var vx = session.renderOptions(mapID: mapID, node: node.node, selectionIndex: 0,
+            resultPath: choice.resultPath, revision: choice.revision)
+        vx.velocityDisplay = .vx
+        session.setRenderOptions(vx, mapID: mapID, node: node.node,
+            mapType: node.selectedMapType, selectionIndex: 0,
+            resultPath: choice.resultPath, revision: choice.revision)
+        try await waitUntil {
+            calls.contains { $0.nodeID == node.id && $0.mode == MapResultVelocityDisplay.vx.rawValue }
+        }
+        #expect(session.layers(for: node.node).isEmpty,
+            "A raster made with the old display mode is hidden while the new option is pending.")
+
+        viewport.extent = extent(50)
+        session.viewportChanged()
+        #expect(session.layers(for: node.node).isEmpty,
+            "Cancelling a stale viewport request cannot expose the old-mode raster as the new frame.")
+        try await waitUntil { originalProvider.requestCount == 1 }
+        try await waitUntil {
+            session.layers(for: node.node).first?.id ==
+                "Vx-initial-x50.0-\(node.id)"
+        }
+        #expect(calls.filter { $0.nodeID == node.id && $0.mode == MapResultVelocityDisplay.vx.rawValue }
+            .last?.viewport == viewport.extent,
+            "The desired mode is prepared again against the final viewport after all-node refresh.")
+        #expect(session.renderOptions(mapID: mapID, node: node.node, selectionIndex: 0,
+            resultPath: choice.resultPath, revision: choice.revision).velocityDisplay == .vx)
+
+        failNextDiagnosticPrepare = true
+        var withDiagnostics = vx
+        withDiagnostics.mapDiagnostics = true
+        let previousRequestCount = calls.count
+        session.setRenderOptions(withDiagnostics, mapID: mapID, node: node.node,
+            mapType: node.selectedMapType, selectionIndex: 0,
+            resultPath: choice.resultPath, revision: choice.revision)
+        try await waitUntil { calls.count > previousRequestCount && failNextDiagnosticPrepare == false }
+        try await waitUntil {
+            let applied = session.renderOptions(mapID: mapID, node: node.node,
+                selectionIndex: 0, resultPath: choice.resultPath, revision: choice.revision)
+            return !applied.mapDiagnostics
+                && applied.velocityDisplay == .vx
+                && session.layers(for: node.node).first?.id.contains("Vx-profile-0-x50.0") == true
+        }
+        #expect(session.renderOptions(mapID: mapID, node: node.node, selectionIndex: 0,
+            resultPath: choice.resultPath, revision: choice.revision) == vx,
+            "A failed option preparation restores the last installed controls and reloads that source frame.")
+        session.invalidate()
     }
 
     @Test @MainActor

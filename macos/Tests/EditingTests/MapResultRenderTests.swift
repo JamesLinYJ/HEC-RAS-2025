@@ -29,7 +29,12 @@ struct MapResultRenderTests {
             maxX: 2,
             maxY: 3,
             noDataValue: -9999,
-            legendStops: [.init(color: "#000000FF", value: 0), .init(color: "#FFFFFFFF", value: 10)])
+            legendStops: [.init(color: "#000000FF", value: 0), .init(color: "#FFFFFFFF", value: 10)],
+            selectionIndices: [0],
+            velocityDisplay: "Magnitude",
+            mapDiagnostics: false,
+            forceRecomputeMapPoints: false,
+            diagnosticLabels: [])
         let response = MapResultRenderResult(
             contextToken: "context",
             sourceID: payload.sourceID,
@@ -63,7 +68,9 @@ struct MapResultRenderTests {
             terrainRevision: String(repeating: "B", count: 64), profileIndex: 0,
             profileName: "Profile 0", time: "2026-10-16T00:00:00.0000000", units: "ft",
             width: 1, height: 1, rgba: Data([0, 0, 0, 255]), minX: 0, minY: 0, maxX: 1,
-            maxY: 1, noDataValue: -9999, legendStops: [])
+            maxY: 1, noDataValue: -9999, legendStops: [], selectionIndices: [0],
+            velocityDisplay: "Magnitude", mapDiagnostics: false,
+            forceRecomputeMapPoints: false, diagnosticLabels: [])
 
         #expect(throws: BackendServiceError.self) {
             try payload.makeLayer(expectedMapID: firstMap)

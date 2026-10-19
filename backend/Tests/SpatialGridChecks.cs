@@ -109,6 +109,7 @@ internal static class SpatialGridChecks
             }
         }
         using (var remote = new BoundaryCondition(asset, project)) { remote.AirPressure.GridDataLocation = Ras.Layers.Meteorology.DataLocation.Remote; remote.Save(); }
+        await DssGridImportChecks.Run();
         var remoteState = await ModelEditorAdapter.LoadAsync(new(asset, "Boundary Conditions", path));
         Check(remoteState.Grids!["airPressure"].Times.Length == 0 && remoteState.Grids["airPressure"].Error != null,
             "Remote mode reports its actual source limitation rather than displaying a retained local raster as active remote data");

@@ -45,11 +45,39 @@ public struct MapSourceAttributeColumn: Hashable, Sendable {
     public let ordinal: Int
     public let name: String
     public let value: MapSourceAttributeValue
+    /// Optional source-format provenance for formats whose table semantics
+    /// distinguish an unset cell from an explicit NULL or preserve a declared
+    /// type/lexeme that cannot be represented by the legacy display value.
+    public let sourceMetadata: MapSourceAttributeMetadata?
 
-    public init(ordinal: Int, name: String, value: MapSourceAttributeValue) {
+    public init(ordinal: Int, name: String, value: MapSourceAttributeValue,
+                sourceMetadata: MapSourceAttributeMetadata? = nil) {
         self.ordinal = ordinal
         self.name = name
         self.value = value
+        self.sourceMetadata = sourceMetadata
+    }
+}
+
+/// Exact source-column state retained alongside the display-compatible value.
+/// `rawLexeme` is intentionally a String so Integer64 and other source numbers
+/// do not lose precision through a native Double conversion.
+public struct MapSourceAttributeMetadata: Hashable, Sendable {
+    public let sourceType: String
+    public let rawLexeme: String?
+    public let booleanValue: Bool?
+    public let isSet: Bool
+    public let isNull: Bool
+    public let timeZoneFlag: Int?
+
+    public init(sourceType: String, rawLexeme: String? = nil, booleanValue: Bool? = nil,
+                isSet: Bool, isNull: Bool, timeZoneFlag: Int? = nil) {
+        self.sourceType = sourceType
+        self.rawLexeme = rawLexeme
+        self.booleanValue = booleanValue
+        self.isSet = isSet
+        self.isNull = isNull
+        self.timeZoneFlag = timeZoneFlag
     }
 }
 

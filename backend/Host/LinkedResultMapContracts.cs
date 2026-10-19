@@ -3,7 +3,8 @@ namespace Ras.Backend;
 public sealed record LinkedResultMapRequest(string ProjectPath, string ProjectXml,
     string ProjectRevision, ResultPlanCandidate Anchor, ResultPlanCandidateGroup[] SelectedGroups,
     int ProfileIndex, string MapType, string FrameMode = "Profile",
-    RasterMapViewExtent? Viewport = null);
+    RasterMapViewExtent? Viewport = null,
+    CoreLayerRequestContext? CoreLayerContext = null);
 
 public sealed record LinkedResultMapSourceStatus(string ResultPath, string Revision,
     string ResultName, string? TerrainPath, string? TerrainRevision, bool Available,

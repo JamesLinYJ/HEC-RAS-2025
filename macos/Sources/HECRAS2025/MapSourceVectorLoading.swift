@@ -52,7 +52,16 @@ struct MapVectorSourceReadRequest: Sendable {
 
 struct MapVectorSourceReadRequests: Sendable {
     let files: [MapVectorSourceReadRequest]
+    let gdbLayers: [GdbMapVectorSourceReadRequest]
     let issues: [String]
+
+    init(files: [MapVectorSourceReadRequest], gdbLayers: [GdbMapVectorSourceReadRequest] = [], issues: [String]) {
+        self.files = files
+        self.gdbLayers = gdbLayers
+        self.issues = issues
+    }
+
+    var totalSources: Int { files.count + gdbLayers.count }
 }
 
 struct MapVectorSourceLoadProgress: Sendable {
@@ -80,10 +89,31 @@ enum MapVectorSourceLoader {
                                   nodeIDs: [String], name: String)] = [:]
         var issues: [String] = []
         var conflictingPaths = Set<String>()
+        var gdbLayers: [GdbMapVectorSourceReadRequest] = []
+        var gdbNodeIDs = Set<String>()
 
         for node in nodes {
-            guard let locator = node.sourceLocator,
-                  locator.nodeType == "MapLayer",
+            guard let locator = node.sourceLocator else { continue }
+
+            if locator.nodeType == "GdbVectorLayer" || locator.mapType == "GdbVectorLayer" {
+                guard locator.nodeType == "GdbVectorLayer", locator.mapType == "GdbVectorLayer",
+                      node.sourceClass == "GdbVectorLayerVisualContext",
+                      !node.id.isEmpty, gdbNodeIDs.insert(node.id).inserted,
+                      let url = urlForNode(node),
+                      let layerName = node.properties.first(where: { $0.id == "Source/GdbLayerName" })?.value,
+                      !layerName.isEmpty,
+                      let vectorType = node.properties.first(where: { $0.id == "Source/GdbVectorType" })?.value,
+                      GdbMapLayerDescriptor.featureKind(for: vectorType) != nil,
+                      GdbFileGeodatabasePath.root(for: url) == url.standardizedFileURL.resolvingSymlinksInPath() else {
+                    issues.append("\(node.name): the exact File Geodatabase layer identity is unavailable.")
+                    continue
+                }
+                gdbLayers.append(.init(mapID: mapID, url: url, nodeID: node.id, locator: locator,
+                    layerName: layerName, vectorType: vectorType, displayName: node.name))
+                continue
+            }
+
+            guard locator.nodeType == "MapLayer",
                   let mapType = locator.mapType,
                   let expected = mapTypes[mapType] else { continue }
 
@@ -127,7 +157,10 @@ enum MapVectorSourceLoader {
                     sourceRevision: value.revision,
                     nodeIDs: Array(Set(value.nodeIDs)).sorted(), displayName: value.name)
             }
-        return .init(files: files, issues: issues)
+        return .init(files: files,
+            gdbLayers: gdbLayers.sorted {
+                ($0.canonicalPath, $0.nodeID) < ($1.canonicalPath, $1.nodeID)
+            }, issues: issues)
     }
 
     /// Reads and parses each exact captured file once. Task cancellation is

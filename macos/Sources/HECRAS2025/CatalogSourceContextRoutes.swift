@@ -13,7 +13,9 @@ enum CatalogSourceContextRoutes {
         "PointsVector": "PointMapLayerVisualContext",
         "PolylinesVector": "PolylineMapLayerVisualContext",
         "PolygonsVector": "PolygonMapLayerVisualContext",
-        "SingleBandRasterMapLayer": "RasterMapLayerVisualContext"
+        "SingleBandRasterMapLayer": "RasterMapLayerVisualContext",
+        "ImageRasterMapLayer": "ImageMapLayerVisualContext",
+        "DiscreteRasterMapLayer": "DiscreteRasterMapLayerVisualContext"
     ]
 
     static func mapLayerFilePath(for node: LayerTreeNode) -> String? {

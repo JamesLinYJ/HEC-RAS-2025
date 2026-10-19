@@ -41,13 +41,16 @@ struct SurfaceCreationRequest: Codable, Equatable, Sendable {
     let projectXml: String
     let name: String
     var revision: String? = nil
+    var coreLayerContext: CoreLayerRequestContext? = nil
 
-    init(kind: SurfaceCreationKind, projectPath: String, projectXml: String, name: String, revision: String? = nil) {
+    init(kind: SurfaceCreationKind, projectPath: String, projectXml: String, name: String,
+         revision: String? = nil, coreLayerContext: CoreLayerRequestContext? = nil) {
         self.kind = kind.rawValue
         self.projectPath = projectPath
         self.projectXml = projectXml
         self.name = name
         self.revision = revision
+        self.coreLayerContext = coreLayerContext
     }
 }
 

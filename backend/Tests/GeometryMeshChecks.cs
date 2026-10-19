@@ -52,6 +52,8 @@ internal static class GeometryMeshChecks
             new("generate", OperationID: "mesh-history-operation")));
         Check(preview.IsDirty && preview.GenerationReport is { MeshWasReplaced: true, CellCount: > 0 },
             "Generate action stores a source-built mesh preview in the in-memory child draft");
+        await GeometryMeshPlotRenderingChecks.RunAsync(model, preview, topologyDraft.DraftState,
+            topologyLoaded.DraftState);
         Check(preview.DiagnosticHistoryEvent is { } history
             && history.OperationID == "mesh-history-operation" && history.Result
             && history.Topology.Features.Any(feature => feature.FeatureKind == "region"

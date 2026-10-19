@@ -32,6 +32,21 @@ struct ProjectGeometryMapFlowAreaGenerationPresentation: Sendable {
     let map: GeometryMeshMapData?
 }
 
+/// A runtime-only Geometry culvert draft extent used by the shared MapState
+/// transform. It is scoped to the exact source capture and HDF revision; it
+/// does not alter the persisted map or move an already established camera.
+struct ProjectGeometryMapCulvertDraftPresentation: Sendable {
+    let identity: String
+    let captureIdentity: String
+    let projectSessionID: UUID
+    let mapID: UUID
+    let mapWorkflowIdentity: String
+    let geometryCanonicalPath: String
+    let geometryRevision: String
+    let extent: GeometryTopologyExtent?
+    let featureCount: Int
+}
+
 struct ProjectGeometryMapSourceState: Identifiable, Sendable {
     let capture: ProjectGeometryMapCapture
     var snapshot: MapGeometrySnapshot?
@@ -48,6 +63,7 @@ struct ProjectGeometryMapSourceState: Identifiable, Sendable {
     var culvertsProgress = ProjectGeometryMapPageProgress()
     var viewportIdentity: String?
     var flowAreaGenerationPresentation: ProjectGeometryMapFlowAreaGenerationPresentation?
+    var culvertDraftPresentation: ProjectGeometryMapCulvertDraftPresentation?
     /// The source FlowAreaLayer tree node that received the terminal
     /// Generate Mesh visibility state. This is a map-local presentation
     /// override; it never changes the saved map tree or its .vis revision.
@@ -100,7 +116,7 @@ struct ProjectGeometryMapSourceState: Identifiable, Sendable {
             count += presentedFlowAreaCells.count
         }
         if snapshot.culvertsState.effectiveVisible && snapshot.culvertsState.status.hasSourceData {
-            count += culvertFeatures.count
+            count += culvertDraftPresentation?.featureCount ?? culvertFeatures.count
         }
         return count
     }
@@ -115,7 +131,11 @@ struct ProjectGeometryMapSourceState: Identifiable, Sendable {
             appendExtent(presentedFlowAreaExtent, to: &result)
         }
         if snapshot.culvertsState.effectiveVisible && snapshot.culvertsState.status.hasSourceData {
-            appendExtent(culvertsExtent, to: &result)
+            if let culvertDraftPresentation {
+                appendExtent(culvertDraftPresentation.extent, to: &result)
+            } else {
+                appendExtent(culvertsExtent, to: &result)
+            }
         }
         return result.filter { $0.x.isFinite && $0.y.isFinite }
     }
@@ -181,6 +201,7 @@ final class ProjectGeometryMapSession: ObservableObject {
     private var viewportTask: Task<Void, Never>?
     private var generation: UInt64 = 0
     private var flowAreaVisibilitySuppressions: Set<FlowAreaVisibilitySuppression> = []
+    private var geometryPlotSessions: [String: GeometryMeshPlotSession] = [:]
 
     var canRefreshSources: Bool { isConfigured && map != nil && provider != nil }
     var visiblePoints: [MapPoint] { sources.flatMap(\.visiblePoints) }
@@ -204,17 +225,62 @@ final class ProjectGeometryMapSession: ObservableObject {
         sources.contains { $0.snapshot == nil || $0.error != nil || $0.hasNextPage }
     }
 
+    /// Returns the runtime-only plot owner for one current Geometry capture.
+    /// An unavailable result is inert; stale details views cannot create a
+    /// renderer after their map owner has been retired.
+    func geometryPlotSession(for captureIdentity: String) -> GeometryMeshPlotSession {
+        guard isConfigured,
+              sources.contains(where: { $0.capture.identity == captureIdentity }) else {
+            return .retiredSession
+        }
+        if let existing = geometryPlotSessions[captureIdentity] { return existing }
+        let plotSession = GeometryMeshPlotSession(owner: self, captureIdentity: captureIdentity)
+        plotSession.onChange = { [weak self] in
+            guard let self, self.geometryPlotSessions[captureIdentity] === plotSession else { return }
+            self.renderRevision &+= 1
+        }
+        geometryPlotSessions[captureIdentity] = plotSession
+        return plotSession
+    }
+
+    /// Confirms that both the current map lease and source snapshot still
+    /// match the capture before a backend request or reply is accepted.
+    func ownsPlotSnapshot(_ source: ProjectGeometryMapSourceState) -> Bool {
+        guard isConfigured,
+              mapWorkflowIdentity == source.capture.mapWorkflowIdentity,
+              let map,
+              map.mapID == source.capture.mapID.uuidString,
+              map.projectPath == source.capture.map.projectPath,
+              map.projectXmlSHA.caseInsensitiveCompare(source.capture.map.projectXmlSHA) == .orderedSame,
+              let current = sources.first(where: { $0.capture.identity == source.capture.identity }),
+              current.capture == source.capture,
+              let currentSnapshot = current.snapshot,
+              let snapshot = source.snapshot else { return false }
+        return currentSnapshot.contextToken == snapshot.contextToken
+            && currentSnapshot.mapID == snapshot.mapID
+            && currentSnapshot.projectRevision == snapshot.projectRevision
+            && currentSnapshot.projectXmlSHA?.caseInsensitiveCompare(snapshot.projectXmlSHA ?? "") == .orderedSame
+            && currentSnapshot.visualizationRevision == snapshot.visualizationRevision
+            && currentSnapshot.geometryNode == snapshot.geometryNode
+            && currentSnapshot.geometryCanonicalPath == snapshot.geometryCanonicalPath
+            && currentSnapshot.geometryRevision == snapshot.geometryRevision
+    }
+
     func configure(map: MapTreeMapIdentity, workflowIdentity: String,
                    captures: [ProjectGeometryMapCapture],
                    provider: any ProjectGeometryMapProvider,
                    preflightDiagnostics: [String] = [],
                    isCurrent: @escaping @MainActor () -> Bool) async {
-        if self.mapWorkflowIdentity == workflowIdentity, isConfigured {
+        let requestedCaptureIdentities = Set(captures.map(\.identity))
+        let loadedCaptureIdentities = Set(sources.map { $0.capture.identity })
+        if self.mapWorkflowIdentity == workflowIdentity, isConfigured,
+           requestedCaptureIdentities == loadedCaptureIdentities {
             // Completed source pages remain in the MapState. An interrupted or
             // failed automatic drain resumes on re-entry unless the user paused it.
             if !isLoading && !isPaused && canContinuePaging { startPaging(clearTokens: false) }
             return
         }
+        retireGeometryPlotSessions()
         cancel()
         self.map = map
         self.mapWorkflowIdentity = workflowIdentity
@@ -238,6 +304,7 @@ final class ProjectGeometryMapSession: ObservableObject {
     }
 
     func invalidate() {
+        retireGeometryPlotSessions()
         cancel()
         isConfigured = false
         map = nil
@@ -259,6 +326,7 @@ final class ProjectGeometryMapSession: ObservableObject {
     }
 
     func reportConfigurationError(_ message: String) {
+        retireGeometryPlotSessions()
         cancel()
         map = nil
         mapWorkflowIdentity = nil
@@ -282,6 +350,12 @@ final class ProjectGeometryMapSession: ObservableObject {
         viewportTask = nil
         isLoading = false
         for index in sources.indices { sources[index].isLoading = false }
+    }
+
+    private func retireGeometryPlotSessions() {
+        let sessions = Array(geometryPlotSessions.values)
+        geometryPlotSessions.removeAll()
+        for plotSession in sessions { plotSession.retire() }
     }
 
     func refresh() async {
@@ -313,6 +387,43 @@ final class ProjectGeometryMapSession: ObservableObject {
         }
         renderRevision &+= 1
         if previousCameraBounds != cameraBoundsIdentity { cameraExtentRevision &+= 1 }
+    }
+
+    /// Installs the exact loaded Geometry child draft as a map-local extent.
+    /// Unlike a source extent change, an editor draft must not reset an
+    /// established camera; MapState uses this range after explicit full-fit or
+    /// before it has established reference points.
+    func setCulvertDraftPresentation(
+        _ presentation: ProjectGeometryMapCulvertDraftPresentation?,
+        captureIdentity: String
+    ) {
+        guard let index = sources.firstIndex(where: { $0.capture.identity == captureIdentity }) else { return }
+        var source = sources[index]
+        if let presentation {
+            guard source.capture.resultOwner == nil,
+                  presentation.captureIdentity == source.capture.identity,
+                  presentation.projectSessionID == source.capture.projectSessionID,
+                  presentation.mapID == source.capture.mapID,
+                  presentation.mapWorkflowIdentity == source.capture.mapWorkflowIdentity,
+                  presentation.geometryCanonicalPath == source.capture.geometryCanonicalPath,
+                  source.snapshot?.geometryRevision.caseInsensitiveCompare(presentation.geometryRevision) == .orderedSame,
+                  source.snapshot?.geometryEffectiveVisible == true,
+                  source.snapshot?.culvertsState.effectiveVisible == true,
+                  source.snapshot?.culvertsState.status.hasSourceData == true,
+                  presentation.featureCount >= 0,
+                  presentation.extent.map({ extent in
+                      extent.minX.isFinite && extent.minY.isFinite && extent.maxX.isFinite && extent.maxY.isFinite
+                          && extent.minX <= extent.maxX && extent.minY <= extent.maxY
+                  }) ?? true else { return }
+        }
+        guard source.culvertDraftPresentation?.identity != presentation?.identity else { return }
+        source.culvertDraftPresentation = presentation
+        sources[index] = source
+        if presentation == nil,
+           selection?.id.hasPrefix(captureIdentity + "|culvert|parent-draft|") == true {
+            selection = nil
+        }
+        renderRevision &+= 1
     }
 
     /// Mirrors the retained source job's terminal IsChecked=true state for
@@ -533,6 +644,7 @@ final class ProjectGeometryMapSession: ObservableObject {
             sources[index].topologyExtent = nil
             sources[index].flowAreasExtent = nil
             sources[index].culvertsExtent = nil
+            sources[index].culvertDraftPresentation = nil
         } else {
             sources[index].snapshot = oldSnapshot
         }
@@ -637,6 +749,12 @@ final class ProjectGeometryMapSession: ObservableObject {
         source.viewportIdentity = viewportID
         source.error = nil
         source.snapshot = response
+        if let culvertDraftPresentation = source.culvertDraftPresentation,
+           (response.geometryRevision.caseInsensitiveCompare(culvertDraftPresentation.geometryRevision) != .orderedSame
+            || !response.geometryEffectiveVisible || !response.culvertsState.effectiveVisible
+            || !response.culvertsState.status.hasSourceData) {
+            source.culvertDraftPresentation = nil
+        }
         if let page = response.topology {
             source.topologyExtent = page.sourceExtent
             appendUnique(page.features, to: &source.topologyFeatures, identity: \.id)

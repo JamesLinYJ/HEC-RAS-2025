@@ -20,7 +20,7 @@ namespace Ras.Backend;
 /// providers render satellite and USGS imagery, while the renamed OSM style
 /// and TMS vector-tile routes feed the CPU tile decoder and native map canvas.
 /// </summary>
-public static class BackgroundMapService
+public static partial class BackgroundMapService
 {
     private const string OsmBaseUrl = "https://osm.hecdev.net";
     private const string OsmTileKey = "ras010_65fd3e26933b";
@@ -337,21 +337,7 @@ public static class BackgroundMapService
     private static OsmCpuTileCoordinate[] GetVisibleOsmTiles(Extent projectExtent,
         double worldUnitsPerPixel, Projection projectProjection, int density)
     {
-        double cellSizeInMeters = worldUnitsPerPixel;
-        if (projectProjection.TryParseUnitSystem(out Utility.Units.UnitSystem units) &&
-            units == Utility.Units.UnitSystem.USCustomary)
-            cellSizeInMeters *= 0.3048;
-
-        List<double> levels = new(20);
-        double nextLevel = (HalfWorldWidth * 2.0) / OsmTileSize;
-        for (int index = 0; index < 20; index++)
-        {
-            levels.Add(nextLevel);
-            nextLevel /= 2.0;
-        }
-        int sourceZoom = levels.FindIndex(level => cellSizeInMeters > level);
-        if (sourceZoom < 0) sourceZoom = levels.Count - 1;
-        int zoom = Math.Clamp(sourceZoom + density, 0, 14);
+        int zoom = ResolveOsmZoom(worldUnitsPerPixel, projectProjection, density);
 
         using ReprojectionTransformer transformer = new(WellKnownProjections.WebMercator, projectProjection);
         Extent mercatorExtent = Projector.GetBoundingBox(projectExtent, transformer,

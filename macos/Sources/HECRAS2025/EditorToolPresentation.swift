@@ -6,11 +6,13 @@ enum EditorToolImportPresentation: Identifiable {
     case classification(requestID: UUID)
     case gridded(requestID: UUID, layer: SpatialBoundaryLayer)
     case chooseGridded(requestID: UUID, layers: [SpatialBoundaryLayer])
+    case spatialBoundary(requestID: UUID, assetID: String, layerID: String?)
 
     var id: UUID {
         switch self {
         case .terrain(let requestID), .classification(let requestID),
              .gridded(let requestID, _), .chooseGridded(let requestID, _),
+             .spatialBoundary(let requestID, _, _),
              .initialConditions(let requestID, _): requestID
         }
     }
@@ -23,12 +25,13 @@ enum GeometryEditorToolDestination {
     case recipe
     case arcPoints
     case tagFilter
+    case vectorImport
 
     var pageID: String {
         switch self {
         case .topology: "Topology"
         case .recipe: "Regions"
-        case .arcPoints, .tagFilter: "Arcs"
+        case .arcPoints, .tagFilter, .vectorImport: "Arcs"
         }
     }
 }
@@ -40,6 +43,7 @@ extension EditorToolPresentationRequest {
         case .topologyRecipe: .recipe
         case .arcPoints: .arcPoints
         case .tagFilter: .tagFilter
+        case .vectorImport: .vectorImport
         default: nil
         }
     }
@@ -60,6 +64,10 @@ struct EditorToolPresentationSheet: View {
 
     var body: some View {
         switch presentation {
+        case .spatialBoundary(let requestID, let assetID, let layerID):
+            SpatialBoundaryImportRouteView(store: store, session: session,
+                assetID: assetID, layerID: layerID)
+                .onAppear { acceptOnce(requestID) }
         case .initialConditions(let requestID, let consumesHandoff):
             BoundaryInitialConditionsEditorSheet(store: store, editor: session, onReady: {
                 if consumesHandoff { acceptOnce(requestID) }

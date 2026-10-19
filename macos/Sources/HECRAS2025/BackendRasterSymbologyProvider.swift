@@ -25,6 +25,24 @@ private struct RasterSymbologyApplyRequest: Encodable, Sendable {
     let source: RasterMapSourceDescriptor
     let projectXml: String?
     let draft: RasterSymbologyDraft
+    let plotOptions: [String: String]
+}
+
+private struct RasterPlotOptionChoicePayload: Decodable, Sendable {
+    let value: String
+    let label: String
+}
+
+private struct RasterPlotOptionPayload: Decodable, Sendable {
+    let propertyName: String
+    let name: String
+    let label: String
+    let description: String?
+    let kind: String
+    let value: String
+    let enumValues: [RasterPlotOptionChoicePayload]
+    let isEnabled: Bool
+    let enabledIf: String?
 }
 
 private struct RasterSymbologySavePaletteRequest: Encodable, Sendable {
@@ -44,6 +62,7 @@ private struct RasterSymbologySnapshotPayload: Decodable, Sendable {
     let draft: RasterSymbologyDraft
     let palettes: [RasterPalette]
     let surfaceFillValues: [Double]?
+    let plotOptions: [RasterPlotOptionPayload]?
 }
 
 private struct RasterSymbologyInspectPayload: Decodable, Sendable {
@@ -58,6 +77,14 @@ private struct RasterSymbologyInspectPayload: Decodable, Sendable {
 struct RasterMapLayerLoadResult: Sendable {
     let layer: MapRasterLayer
     let rasterInfoStats: RasterImportContextSource?
+    let sourceRevision: String?
+
+    init(layer: MapRasterLayer, rasterInfoStats: RasterImportContextSource?,
+         sourceRevision: String? = nil) {
+        self.layer = layer
+        self.rasterInfoStats = rasterInfoStats
+        self.sourceRevision = sourceRevision
+    }
 }
 
 private struct RasterSymbologySnapshotResult: Decodable, Sendable {
@@ -128,6 +155,7 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
         let projectPath: String
         let visualizationPath: String
         let sourcePath: String
+        let gdbSourceRevision: String?
     }
     private var sourceCache: [SourceCacheKey: RasterMapSourceDescriptor] = [:]
     private var supersededRevisions: [SourceCacheKey: String] = [:]
@@ -160,12 +188,36 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
         guard let mapID = descriptor.sourceMapID else {
             throw BackendServiceError(code: "invalidInput", message: "The raster source is not assigned to a map.")
         }
-        guard let source = currentSource(id: descriptor.id, mapID: mapID), sameSourceIdentity(source, descriptor) else {
+        guard let source = currentSource(id: descriptor.id, mapID: mapID),
+              sameSourceIdentity(source, descriptor), isReady(source) else {
             throw missingSource()
         }
-        let result = try await client.request("rasterMap.load",
-            parameters: RasterSymbologyRequest(source: source, projectXml: projectXML()),
-            as: RasterSymbologyInspectPayload.self)
+        if source.gdbSource != nil {
+            // File Geodatabase rasters retain their exact connection-string
+            // route and directory manifest contract.
+            let result = try await client.request("rasterMap.load",
+                parameters: RasterSymbologyRequest(source: source, projectXml: try requestProjectXML(for: source)),
+                as: RasterSymbologyInspectPayload.self)
+            try requireCurrent(source, allowedRevisions: [source.visualizationRevision])
+            try validateReadRevisions(source, previous: result.previousVisualizationRevision,
+                                      current: result.visualizationRevision, source: result.sourceRevision)
+            cache(result.previousVisualizationRevision, result.visualizationRevision, result.sourceRevision, source)
+            let rasterInfoStats = result.rasterInfoStats
+            if let rasterInfoStats {
+                guard SourceFilePaths.canonical(URL(fileURLWithPath: rasterInfoStats.path))
+                            == SourceFilePaths.canonical(URL(fileURLWithPath: source.sourcePath)),
+                      rasterInfoStats.revision.caseInsensitiveCompare(result.sourceRevision) == .orderedSame else {
+                    throw BackendServiceError(code: "sourceChanged", message: "Raster statistics do not belong to the loaded source revision.")
+                }
+            }
+            return RasterMapLayerLoadResult(layer: try result.raster.makeLayer(matching: source),
+                rasterInfoStats: rasterInfoStats)
+        }
+
+        let result = try await client.request("map.raster.layer.load",
+            parameters: MapRasterLayerLoadRequest(source: source,
+                projectXml: try requestProjectXML(for: source), viewport: viewport(mapID)),
+            as: MapRasterLayerLoadReply.self)
         try requireCurrent(source, allowedRevisions: [source.visualizationRevision])
         try validateReadRevisions(source, previous: result.previousVisualizationRevision,
                                   current: result.visualizationRevision, source: result.sourceRevision)
@@ -179,13 +231,13 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
             }
         }
         return RasterMapLayerLoadResult(layer: try result.raster.makeLayer(matching: source),
-            rasterInfoStats: rasterInfoStats)
+            rasterInfoStats: rasterInfoStats, sourceRevision: result.sourceRevision)
     }
 
     func snapshot(_ context: RasterSymbologyContext) async throws -> RasterSymbologySnapshot? {
         guard let source = source(for: context) else { return nil }
         let result = try await client.request("rasterSymbology.inspect",
-            parameters: RasterSymbologyRequest(source: source, projectXml: projectXML()),
+            parameters: RasterSymbologyRequest(source: source, projectXml: try requestProjectXML(for: source)),
             as: RasterSymbologyInspectPayload.self)
         try requireCurrent(source, allowedRevisions: [source.visualizationRevision])
         try validateReadRevisions(source, previous: result.previousVisualizationRevision,
@@ -198,7 +250,8 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
                        context: RasterSymbologyContext) async throws -> RasterSymbologyDraft {
         guard let source = source(for: context) else { throw missingSource() }
         let result = try await client.request("rasterSymbology.selectPalette",
-            parameters: RasterSymbologySelectPaletteRequest(source: source, projectXml: projectXML(), paletteID: id, draft: draft),
+            parameters: RasterSymbologySelectPaletteRequest(source: source,
+                projectXml: try requestProjectXML(for: source), paletteID: id, draft: draft),
             as: RasterSymbologyDraftResult.self)
         try requireCurrent(source, allowedRevisions: [source.visualizationRevision])
         return result.draft
@@ -207,25 +260,34 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
     func histogram(count: Int, forView: Bool, context: RasterSymbologyContext) async throws -> [Double] {
         guard let source = source(for: context) else { throw missingSource() }
         let values = try await client.request("rasterSymbology.histogram",
-            parameters: RasterSymbologyHistogramRequest(source: source, projectXml: projectXML(),
+            parameters: RasterSymbologyHistogramRequest(source: source,
+                projectXml: try requestProjectXML(for: source),
                 viewport: forView ? viewport(context.mapID) : nil, count: count, forView: forView),
             as: [Double].self)
         try requireCurrent(source, allowedRevisions: [source.visualizationRevision])
         return values
     }
 
-    func apply(_ draft: RasterSymbologyDraft, context: RasterSymbologyContext) async throws {
+    func apply(_ draft: RasterSymbologyDraft, additionalOptions: [RasterPlotOption],
+               context: RasterSymbologyContext) async throws {
         try beginMutation()
         defer { endMutation() }
         guard let source = source(for: context) else { throw missingSource() }
+        guard Set(additionalOptions.map(\.id)).count == additionalOptions.count else {
+            throw BackendServiceError(code: "invalidInput", message: "Raster plot options contain duplicate source properties.")
+        }
+        let plotOptions = Dictionary(uniqueKeysWithValues: additionalOptions
+            .filter(\.isEnabled).map { ($0.id, $0.value) })
         let result = try await client.request("rasterSymbology.apply",
-            parameters: RasterSymbologyApplyRequest(source: source, projectXml: projectXML(), draft: draft),
+            parameters: RasterSymbologyApplyRequest(source: source,
+                projectXml: try requestProjectXML(for: source), draft: draft,
+                plotOptions: plotOptions),
             as: RasterSymbologyApplyPayload.self)
         try requireCurrent(source, allowedRevisions: [source.visualizationRevision])
         try validateMutationRevisions(source, previous: result.previousVisualizationRevision,
                                       current: result.visualizationRevision, source: result.sourceRevision)
         try acceptVisualization(result.previousVisualizationRevision, result.visualizationRevision)
-        try requireCurrent(source, allowedRevisions: [source.visualizationRevision, result.visualizationRevision])
+        try requireCommittedMutationSource(source, committedRevision: result.visualizationRevision)
         cache(result.previousVisualizationRevision, result.visualizationRevision, result.sourceRevision, source)
         installLayer(try result.raster.makeLayer(matching: source))
     }
@@ -233,7 +295,7 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
     func reset(_ context: RasterSymbologyContext) async throws -> RasterSymbologySnapshot {
         guard let source = source(for: context) else { throw missingSource() }
         let result = try await client.request("rasterSymbology.reset",
-            parameters: RasterSymbologyRequest(source: source, projectXml: projectXML()),
+            parameters: RasterSymbologyRequest(source: source, projectXml: try requestProjectXML(for: source)),
             as: RasterSymbologySnapshotResult.self)
         try requireCurrent(source, allowedRevisions: [source.visualizationRevision])
         try validateReadRevisions(source, previous: result.previousVisualizationRevision,
@@ -248,13 +310,14 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
         defer { endMutation() }
         guard let source = source(for: context) else { throw missingSource() }
         let result = try await client.request("rasterSymbology.savePalette",
-            parameters: RasterSymbologySavePaletteRequest(source: source, projectXml: projectXML(), draft: draft, name: name),
+            parameters: RasterSymbologySavePaletteRequest(source: source,
+                projectXml: try requestProjectXML(for: source), draft: draft, name: name),
             as: RasterSymbologyPalettesPayload.self)
         try requireCurrent(source, allowedRevisions: [source.visualizationRevision])
         try validateMutationRevisions(source, previous: result.previousVisualizationRevision,
                                       current: result.visualizationRevision, source: result.sourceRevision)
         try acceptVisualization(result.previousVisualizationRevision, result.visualizationRevision)
-        try requireCurrent(source, allowedRevisions: [source.visualizationRevision, result.visualizationRevision])
+        try requireCommittedMutationSource(source, committedRevision: result.visualizationRevision)
         cache(result.previousVisualizationRevision, result.visualizationRevision, result.sourceRevision, source)
         return result.palettes
     }
@@ -264,20 +327,34 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
         defer { endMutation() }
         guard let source = source(for: context) else { throw missingSource() }
         let result = try await client.request("rasterSymbology.deletePalette",
-            parameters: RasterSymbologyDeletePaletteRequest(source: source, projectXml: projectXML(), paletteID: id),
+            parameters: RasterSymbologyDeletePaletteRequest(source: source,
+                projectXml: try requestProjectXML(for: source), paletteID: id),
             as: RasterSymbologyPalettesPayload.self)
         try requireCurrent(source, allowedRevisions: [source.visualizationRevision])
         try validateMutationRevisions(source, previous: result.previousVisualizationRevision,
                                       current: result.visualizationRevision, source: result.sourceRevision)
         try acceptVisualization(result.previousVisualizationRevision, result.visualizationRevision)
-        try requireCurrent(source, allowedRevisions: [source.visualizationRevision, result.visualizationRevision])
+        try requireCommittedMutationSource(source, committedRevision: result.visualizationRevision)
         cache(result.previousVisualizationRevision, result.visualizationRevision, result.sourceRevision, source)
         return result.palettes
     }
 
     private func source(for context: RasterSymbologyContext) -> RasterMapSourceDescriptor? {
         guard let id = context.assetID else { return nil }
-        return currentSource(id: id, mapID: context.mapID)
+        guard let source = currentSource(id: id, mapID: context.mapID), isReady(source) else { return nil }
+        return source
+    }
+
+    private func isReady(_ source: RasterMapSourceDescriptor) -> Bool {
+        source.gdbSourceContext == nil || source.gdbSource != nil
+    }
+
+    private func requestProjectXML(for source: RasterMapSourceDescriptor) throws -> String? {
+        let current = projectXML()
+        guard source.gdbSourceContext == nil || source.gdbSource != nil else { throw changedSource() }
+        guard let gdbSource = source.gdbSource else { return current }
+        guard gdbSource.map.projectXml == current else { throw changedSource() }
+        return gdbSource.map.projectXml
     }
 
     private func currentSource(id: String, mapID: UUID) -> RasterMapSourceDescriptor? {
@@ -305,6 +382,20 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
         }
     }
 
+    /// A successful visualization mutation intentionally advances the `.vis`
+    /// revision inside the captured GDB map identity as well as on the outer
+    /// descriptor. Compare after rebasing only that revision; every map, node,
+    /// project, manifest, and source field must still match the request.
+    private func requireCommittedMutationSource(_ source: RasterMapSourceDescriptor,
+                                                committedRevision: String) throws {
+        guard let mapID = source.sourceMapID,
+              let current = sources().first(where: { $0.id == source.id && $0.sourceMapID == mapID }),
+              sameRevision(current.visualizationRevision, committedRevision),
+              sameSourceIdentity(source.updating(visualizationRevision: current.visualizationRevision), current) else {
+            throw missingSource()
+        }
+    }
+
     private func sameSourceIdentity(_ first: RasterMapSourceDescriptor, _ second: RasterMapSourceDescriptor) -> Bool {
         first.id == second.id && first.projectPath == second.projectPath &&
         first.visualizationPath == second.visualizationPath && first.mapIndex == second.mapIndex &&
@@ -312,7 +403,8 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
         first.nodePath == second.nodePath && first.nodeName == second.nodeName &&
         first.mapLayerType == second.mapLayerType && first.filename == second.filename &&
         first.filenameRelative == second.filenameRelative && first.sourcePath == second.sourcePath &&
-        first.sourceMapID == second.sourceMapID
+        first.sourceMapID == second.sourceMapID &&
+        first.gdbSourceContext == second.gdbSourceContext && first.gdbSource == second.gdbSource
     }
 
     private func validateReadRevisions(_ source: RasterMapSourceDescriptor, previous: String,
@@ -337,7 +429,8 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
 
     private func cacheKey(_ source: RasterMapSourceDescriptor) -> SourceCacheKey {
         SourceCacheKey(id: source.id, mapID: source.sourceMapID, projectPath: source.projectPath,
-                       visualizationPath: source.visualizationPath, sourcePath: source.sourcePath)
+                       visualizationPath: source.visualizationPath, sourcePath: source.sourcePath,
+                       gdbSourceRevision: source.gdbSource?.source.revision)
     }
 
     private func beginMutation() throws {
@@ -355,8 +448,15 @@ final class BackendRasterSymbologyProvider: RasterSymbologyProvider {
     }
 
     private func makeSnapshot(_ payload: RasterSymbologySnapshotPayload) -> RasterSymbologySnapshot {
-        .init(draft: payload.draft, palettes: payload.palettes,
-              interpolatedSurfaceFillContext: payload.surfaceFillValues.map(InterpolatedSurfaceFillContext.init(colorValues:)))
+        let options = (payload.plotOptions ?? []).map { option in
+            RasterPlotOption(id: option.propertyName, title: option.label,
+                isBoolean: option.kind == "bool", value: option.value,
+                choices: option.enumValues.map { RasterPlotOptionChoice(id: $0.value, title: $0.label) },
+                isEnabled: option.isEnabled, description: option.description)
+        }
+        return .init(draft: payload.draft, palettes: payload.palettes,
+              interpolatedSurfaceFillContext: payload.surfaceFillValues.map(InterpolatedSurfaceFillContext.init(colorValues:)),
+              additionalOptions: options)
     }
 
     private func missingSource() -> BackendServiceError {

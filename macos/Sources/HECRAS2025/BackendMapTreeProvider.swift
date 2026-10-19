@@ -31,6 +31,11 @@ struct MapVectorImportReceipt: Sendable, Equatable {
     let refreshWarning: String?
 }
 
+struct GdbMapImportOutcome: Sendable {
+    let response: GdbMapImportResponse
+    let refreshWarning: String?
+}
+
 /// Source-backed persistence for saved Project, Buildable, Plan, and Geometry
 /// map trees. The caller supplies the exact saved map identity from `.vis`.
 @MainActor
@@ -75,7 +80,8 @@ final class BackendMapTreeProvider: LayerTreeProvider {
                    initialGeometryPath: String? = nil,
                    initialGeometryRevision: String? = nil,
                    initialPlanPath: String? = nil,
-                   initialPlanRevision: String? = nil) async throws -> MapDocumentMutationReceipt {
+                   initialPlanRevision: String? = nil,
+                   coreLayerContext: CoreLayerRequestContext? = nil) async throws -> MapDocumentMutationReceipt {
         guard ["Project", "Buildable", "Geometry", "Plan"].contains(kind),
               (initialGeometryPath == nil) == (initialGeometryRevision == nil),
               initialGeometryPath == nil || kind == "Geometry",
@@ -84,6 +90,7 @@ final class BackendMapTreeProvider: LayerTreeProvider {
               initialGeometryPath == nil || initialPlanPath == nil else {
             throw BackendServiceError(code: "unsupported", message: "The requested saved map type or initial Geometry source is not supported.")
         }
+        try validateCoreLayerContext(coreLayerContext, projectPath: projectPath)
         try beginMutation()
         defer { endMutation() }
         let snapshot = projectSnapshot()
@@ -97,7 +104,8 @@ final class BackendMapTreeProvider: LayerTreeProvider {
             initialGeometryPath: initialGeometryPath,
             initialGeometryRevision: initialGeometryRevision,
             initialPlanPath: initialPlanPath,
-            initialPlanRevision: initialPlanRevision
+            initialPlanRevision: initialPlanRevision,
+            coreLayerContext: coreLayerContext
         ), as: MapDocumentMutationResponse.self)
         let receipt = response.value
         try acceptIfChanged(previous: receipt.previousVisualizationRevision, current: receipt.visualizationRevision)
@@ -107,10 +115,12 @@ final class BackendMapTreeProvider: LayerTreeProvider {
     /// Removes only the exact saved .vis map row. Callers apply the returned
     /// index mapping to their existing runtime map identities after accepting
     /// the new visualization revision; duplicate map names remain safe.
-    func deleteMap(projectPath: String, map: CatalogMapDocument) async throws -> MapDocumentDeleteReceipt {
+    func deleteMap(projectPath: String, map: CatalogMapDocument,
+                   coreLayerContext: CoreLayerRequestContext? = nil) async throws -> MapDocumentDeleteReceipt {
         guard let mapIndex = map.sourceIndex, let expectedRevision = map.visualizationRevision else {
             throw BackendServiceError(code: "sourceChanged", message: "The selected map is not saved in the current visualization file.")
         }
+        try validateCoreLayerContext(coreLayerContext, projectPath: projectPath)
         try beginMutation()
         defer { endMutation() }
         let snapshot = projectSnapshot()
@@ -123,7 +133,8 @@ final class BackendMapTreeProvider: LayerTreeProvider {
             mapID: map.id,
             mapIndex: mapIndex,
             mapName: map.name,
-            mapType: map.kind
+            mapType: map.kind,
+            coreLayerContext: coreLayerContext
         ), as: MapDocumentDeleteReceipt.self)
         guard response.removedMapIndex == mapIndex,
               response.removedMapName == map.name,
@@ -141,10 +152,12 @@ final class BackendMapTreeProvider: LayerTreeProvider {
         return response
     }
 
-    func renameMap(projectPath: String, map: CatalogMapDocument, to name: String) async throws -> MapDocumentMutationReceipt {
+    func renameMap(projectPath: String, map: CatalogMapDocument, to name: String,
+                   coreLayerContext: CoreLayerRequestContext? = nil) async throws -> MapDocumentMutationReceipt {
         guard let mapIndex = map.sourceIndex, let expectedRevision = map.visualizationRevision else {
             throw BackendServiceError(code: "sourceChanged", message: "The selected map is not saved in the current visualization file.")
         }
+        try validateCoreLayerContext(coreLayerContext, projectPath: projectPath)
         try beginMutation()
         defer { endMutation() }
         let snapshot = projectSnapshot()
@@ -158,7 +171,8 @@ final class BackendMapTreeProvider: LayerTreeProvider {
             mapIndex: mapIndex,
             mapName: map.name,
             mapType: map.kind,
-            newName: name
+            newName: name,
+            coreLayerContext: coreLayerContext
         ), as: MapDocumentMutationResponse.self)
         let receipt = response.value
         try acceptIfChanged(previous: receipt.previousVisualizationRevision, current: receipt.visualizationRevision)
@@ -172,6 +186,42 @@ final class BackendMapTreeProvider: LayerTreeProvider {
             .init(map: mapRequest(context, map: map), action: "addResult",
                   sourcePath: resultPath, sourceRevision: revision),
             mapID: map.id, context: context)
+    }
+
+    func inspectCoreLayer(_ request: CoreLayerImportRequest) async throws -> CoreLayerImportInspection {
+        try await client.request("workspace.import.coreLayer.inspect", parameters: request,
+            as: CoreLayerImportInspection.self)
+    }
+
+    func performCoreLayerImport(_ request: CoreLayerImportRequest) async throws -> CoreLayerImportReceipt {
+        try await client.request("workspace.import.coreLayer.perform", parameters: request,
+            as: CoreLayerImportReceipt.self)
+    }
+
+    func reloadCoreLayerReference(_ request: CoreLayerReferenceReloadRequest) async throws
+        -> CoreLayerReferenceReloadReceipt {
+        try await client.request("workspace.coreLayerReference.reload", parameters: request,
+            as: CoreLayerReferenceReloadReceipt.self)
+    }
+
+    func addCoreLayerToMap(sourcePath: String, revision: String, kind: String,
+                           context: LayerTreeContext,
+                           coreLayerContext: CoreLayerRequestContext) async throws -> LayerTreeSnapshot {
+        try requireCurrentContext(context, matchingRevision: true)
+        guard ["geometry", "boundaryCondition"].contains(kind),
+              let map = persistedMap(for: context),
+              ["Project", "Buildable", "Geometry", "Plan"].contains(map.kind) else {
+            throw BackendServiceError(code: "unsupported", message: "The selected map cannot accept this core layer.")
+        }
+        var capturedMapContext = context
+        capturedMapContext.coreLayerContext = coreLayerContext
+        let action = kind == "geometry" ? "addGeometry" : "addBoundaryCondition"
+        let payload = MapTreeActionPayload(map: try mapRequest(capturedMapContext, map: map),
+            action: action, sourcePath: sourcePath, sourceRevision: revision)
+        // The proposed reference is not registered locally until the exact
+        // map write succeeds. Keep currentness tied to the caller's old set.
+        return try await performSourceAction(payload, mapID: map.id,
+            context: capturedMapContext, currentnessContext: context)
     }
 
     /// Adds an existing project Geometry to the selected saved map using the
@@ -240,7 +290,8 @@ final class BackendMapTreeProvider: LayerTreeProvider {
         let request = MapDocumentRequestPayload(projectPath: try projectPath(context),
             projectXml: projectXML, projectXmlSHA: sha,
             expectedVisualizationRevision: visualizationRevision(), kind: map?.kind ?? "Project",
-            mapID: context.mapID.uuidString, mapIndex: map?.sourceIndex, mapName: map?.name, mapType: map?.kind)
+            mapID: context.mapID.uuidString, mapIndex: map?.sourceIndex, mapName: map?.name,
+            mapType: map?.kind, coreLayerContext: context.coreLayerContext)
         let expectedSourceCanonicalPath = SourceFilePaths.canonical(URL(fileURLWithPath: sourcePath))
         let response = try await client.request("map.vector.import",
             parameters: MapVectorImportPayload(map: request, sourcePath: sourcePath, sourceRevision: revision,
@@ -263,8 +314,8 @@ final class BackendMapTreeProvider: LayerTreeProvider {
         }
     }
 
-    func importRaster(sourcePath: String, revision: String, projectXML: String,
-                      projectRevision: String, context: LayerTreeContext,
+    func importRaster(sourcePath: String, revision: String, mapLayerType: String = "SingleBandRasterMapLayer",
+                      projectXML: String, projectRevision: String, context: LayerTreeContext,
                       didPublish: @MainActor () throws -> Void = {}) async throws -> MapVectorImportReceipt {
         try requireCurrentContext(context, matchingRevision: true)
         let map = persistedMap(for: context)
@@ -275,12 +326,15 @@ final class BackendMapTreeProvider: LayerTreeProvider {
         try beginMutation()
         defer { endMutation() }
         let sha = SHA256.hash(data: Data(projectXML.utf8)).map { String(format: "%02X", $0) }.joined()
-        let request = MapDocumentRequestPayload(projectPath: try projectPath(context),
+        let request = MapRasterLayerMapRequest(projectPath: try projectPath(context),
             projectXml: projectXML, projectXmlSHA: sha,
             expectedVisualizationRevision: visualizationRevision(), kind: map?.kind ?? "Project",
-            mapID: context.mapID.uuidString, mapIndex: map?.sourceIndex, mapName: map?.name, mapType: map?.kind)
-        let response = try await client.request("map.raster.import",
-            parameters: MapVectorImportPayload(map: request, sourcePath: sourcePath, sourceRevision: revision,
+            name: nil, mapID: context.mapID.uuidString, mapIndex: map?.sourceIndex,
+            mapName: map?.name, mapType: map?.kind,
+            coreLayerContext: context.coreLayerContext)
+        let response = try await client.request("map.raster.layer.import",
+            parameters: MapRasterLayerImportIdentity(map: request, sourcePath: sourcePath,
+                sourceRevision: revision, mapLayerType: mapLayerType,
                 expectedProjectRevision: projectRevision,
                 expectedSourceCanonicalPath: SourceFilePaths.canonical(URL(fileURLWithPath: sourcePath))),
             as: MapDocumentMutationResponse.self)
@@ -324,7 +378,8 @@ final class BackendMapTreeProvider: LayerTreeProvider {
         let request = MapDocumentRequestPayload(projectPath: try projectPath(context),
             projectXml: projectXML, projectXmlSHA: sha,
             expectedVisualizationRevision: visualizationRevision(), kind: map?.kind ?? "Project",
-            mapID: context.mapID.uuidString, mapIndex: map?.sourceIndex, mapName: map?.name, mapType: map?.kind)
+            mapID: context.mapID.uuidString, mapIndex: map?.sourceIndex, mapName: map?.name,
+            mapType: map?.kind, coreLayerContext: context.coreLayerContext)
         let response = try await client.request("map.vector.importShapefile",
             parameters: MapShapefileVectorImportPayload(map: request, sourcePath: sourcePath,
                 expectedProjectRevision: projectRevision, expectedFamily: expectedFamily),
@@ -338,6 +393,84 @@ final class BackendMapTreeProvider: LayerTreeProvider {
         } catch {
             return MapVectorImportReceipt(map: receipt, refreshWarning: error.localizedDescription)
         }
+    }
+
+    /// Imports every source-backed vector and raster child from one exact
+    /// File Geodatabase manifest. The single map mutation lease protects the
+    /// complete `.vis` transaction; a committed receipt is retained even if
+    /// refreshing the native visualization cache fails afterward.
+    func importGdb(sourcePath: String, source: GdbMapSourceIdentity, catalog: GdbMapCatalogResponse,
+                   expectedProjectRevision: String, context: LayerTreeContext) async throws -> GdbMapImportOutcome {
+        try requireCurrentContext(context, matchingRevision: true)
+        let expectedURL = URL(fileURLWithPath: sourcePath).standardizedFileURL.resolvingSymlinksInPath()
+        guard SourceFilePaths.canonical(expectedURL)
+                == SourceFilePaths.canonical(URL(fileURLWithPath: source.sourcePath)) else {
+            throw GdbMapSourceError.invalidSourceIdentity
+        }
+        try source.validate(expectedPath: expectedURL)
+        guard catalog.source == source,
+              catalog.layers.allSatisfy({ (try? $0.validate()) != nil }),
+              catalog.rasterSubdatasets.allSatisfy(Self.isValidGdbRasterDescriptor) else {
+            throw GdbMapSourceError.invalidSourceIdentity
+        }
+        let map = persistedMap(for: context)
+        guard map != nil || (context.mapID == MapState.projectMapID &&
+            !mapDocuments().contains(where: { $0.sourceIndex != nil })) else {
+            throw BackendServiceError(code: "unsupported", message: "This source map operation is unavailable for the selected map.")
+        }
+
+        try beginMutation()
+        defer { endMutation() }
+        try requireCurrentContext(context, matchingRevision: true)
+        let snapshot = projectSnapshot()
+        let mapRequest = MapDocumentRequestPayload(projectPath: try projectPath(context),
+            projectXml: snapshot.xml, projectXmlSHA: snapshot.sha,
+            expectedVisualizationRevision: visualizationRevision(), kind: map?.kind ?? "Project",
+            mapID: map?.id ?? context.mapID.uuidString, mapIndex: map?.sourceIndex,
+            mapName: map?.name, mapType: map?.kind, coreLayerContext: context.coreLayerContext)
+        let response = try await client.request("map.gdb.import", parameters: GdbMapImportRequest(
+            map: GdbMapDocumentRequest(projectPath: mapRequest.projectPath,
+                projectXml: mapRequest.projectXml, projectXmlSHA: mapRequest.projectXmlSHA,
+                expectedVisualizationRevision: mapRequest.expectedVisualizationRevision,
+                kind: mapRequest.kind, name: mapRequest.name, mapID: mapRequest.mapID,
+                mapIndex: mapRequest.mapIndex, mapName: mapRequest.mapName,
+                mapType: mapRequest.mapType, newName: mapRequest.newName,
+                initialGeometryPath: mapRequest.initialGeometryPath,
+                initialGeometryRevision: mapRequest.initialGeometryRevision,
+                initialPlanPath: mapRequest.initialPlanPath,
+                initialPlanRevision: mapRequest.initialPlanRevision,
+                coreLayerContext: mapRequest.coreLayerContext),
+            expectedProjectRevision: expectedProjectRevision, source: source),
+            as: GdbMapImportResponse.self)
+
+        // The backend has committed the `.vis` file at this point. Do not
+        // lose its receipt because the sheet or a later cache refresh changed.
+        try requireCurrentContext(context, matchingRevision: false)
+        let receipt = response.receipt
+        guard receipt.mapIndex >= 0, !receipt.mapName.isEmpty,
+              ["Project", "Buildable", "Geometry", "Plan"].contains(receipt.mapType),
+              receipt.visualizationRevision.count == 64,
+              receipt.visualizationRevision.allSatisfy(\.isHexDigit),
+              receipt.previousVisualizationRevision.map({
+                  $0.count == 64 && $0.allSatisfy(\.isHexDigit)
+              }) ?? true,
+              map.map({ $0.sourceIndex == receipt.mapIndex && $0.name == receipt.mapName && $0.kind == receipt.mapType })
+                ?? (receipt.mapIndex == 0 && receipt.mapType == "Project") else {
+            throw BackendServiceError(code: "protocolFailure", message: "The File Geodatabase import receipt does not match the selected map.")
+        }
+
+        var refreshWarning: String?
+        if response.source != source || response.importedLayers != catalog.layers
+            || response.importedRasterSubdatasets != catalog.rasterSubdatasets.filter(\.isImportable) {
+            refreshWarning = "The File Geodatabase import committed, but its returned layer catalog differed from the captured source snapshot."
+        }
+        do {
+            try acceptIfChanged(previous: receipt.previousVisualizationRevision,
+                                current: receipt.visualizationRevision)
+        } catch {
+            refreshWarning = [refreshWarning, error.localizedDescription].compactMap { $0 }.joined(separator: " ")
+        }
+        return GdbMapImportOutcome(response: response, refreshWarning: refreshWarning)
     }
 
     func removeSourceNode(nodeID: String, sourcePath: String? = nil, revision: String? = nil,
@@ -414,16 +547,18 @@ final class BackendMapTreeProvider: LayerTreeProvider {
     }
 
     private func performSourceAction(_ action: MapTreeActionPayload, mapID: String,
-                                     context: LayerTreeContext) async throws -> LayerTreeSnapshot {
+                                     context: LayerTreeContext,
+                                     currentnessContext: LayerTreeContext? = nil) async throws -> LayerTreeSnapshot {
+        let expectedCurrentContext = currentnessContext ?? context
         try beginMutation()
         defer { endMutation() }
-        try requireCurrentContext(context, matchingRevision: true)
+        try requireCurrentContext(expectedCurrentContext, matchingRevision: true)
         let response = try await client.request("map.tree.perform", parameters: action,
             as: MapTreeResponse.self)
         // The .vis write already succeeded. A newer project description or
         // catalog revision must not leave the in-memory visualization baseline
         // behind; accept the receipt, then the view reloads using its new context.
-        try requireCurrentContext(context, matchingRevision: false)
+        try requireCurrentContext(expectedCurrentContext, matchingRevision: false)
         try acceptIfChanged(previous: response.previousVisualizationRevision, current: response.visualizationRevision)
         return install(response, mapID: mapID)
     }
@@ -448,7 +583,8 @@ final class BackendMapTreeProvider: LayerTreeProvider {
             projectPath: try projectPath(context), projectXml: snapshot.xml, projectXmlSHA: snapshot.sha,
             mapID: map.id, mapIndex: mapIndex, mapName: map.name, mapType: map.kind,
             expectedVisualizationRevision: expectedRevision,
-            resultSelectionOverrides: context.resultSelectionOverrides)
+            resultSelectionOverrides: context.resultSelectionOverrides,
+            coreLayerContext: context.coreLayerContext)
     }
 
     private func beginMutation() throws {
@@ -493,6 +629,16 @@ final class BackendMapTreeProvider: LayerTreeProvider {
             throw BackendServiceError(code: "invalidInput", message: "Open a saved project before loading its map tree.")
         }
         return url.standardizedFileURL.path
+    }
+
+    private func validateCoreLayerContext(_ context: CoreLayerRequestContext?, projectPath: String) throws {
+        guard let context else { return }
+        let expectedPath = CoreLayerRequestContext.canonical(URL(fileURLWithPath: projectPath))
+        guard context.projectPath == expectedPath,
+              UUID(uuidString: context.projectSessionID) != nil else {
+            throw BackendServiceError(code: "sourceChanged",
+                message: "The external core-layer capture belongs to another project session.")
+        }
     }
 
     private func projectSnapshot() -> (xml: String?, sha: String?) {
@@ -540,6 +686,18 @@ final class BackendMapTreeProvider: LayerTreeProvider {
         BackendServiceError(code: "sourceChanged", message: "The selected map tree node is no longer available. Refresh the map tree before editing.")
     }
 
+    private static func isValidGdbRasterDescriptor(_ raster: GdbRasterSubdatasetDescriptor) -> Bool {
+        guard !raster.name.isEmpty, !raster.connectionString.isEmpty,
+              raster.connectionString.rangeOfCharacter(from: .newlines.union(.controlCharacters)) == nil,
+              raster.width > 0, raster.height > 0, raster.bandCount > 0,
+              !raster.driverName.isEmpty, !raster.dataType.isEmpty,
+              ["available", "unsupported", "failed"].contains(raster.status),
+              raster.extent.map(\.isFiniteAndOrdered) ?? true,
+              raster.noDataValue.map(\.isFinite) ?? true,
+              raster.projectionWKT?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != true else { return false }
+        return !raster.canRender || raster.status == "available"
+    }
+
     private struct MapDocumentRequestPayload: Encodable, Sendable {
         let projectPath: String
         let projectXml: String?
@@ -556,6 +714,7 @@ final class BackendMapTreeProvider: LayerTreeProvider {
         var mapName: String? = nil
         var mapType: String? = nil
         var newName: String? = nil
+        var coreLayerContext: CoreLayerRequestContext? = nil
     }
 
     private struct MapVectorImportPayload: Encodable, Sendable {
@@ -600,6 +759,7 @@ final class BackendMapTreeProvider: LayerTreeProvider {
         let mapType: String
         let expectedVisualizationRevision: String?
         var resultSelectionOverrides: [MapTreeResultSelectionOverride] = []
+        var coreLayerContext: CoreLayerRequestContext? = nil
     }
 
     private struct MapTreeActionPayload: Encodable, Sendable {

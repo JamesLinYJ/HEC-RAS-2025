@@ -10,7 +10,8 @@ internal sealed class SourceAcceptanceFixtureLease : IDisposable
     [
         "HECRAS_CULVERT_PARTICLE_ACCEPTANCE_DIRECTORY",
         "HECRAS_PLAN_MAP_ACCEPTANCE_DIRECTORY",
-        "HECRAS_ASSOCIATED_MAP_ACCEPTANCE_DIRECTORY"
+        "HECRAS_ASSOCIATED_MAP_ACCEPTANCE_DIRECTORY",
+        "HECRAS_MAP_RESULT_RENDER_ACCEPTANCE_DIRECTORY"
     ];
     private readonly Dictionary<string, string?> previous = [];
     private readonly TemporaryDirectory? temporary;

@@ -9,7 +9,8 @@ public static class BackendJson
 
 public sealed record BackendRequest(string Id, string Method, JsonElement Parameters,
     bool StreamProgress = false, bool Duplex = false);
-public record ModelRequest(string AssetPath, string Kind, string? ProjectPath, string? ProjectXml = null, string? SourceState = null);
+public record ModelRequest(string AssetPath, string Kind, string? ProjectPath, string? ProjectXml = null,
+    string? SourceState = null, CoreLayerRequestContext? CoreLayerContext = null);
 public sealed record ModelCatalogRequest(string[] AssetPaths);
 public sealed record SurfaceCatalogEntry(string Path, string? Category, string? Error);
 public sealed record ModelSaveRequest(string AssetPath, string Kind, string? ProjectPath,
@@ -18,8 +19,9 @@ public sealed record ModelSaveRequest(string AssetPath, string Kind, string? Pro
     PlanTimeWindowEdit[]? PlanTimeWindowEdits = null, string? GeometryTopologyState = null,
     string? GeometryMeshState = null, string? GeometryCulvertState = null,
     Dictionary<string, string[]>? TableSelections = null,
-    Dictionary<string, ChangedCell[]>? ChangedCells = null)
-    : ModelRequest(AssetPath, Kind, ProjectPath, ProjectXml, SourceState);
+    Dictionary<string, ChangedCell[]>? ChangedCells = null,
+    CoreLayerRequestContext? CoreLayerContext = null)
+    : ModelRequest(AssetPath, Kind, ProjectPath, ProjectXml, SourceState, CoreLayerContext);
 public sealed record ModelContextRefreshResult(ModelSnapshot Baseline, ModelSnapshot Draft);
 public sealed record PlanTimeWindowFieldIDs(string Mode, string Start, string End)
 {

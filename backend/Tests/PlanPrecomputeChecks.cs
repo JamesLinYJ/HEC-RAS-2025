@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Reflection;
 using System.Xml.Linq;
 using Ras.Backend;
 using Ras.Layers;
@@ -216,27 +215,22 @@ internal static class PlanPrecomputeChecks
 
     private static Dictionary<string, string> CaptureDependencies(string projectPath, string assetPath, string projectXml)
     {
-        MethodInfo method = typeof(ModelEditorAdapter).GetMethod("CapturePlanPrecomputeDependencies",
-            BindingFlags.NonPublic | BindingFlags.Static)
-            ?? throw new InvalidOperationException("Plan precompute dependency capture helper is missing.");
-        return (Dictionary<string, string>)(method.Invoke(null, [projectPath, assetPath, projectXml])
-            ?? throw new InvalidOperationException("Plan precompute dependency capture returned no snapshot."));
+        return ModelEditorAdapter.CapturePlanPrecomputeDependencies(
+            projectPath, assetPath, projectXml, coreLayerContext: null);
     }
 
     private static void VerifyDependencies(string projectPath, string assetPath, string projectXml,
         Dictionary<string, string> snapshot)
     {
-        MethodInfo method = typeof(ModelEditorAdapter).GetMethod("VerifyPlanPrecomputeDependencies",
-            BindingFlags.NonPublic | BindingFlags.Static)
-            ?? throw new InvalidOperationException("Plan precompute dependency verification helper is missing.");
-        _ = method.Invoke(null, [projectPath, assetPath, projectXml, snapshot]);
+        ModelEditorAdapter.VerifyPlanPrecomputeDependencies(
+            projectPath, assetPath, projectXml, coreLayerContext: null, snapshot);
     }
 
     private static bool VerifyDependenciesRejectsChangedSource(string projectPath, string assetPath,
         string projectXml, Dictionary<string, string> snapshot)
     {
         try { VerifyDependencies(projectPath, assetPath, projectXml, snapshot); }
-        catch (TargetInvocationException error) when (error.InnerException is SourceFileChangedException) { return true; }
+        catch (SourceFileChangedException) { return true; }
         return false;
     }
 

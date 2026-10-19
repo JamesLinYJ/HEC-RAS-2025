@@ -12,7 +12,7 @@ public class PasteArcOperation : TopologyEditOperation
 
 	private IReadOnlyList<Polyline> _arcs;
 
-	private IReadOnlyList<object[]> _metadataRows;
+	private IReadOnlyList<object[]>? _metadataRows;
 
 	private List<int> _addedArcs;
 
@@ -20,7 +20,7 @@ public class PasteArcOperation : TopologyEditOperation
 
 	public override string Description => "Paste Arcs";
 
-	public PasteArcOperation(TopologyEditContext context, IReadOnlyList<Polyline> arcs, IReadOnlyList<object[]> metadataRows = null)
+	public PasteArcOperation(TopologyEditContext context, IReadOnlyList<Polyline> arcs, IReadOnlyList<object[]>? metadataRows = null)
 		: base(context, null)
 	{
 		_arcs = arcs;

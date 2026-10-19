@@ -75,6 +75,9 @@ struct StoredCulvertParticleAnimationTests {
     private func straightBarrel(from start: Double, to end: Double) -> MapResultCulvertBarrel {
         MapResultCulvertBarrel(id: "barrel:source:0", sourceOrdinal: 0, name: "Barrel",
             coordinates: [MapResultCulvertCoordinate(x: start, y: 0),
-                          MapResultCulvertCoordinate(x: end, y: 0)])
+                          MapResultCulvertCoordinate(x: end, y: 0)],
+            barrelPropertyName: "Barrel Properties", upstreamInvert: "0",
+            downstreamInvert: "0", upstreamOpeningName: "Opening",
+            downstreamOpeningName: "Opening")
     }
 }

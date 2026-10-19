@@ -54,7 +54,9 @@ struct StreamModeSessionTests {
                           BackendStreamModeCoordinate(x: 10, y: 0, z: 101.5, m: 0),
                           BackendStreamModeCoordinate(x: 0, y: 10, z: 102.75, m: 2)],
             paths: [], triangles: [[0, 1, 2]], isClosed: false,
-            hasZ: true, hasM: true, zFillValue: nil, mFillValue: nil)
+            hasZ: true, hasM: true, zFillValue: nil, mFillValue: nil,
+            tinAsset: BackendStreamModeTinAsset(sessionID: connection, sequence: 0,
+                assetID: UUID(), sha256: String(repeating: "a", count: 64)))
 
         let acceptedTINFrame = store.accept(tin, operationID: connection)
         #expect(acceptedTINFrame)
@@ -62,6 +64,24 @@ struct StreamModeSessionTests {
         #expect(store.mapObjects.first?.source.hasM == true)
         #expect(store.mapObjects.first?.source.coordinates[2].z == 102.75)
         #expect(store.mapObjects.first?.source.triangles == [[0, 1, 2]])
+    }
+
+    @Test
+    func rejectsTinFramesWithoutTheExactSessionSequenceAssetOwner() {
+        var store = StreamModeFrameIdentityStore()
+        let connection = UUID()
+        store.begin(connection)
+        let tin = BackendStreamModeFrame(sequence: 0, objectType: "Tin", coordinateCount: 3,
+            coordinates: [BackendStreamModeCoordinate(x: 0, y: 0),
+                          BackendStreamModeCoordinate(x: 10, y: 0),
+                          BackendStreamModeCoordinate(x: 0, y: 10)],
+            paths: [], triangles: [[0, 1, 2]], isClosed: false,
+            tinAsset: BackendStreamModeTinAsset(sessionID: UUID(), sequence: 1,
+                assetID: UUID(), sha256: String(repeating: "a", count: 64)))
+
+        let accepted = store.accept(tin, operationID: connection)
+        #expect(!accepted)
+        #expect(store.mapObjects.isEmpty)
     }
 
     private func frame(sequence: Int64) -> BackendStreamModeFrame {
