@@ -11,6 +11,7 @@ struct MapVectorFeatureContextSnapshot: Sendable {
     let projectSessionID: UUID
     let mapID: UUID
     let contextIdentity: String
+    let mapWorkflowIdentity: String
     let layer: MapVectorLayer
     let clickedFeatureIdentity: String
     let selectedFeatureIdentities: [String]
@@ -131,15 +132,37 @@ enum MapVectorFeatureContextSelection {
     }
 }
 
+enum MapVectorFeatureContextCurrentness {
+    static func matches(_ captured: MapVectorFeatureContextSnapshot,
+                        projectSessionID: UUID,
+                        mapID: UUID,
+                        contextIdentity: String,
+                        mapWorkflowIdentity: String,
+                        layer: MapVectorLayer,
+                        selectedFeatureIdentities: Set<String>) -> Bool {
+        captured.projectSessionID == projectSessionID
+            && captured.mapID == mapID
+            && captured.contextIdentity == contextIdentity
+            && captured.mapWorkflowIdentity == mapWorkflowIdentity
+            && captured.layer.id == layer.id
+            && captured.canonicalSourcePath == SourceFilePaths.canonical(layer.url)
+            && captured.sourceRevision == layer.sourceRevision
+            && Set(captured.selectedFeatureIdentities).count == captured.selectedFeatureIdentities.count
+            && selectedFeatureIdentities == Set(captured.selectedFeatureIdentities)
+    }
+}
+
 struct MapVectorFeatureContextMenuInteraction: NSViewRepresentable {
     let isEnabled: Bool
     let contextAt: (CGPoint, Set<MapInput.Modifier>) -> MapVectorFeatureContextSnapshot?
     let perform: (MapVectorFeatureContextAction, MapVectorFeatureContextSnapshot) -> Void
+    var captureIdentity: String? = nil
     var blankContextAt: ((CGPoint) -> MapBlankContextCapture?)? = nil
     var performBlank: ((MapBlankContextMenuAction, MapBlankContextCapture) -> Void)? = nil
 
     func makeNSView(context: Context) -> MapVectorFeatureContextMenuMonitorView {
         let view = MapVectorFeatureContextMenuMonitorView()
+        view.updateCaptureIdentity(captureIdentity)
         view.contextAt = contextAt
         view.perform = perform
         view.blankContextAt = blankContextAt
@@ -149,6 +172,7 @@ struct MapVectorFeatureContextMenuInteraction: NSViewRepresentable {
     }
 
     func updateNSView(_ view: MapVectorFeatureContextMenuMonitorView, context: Context) {
+        view.updateCaptureIdentity(captureIdentity)
         view.contextAt = contextAt
         view.perform = perform
         view.blankContextAt = blankContextAt
@@ -165,6 +189,7 @@ struct MapVectorFeatureContextMenuInteraction: NSViewRepresentable {
 @MainActor
 final class MapVectorFeatureContextMenuMonitorView: NSView, NSMenuDelegate {
     var isEnabled = false
+    private var captureIdentity: String?
     var contextAt: ((CGPoint, Set<MapInput.Modifier>) -> MapVectorFeatureContextSnapshot?)?
     var perform: ((MapVectorFeatureContextAction, MapVectorFeatureContextSnapshot) -> Void)?
     var blankContextAt: ((CGPoint) -> MapBlankContextCapture?)?
@@ -177,9 +202,20 @@ final class MapVectorFeatureContextMenuMonitorView: NSView, NSMenuDelegate {
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); installMonitorIfNeeded() }
+    override func layout() { super.layout(); installMonitorIfNeeded() }
+
+    func updateCaptureIdentity(_ identity: String?) {
+        guard captureIdentity != identity else { return }
+        captureIdentity = identity
+        activeContext = nil
+        activeBlankContext = nil
+    }
 
     func installMonitorIfNeeded() {
-        guard let window else { removeMonitor(); return }
+        guard isEnabled, let window, !bounds.isEmpty, !visibleRect.isEmpty else {
+            removeMonitor()
+            return
+        }
         guard monitor == nil || monitoredWindow !== window else { return }
         removeMonitor()
         monitoredWindow = window
@@ -187,7 +223,7 @@ final class MapVectorFeatureContextMenuMonitorView: NSView, NSMenuDelegate {
             guard let self, self.isEnabled,
                   let window = self.window, event.window === window else { return event }
             let location = self.convert(event.locationInWindow, from: nil)
-            guard self.bounds.contains(location) else { return event }
+            guard self.bounds.contains(location), self.visibleRect.contains(location) else { return event }
             let blankContext = self.blankContextAt?(location)
             let menu: NSMenu
             if let context = self.contextAt?(location, Self.modifiers(event.modifierFlags)) {

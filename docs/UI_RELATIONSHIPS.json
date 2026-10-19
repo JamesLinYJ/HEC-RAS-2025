@@ -1471,6 +1471,69 @@
       "target": "RasterCalculatorLayerRegistry/RasterCalculatorService",
       "cardinality": "project-session-map-ID-map-type-capture-epoch-context-token-source-ID-revisions-profile-and-layer-generation",
       "semantics": "The stable entry owner is project session plus map ID and actual map type; the full workflow and map identity form a separate mutable capture epoch. An epoch change cancels old evaluation and re-inspects the new capture while retaining the same owner’s recipe, name, visibility and profile. Re-evaluate only if every input still matches source ID, revision, availability, kind and map type; otherwise clear its layer and full-source extent while keeping the editable entry with an error. Reference points are the visible entries’ whole-source min/max corners, never current viewport corners. An open editor retains unsaved recipe, input, constant, name and profile drafts across changes to the same stable owner. Adopting a changed source version requires explicit confirmation for the same source ID, kind and map type. Add/Save always inspect current sources, evaluate and post-inspect the same context before registry commit; every asynchronous stage fences operation generation and draft revision."
+    },
+    {
+      "id": "map-feature-context-menu",
+      "source": "MapContextComponentsPane/VectorMapCanvas",
+      "target": "MapVectorFeatureActionCoordinator",
+      "cardinality": "project-session-map-workflow-exact-row-layer-source-revision-selected-stable-feature-identities",
+      "semantics": "Both canvas hits and filtered feature rows capture the same menu context and share one action dispatcher. Preserve an already-selected set or add under Control. Resolve row and layer by exact identity; changed project XML, visualization or Core context invalidates an old menu even while the previous rendered rows remain cached."
+    },
+    {
+      "id": "result-culvert-time-series",
+      "source": "MapResultSourcesSnapshot/MapResultChartActiveNode/embedded-Geometry-barrel-ordinal",
+      "target": "MapResultCulvertTimeSeriesService/MapResultCulvertTimeSeriesWindow",
+      "cardinality": "project-session-map-context-Result-node-logical-slot-zero-result-path-SHA-selected-barrel-ordinals-request-generation",
+      "semantics": "Read the actual OutputBlock.Times and Flow or OutletVelocity for each selected source barrel ordinal. Keep source units and NoData; never replace a time series with a single-frame particle profile or a spatial sample. Close and source changes retire pending loads; retain already-read chart data with a stale indication."
+    },
+    {
+      "id": "geometry-mesh-element-tools",
+      "source": "GeometryMeshToolsOwnerCapture",
+      "target": "GeometryMeshElementToolsService/GeometryMeshToolsWorkspace",
+      "cardinality": "project-session-Geometry-model-source-revision-mesh-and-topology-draft-SHAs-flow-area-ID-name-element-kind-index-operation-ID",
+      "semantics": "Replay the captured parent-owned drafts without saving the Geometry. Find returns exact coordinates and source viewport for a cell, face or node. Export actual centers or perimeter polylines with typed original attributes and project CRS. Prepare artifact receipts before no-clobber publication and preserve them after commit, even if UI currentness or cleanup subsequently fails."
+    },
+    {
+      "id": "dss-grid-series-import",
+      "source": "GriddedDssRasterImportController / DssTimeSeriesRasterDataSource",
+      "target": "SpatialGridImportSheet / DssGridImportService",
+      "cardinality": "captured-parent-draft-source-path-SHA-complete-record-group-duplex-operation",
+      "semantics": "Grid-only dateless A/B/C/F grouping retains UnCondensedPaths. Read a private DSS copy; stable identities retain original source path and SHA. Scalar imports one complete series; wind uses distinct complete X/Y series from one file with matching times, grid and units. Source checks surround reading and staged HDF commit; duplex cancellation and publication share a lock. Recheck the target HDF revision after all dependency reads and inside that lock immediately before replacement. A winning commit returns its receipt."
+    },
+    {
+      "id": "model-save-committed-receipt",
+      "source": "ModelEditorSession.saveModel",
+      "target": "WorkspaceStore CoreLayerReferenceRegistry",
+      "cardinality": "captured-asset-project-session-exact-previous-reference",
+      "semantics": "Deliver the committed canonical snapshot using the captured asset before editor-generation guards. Closed editors can rebase only the exact captured Core reference in the same project; replacement references and new editors are never overwritten. UI snapshot installation remains guarded by original asset and load generation."
+    },
+    {
+      "id": "geometry-mesh-element-property-chart",
+      "source": "GeometryMeshToolsOwnerCapture/Geometry property tables",
+      "target": "GeometryMeshElementChartWindowView/GeometryMeshElementChartService",
+      "cardinality": "project-session-asset-source-revision-mesh-and-topology-draft-SHAs-flow-area-ID-name-cell-or-face-index",
+      "semantics": "Cell and Face curves read the current Geometry child draft for the exact captured Geometry owner. When property tables are missing, the user may explicitly run the existing child-session computation from the chart. The workspace owns that operation lifetime and progress/cancel UI; on success it verifies the same project session, CoreLayerRequestContext, asset/model/path/revision, topology, Flow Area and selection, captures the new draft SHA, then re-finds the same element before Host replay and chart loading. Parent Geometry save remains the final HDF persistence boundary, not a prerequisite for plotting. Node curves are unsupported."
+    },
+    {
+      "id": "geometry-origin-mesh-element-across-results",
+      "source": "GeometryMeshToolsOwnerCapture/selected MapState.resultSources.snapshot",
+      "target": "GeometryMeshElementCrossResultChartEntry/MapResultMeshTimeSeriesService",
+      "cardinality": "geometry-owner-map-ID-project-session-CoreLayerRequestContext-map-workflow-snapshot-context-token-selection-overrides-flow-area-ordinal-ID-name-mesh-hash-cell-face-count-kind-index",
+      "semantics": "At the explicit inspect action, capture the selected saved map request, accepted Result snapshot, selection overrides, project session, CoreLayerRequestContext, map workflow identity and exact Geometry owner. Reuse that immutable capture after awaits and reject changed owners or snapshots. Host matches the same FlowAreaIndex, FlowArea ID/name, mesh hash and cell/face counts, then verifies every returned series against an accepted slot-0 locator, result path and revision. No accepted snapshot means no query. Chart data is read-only and is not a model/HDF save transaction."
+    },
+    {
+      "id": "result-postprocess-read-cache",
+      "source": "PostProcessor / ResultProfileSampleLineService / MapResultMeshTimeSeriesService",
+      "target": "ResultPostProcessReadScope",
+      "cardinality": "one-private-cache-directory-per-reader-operation",
+      "semantics": "Retained postprocessing algorithms operate in a unique temporary derived cache for each UI reader. Independent backend processes do not create, delete or transpose the shared default PostProcess.h5. Dispose all cache HDF resources before removing the private directory; original Result bytes remain unchanged."
+    },
+    {
+      "id": "map-hover-identify",
+      "source": "visible MapSourceRenderRecord / source resamplers / mesh renderer",
+      "target": "MapHoverIdentifySession / MapHoverIdentifyService",
+      "cardinality": "project-map-workflow-visible-node-source-revision-draft-profile-selection-pointer-generation",
+      "semantics": "Exact visible vector instances yield their source FID locally; source Result, Terrain, NValue, Classification, continuous or discrete raster and Geometry/Result mesh reads supply real values. NoData remains missing and zero remains valid. Local and backend entries share captured owners; stale responses cannot replace a new pointer or source. The native glass tooltip never receives input."
     }
   ],
   "stateScopes": [
@@ -2108,6 +2171,36 @@
       "id": "raster-calculator-map-registry",
       "identity": "stable-owner(project-session,map-ID,map-type) + mutable-capture-epoch(workflow-identity,MapTreeMapIdentity) + source-revisions + request-generation",
       "rule": "Same-owner epoch changes preserve editable recipe/name/visibility/profile but cancel prior work and inspect the new context. Evaluation requires every captured source identity and availability to match. Failure clears stale layer and whole-source bounds while retaining the entry and error."
+    },
+    {
+      "id": "map-feature-context-menu",
+      "identity": "project-session-map-workflow-exact-row-layer-source-revision-selected-stable-feature-identities",
+      "rule": "Both canvas hits and filtered feature rows capture the same menu context and share one action dispatcher. Preserve an already-selected set or add under Control. Resolve row and layer by exact identity; changed project XML, visualization or Core context invalidates an old menu even while the previous rendered rows remain cached."
+    },
+    {
+      "id": "result-culvert-time-series",
+      "identity": "project-session-map-context-Result-node-logical-slot-zero-result-path-SHA-selected-barrel-ordinals-request-generation",
+      "rule": "Read the actual OutputBlock.Times and Flow or OutletVelocity for each selected source barrel ordinal. Keep source units and NoData; never replace a time series with a single-frame particle profile or a spatial sample. Close and source changes retire pending loads; retain already-read chart data with a stale indication."
+    },
+    {
+      "id": "geometry-mesh-element-tools",
+      "identity": "project-session-Geometry-model-source-revision-mesh-and-topology-draft-SHAs-flow-area-ID-name-element-kind-index-operation-ID",
+      "rule": "Replay the captured parent-owned drafts without saving the Geometry. Find returns exact coordinates and source viewport for a cell, face or node. Export actual centers or perimeter polylines with typed original attributes and project CRS. Prepare artifact receipts before no-clobber publication and preserve them after commit, even if UI currentness or cleanup subsequently fails."
+    },
+    {
+      "id": "geometry-mesh-element-property-chart",
+      "identity": "GeometryMeshToolsOwnerCapture/element-kind/index/property-table-source-revision",
+      "rule": "The chart belongs to one captured Geometry child draft and source element. A changed source owner, topology, Flow Area, project context or selection invalidates the request. Missing property tables are computed through the existing child session; the page owns progress/cancel and re-finds the element with the new draft SHA before querying the chart. Parent save persists the child draft to HDF but is not required for charting."
+    },
+    {
+      "id": "geometry-origin-mesh-element-across-results",
+      "identity": "geometry-owner/map-ID/project-session/CoreLayerRequestContext/map-workflow/accepted-result-snapshot/selection-overrides/flow-area-and-element",
+      "rule": "Capture the selected saved map and accepted source snapshot at the explicit user action. All asynchronous inspect and execute work uses that capture; owner, workflow, snapshot, selection or Geometry changes retire the response. Only exact same-mesh slot-0 Result series are accepted."
+    },
+    {
+      "id": "map-hover-identify",
+      "identity": "map-workflow/source-locators-and-SHAs/result-selections-and-profile/mesh-draft/pointer-generation",
+      "rule": "Cancel or retire old reads on pointer, tool, project, map or source changes. Validate response entries against their exact source captures before merging with local vector hits; preserve explicit no-clear raster sampling semantics."
     }
   ],
   "invariants": [

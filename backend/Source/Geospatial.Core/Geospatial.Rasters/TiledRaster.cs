@@ -67,6 +67,10 @@ internal class TiledRaster<T> : IRaster<T>, IResample<T>, ISurface<T>, IRasterDe
 
 	public void SamplePoints(Memory<Point> points, Memory<T> retn, SamplingParams sampleParams = default(SamplingParams))
 	{
+		if (sampleParams.IsNull())
+		{
+			sampleParams = SamplingParams.Default;
+		}
 		if (NoDataValue.HasValue && sampleParams.InitializeBufferToNoData)
 		{
 			retn.Span.Fill(NoDataValue.Value);

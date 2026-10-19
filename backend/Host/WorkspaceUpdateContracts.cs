@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Ras.Backend;
 
 public sealed record WorkspaceUpdateCredentials(string AccessKey, string SecretKey);
@@ -14,7 +16,7 @@ public sealed record WorkspaceUpdateRelease(
     string Platform,
     string Architecture,
     string? PackageFilename,
-    string? PackageSHA256,
+    [property: JsonPropertyName("packageSha256")] string? PackageSHA256,
     long? PackageLength,
     string? PackageManifestKey,
     string PackageStatus);
@@ -43,7 +45,7 @@ public sealed record WorkspaceUpdatePackagePrepareRequest(
 public sealed record WorkspaceUpdatePackageReceipt(
     string Path,
     string Filename,
-    string SHA256,
+    [property: JsonPropertyName("sha256")] string SHA256,
     long Length,
     string Platform,
     string Architecture);

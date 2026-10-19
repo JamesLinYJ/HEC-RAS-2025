@@ -1579,7 +1579,7 @@ private struct GeometryCulvertPolylineOperationSheet: View {
 }
 
 @MainActor
-private enum GeometryCulvertClipboard {
+enum GeometryCulvertClipboard {
     private static let pasteboardType = NSPasteboard.PasteboardType("com.hecras2025.geometry.culvert-barrels")
     private static let maximumPayloadBytes = 16 * 1024 * 1024
     private static let maximumFeatureCount = 10_000

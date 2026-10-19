@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
@@ -204,6 +205,10 @@ internal static class MapResultOwnedGeometryChecks
             signed, signedPath, "signed-flow");
         CheckCulvertProfile(map, zeroSources, selectedZero, selectedMulti, manifest,
             zero, zeroPath, "zero-flow");
+        CheckCulvertTimeSeries(map, resultSources, selectedSigned, resultRow,
+            signed, signedPath, projectRevision, manifest, "signed-flow");
+        CheckCulvertTimeSeries(map, zeroSources, selectedZero, selectedMulti,
+            zero, zeroPath, projectRevision, manifest, "zero-flow");
         Expect<ArgumentOutOfRangeException>(() => ModelEditorAdapter.LoadMapResultCulvertProfile(
             new MapResultCulvertProfileRequest(map, zeroSources.ContextToken, null,
                 multiResultLocator, 0, zero.ProfileCount)));
@@ -475,6 +480,74 @@ internal static class MapResultOwnedGeometryChecks
         else
             Check(actual.Flow.All(value => Math.Abs(value) <= 0.001),
                 "Stored zero-flow data remains within the retained particle-animation threshold.");
+    }
+
+    private static void CheckCulvertTimeSeries(MapTreeRequest map, MapResultSourcesResult sources,
+        MapResultSourceChoice selected, CatalogTreeNode ownerNode, ResultCapture expected,
+        string resultPath, string expectedProjectRevision, AcceptanceManifest manifest, string role)
+    {
+        var owner = new MapResultGeometryOwner(RequiredLocator(ownerNode), sources.ContextToken,
+            null, 0, selected.ResultPath, selected.Revision);
+        string[] selectedIDs = manifest.BarrelNames.Length >= 2
+            ? ["barrel:source:1", "barrel:source:0"]
+            : ["barrel:source:0"];
+        FixtureProfile[] orderedProfiles = expected.Profiles.OrderBy(profile => profile.Index).ToArray();
+        string[] expectedTimes = orderedProfiles.Select(profile => DateTime.Parse(profile.Time,
+            CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
+            .ToString("O", CultureInfo.InvariantCulture)).ToArray();
+        using var selectedResult = new Ras.Layers.Result(selected.ResultPath);
+        DefaultUnits expectedUnits = DefaultUnits.FromDefault(selectedResult.EmbeddedUnitSystem);
+
+        foreach (string variable in new[] { "Flow", "Velocity" })
+        {
+            MapResultCulvertTimeSeriesResult actual = ModelEditorAdapter.LoadMapResultCulvertTimeSeries(
+                new MapResultCulvertTimeSeriesRequest(map, owner, selectedIDs, variable));
+            Check(SamePath(actual.ProjectCanonicalPath, map.ProjectPath) &&
+                  actual.ProjectRevision.Equals(expectedProjectRevision, StringComparison.OrdinalIgnoreCase) &&
+                  actual.ProjectXmlSHA.Equals(map.ProjectXmlSHA, StringComparison.OrdinalIgnoreCase) &&
+                  actual.VisualizationRevision.Equals(map.ExpectedVisualizationRevision, StringComparison.OrdinalIgnoreCase) &&
+                  actual.CoreLayerContextIdentity == (map.CoreLayerContext?.IdentityToken ?? string.Empty) &&
+                  actual.MapID == map.MapID && actual.MapIndex == map.MapIndex &&
+                  actual.MapName == map.MapName && actual.MapType == map.MapType &&
+                  actual.ContextToken == sources.ContextToken && SameLocator(actual.ResultNode, RequiredLocator(ownerNode)) &&
+                  actual.SelectionIndex == 0 && SamePath(actual.SelectedResultPath, resultPath) &&
+                  actual.SelectedResultRevision.Equals(selected.Revision, StringComparison.OrdinalIgnoreCase) &&
+                  actual.Variable == variable &&
+                  actual.Units == (variable == "Flow" ? expectedUnits.FlowUnits : expectedUnits.ShortVelocityUnits) &&
+                  actual.NoDataValue == -9999.0,
+                $"The {role} culvert {variable} request is bound to the exact map, slot-zero Result HDF, project revision, and Core context.");
+            Check(actual.Times.SequenceEqual(expectedTimes, StringComparer.Ordinal) &&
+                  actual.Datasets.Select(dataset => dataset.ID).SequenceEqual(selectedIDs, StringComparer.Ordinal) &&
+                  actual.Datasets.Select(dataset => dataset.SourceOrdinal)
+                      .SequenceEqual(selectedIDs.Select(id => int.Parse(id.AsSpan("barrel:source:".Length),
+                          CultureInfo.InvariantCulture))) &&
+                  actual.Datasets.Select(dataset => dataset.Name)
+                      .SequenceEqual(actual.Datasets.Select(dataset => manifest.BarrelNames[dataset.SourceOrdinal]),
+                          StringComparer.Ordinal) &&
+                  actual.Datasets.All(dataset => dataset.Values.Length == expectedTimes.Length &&
+                      dataset.Values.All(double.IsFinite) && dataset.ColorRGBA.Length == 8 &&
+                      dataset.StrokeWidth > 0 && double.IsFinite(dataset.StrokeWidth)),
+                $"The {role} time axis and selected culvert series retain the original OutputBlock order and source-ordinal identities.");
+
+            foreach (MapResultCulvertTimeSeriesDataset dataset in actual.Datasets)
+            {
+                int ordinal = dataset.SourceOrdinal;
+                double[] expectedValues = orderedProfiles.Select(profile => (double)(
+                    variable == "Flow" ? profile.Flow[ordinal] : profile.OutletVelocity[ordinal])).ToArray();
+                Check(dataset.Values.SequenceEqual(expectedValues),
+                    $"The {role} {variable} series for barrel ordinal {ordinal} exactly matches stored HDF values at every source time.");
+            }
+        }
+
+        Expect<ArgumentException>(() => ModelEditorAdapter.LoadMapResultCulvertTimeSeries(
+            new MapResultCulvertTimeSeriesRequest(map, owner with { SelectionIndex = 1 }, selectedIDs, "Flow")));
+        Expect<ArgumentException>(() => ModelEditorAdapter.LoadMapResultCulvertTimeSeries(
+            new MapResultCulvertTimeSeriesRequest(map, owner, [selectedIDs[0], selectedIDs[0]], "Flow")));
+        Expect<ArgumentException>(() => ModelEditorAdapter.LoadMapResultCulvertTimeSeries(
+            new MapResultCulvertTimeSeriesRequest(map, owner, ["barrel:source:" + manifest.BarrelNames.Length], "Flow")));
+        Expect<SourceFileChangedException>(() => ModelEditorAdapter.LoadMapResultCulvertTimeSeries(
+            new MapResultCulvertTimeSeriesRequest(map,
+                owner with { SelectedResultRevision = new string('0', 64) }, selectedIDs, "Flow")));
     }
 
     private static void AddStoredResultRows(string visualizationPath, string mapName,

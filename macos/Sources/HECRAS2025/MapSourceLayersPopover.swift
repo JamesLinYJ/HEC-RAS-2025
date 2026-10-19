@@ -81,6 +81,18 @@ struct MapSourceLayersPopover: View {
                                     ForEach(group.nodes) { node in layerRow(node) }
                                 }
                             }
+                            MapResultCulvertTimeSeriesEntry(store: store, mapState: mapState,
+                                session: mapState.storedCulvertProfile)
+                            if let acceptedSources = mapState.resultSources.snapshot,
+                               let selectedNodeID = mapState.resultMap.selectedNodeID,
+                               let resultNode = acceptedSources.sources.activeNodes.first(where: {
+                                   $0.id == selectedNodeID
+                               }),
+                               (resultNode.nodeKind == "Result" || resultNode.nodeKind == "MultiResult") {
+                                Divider()
+                                MapResultMeshTimeSeriesEntry(store: store, mapState: mapState,
+                                    snapshot: acceptedSources, node: resultNode)
+                            }
                             if nodes.contains(where: { $0.sourceLocator?.nodeType == "BoundaryCondition" })
                                 || !mapState.boundaryMap.entries.isEmpty || mapState.boundaryMap.isLoading {
                                 boundaryLinesSection

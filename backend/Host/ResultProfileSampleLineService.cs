@@ -129,7 +129,8 @@ public static class ResultProfileSampleLineService
             }
             else
             {
-                var postProcessor = result.GetPostProcessor();
+                using var postProcessRead = new ResultPostProcessReadScope(result);
+                var postProcessor = postProcessRead.Processor;
                 DateTime[] flowTimes = postProcessor.Times?.ToArray() ?? [];
                 if (flowTimes.Length != flowValues.Length)
                     throw new InvalidDataException("The source flow samples do not match the post-process timestamps.");

@@ -96,6 +96,15 @@ struct HECRAS2025App: App {
         }
         .defaultSize(width: 1000, height: 700)
         .restorationBehavior(.disabled)
+        WindowGroup(L10n.text("Culvert Time Series"), for: MapResultCulvertTimeSeriesWindowRoute.self) { route in
+            if let route = route.wrappedValue {
+                MapResultCulvertTimeSeriesWindow(store: store, route: route)
+                    .environment(\.locale, store.interfaceLocale)
+                    .preferredColorScheme(store.theme == "Dark" ? .dark : store.theme == "Light" ? .light : nil)
+            }
+        }
+        .defaultSize(width: 1000, height: 700)
+        .restorationBehavior(.disabled)
         Window(L10n.text("Animation Testing"), id: "animation-testing") {
             WorkspaceAnimationTestingView()
                 .environment(\.locale, store.interfaceLocale)

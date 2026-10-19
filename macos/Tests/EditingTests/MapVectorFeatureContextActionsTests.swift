@@ -108,6 +108,65 @@ struct MapVectorFeatureContextActionsTests {
     }
 
     @Test
+    func capturedMenuRejectsChangedMapContextLayerRevisionOrSelection() {
+        let sessionID = UUID()
+        let mapID = UUID()
+        let feature = MapFeature(id: 0, kind: .line,
+            paths: [[.init(x: 0, y: 0), .init(x: 1, y: 1)]],
+            attributes: [:], stableIdentity: "road/0")
+        let layer = MapVectorLayer(url: URL(fileURLWithPath: "/tmp/context-current.geojson"),
+            features: [feature], sourceMapID: mapID, sourceRevision: "revision-1",
+            visualIdentity: "road-layer")
+        let captured = MapVectorFeatureContextSnapshot(projectSessionID: sessionID,
+            mapID: mapID, contextIdentity: "road-row", mapWorkflowIdentity: "workflow-1", layer: layer,
+            clickedFeatureIdentity: feature.stableIdentity,
+            selectedFeatureIdentities: [feature.stableIdentity], selectedFeatures: [feature],
+            editorCanDeleteSelectedFeatures: false, editorCanUndo: false, editorCanRedo: false,
+            editorCanSave: false, canPasteCopiedLines: false)
+
+        #expect(MapVectorFeatureContextCurrentness.matches(captured,
+            projectSessionID: sessionID, mapID: mapID, contextIdentity: "road-row",
+            mapWorkflowIdentity: "workflow-1", layer: layer,
+            selectedFeatureIdentities: [feature.stableIdentity]))
+        // The visible row, layer revision and selection may remain cached after
+        // the project/.vis/Core workflow changes. Such a menu must still expire.
+        #expect(!MapVectorFeatureContextCurrentness.matches(captured,
+            projectSessionID: sessionID, mapID: mapID, contextIdentity: "road-row",
+            mapWorkflowIdentity: "workflow-2", layer: layer,
+            selectedFeatureIdentities: [feature.stableIdentity]))
+        #expect(!MapVectorFeatureContextCurrentness.matches(captured,
+            projectSessionID: sessionID, mapID: mapID, contextIdentity: "other-row",
+            mapWorkflowIdentity: "workflow-1", layer: layer,
+            selectedFeatureIdentities: [feature.stableIdentity]))
+        #expect(!MapVectorFeatureContextCurrentness.matches(captured,
+            projectSessionID: UUID(), mapID: mapID, contextIdentity: "road-row",
+            mapWorkflowIdentity: "workflow-1", layer: layer,
+            selectedFeatureIdentities: [feature.stableIdentity]))
+        #expect(!MapVectorFeatureContextCurrentness.matches(captured,
+            projectSessionID: sessionID, mapID: UUID(), contextIdentity: "road-row",
+            mapWorkflowIdentity: "workflow-1", layer: layer,
+            selectedFeatureIdentities: [feature.stableIdentity]))
+
+        let changedRevision = MapVectorLayer(url: layer.url, features: [feature],
+            sourceMapID: mapID, sourceRevision: "revision-2", visualIdentity: layer.id)
+        #expect(!MapVectorFeatureContextCurrentness.matches(captured,
+            projectSessionID: sessionID, mapID: mapID, contextIdentity: "road-row",
+            mapWorkflowIdentity: "workflow-1", layer: changedRevision,
+            selectedFeatureIdentities: [feature.stableIdentity]))
+        let changedPath = MapVectorLayer(
+            url: URL(fileURLWithPath: "/tmp/context-other.geojson"), features: [feature],
+            sourceMapID: mapID, sourceRevision: "revision-1", visualIdentity: layer.id)
+        #expect(!MapVectorFeatureContextCurrentness.matches(captured,
+            projectSessionID: sessionID, mapID: mapID, contextIdentity: "road-row",
+            mapWorkflowIdentity: "workflow-1", layer: changedPath,
+            selectedFeatureIdentities: [feature.stableIdentity]))
+        #expect(!MapVectorFeatureContextCurrentness.matches(captured,
+            projectSessionID: sessionID, mapID: mapID, contextIdentity: "road-row",
+            mapWorkflowIdentity: "workflow-1", layer: layer,
+            selectedFeatureIdentities: []))
+    }
+
+    @Test
     func typedClipboardRetainsSourcePathDimensionsDuplicateAttributesAndNulls() throws {
         let feature = MapFeature(id: 0, kind: .line,
             paths: [[.init(x: 100, y: 200), .init(x: 110, y: 210)]],
@@ -125,7 +184,8 @@ struct MapVectorFeatureContextActionsTests {
             sourceMapID: UUID(), sourceRevision: String(repeating: "A", count: 64),
             visualIdentity: "shp-layer", sourceProjectionWKT: "source-crs", targetProjectionWKT: "map-crs")
         let context = MapVectorFeatureContextSnapshot(projectSessionID: UUID(), mapID: UUID(),
-            contextIdentity: "source-row", layer: layer, clickedFeatureIdentity: feature.stableIdentity,
+            contextIdentity: "source-row", mapWorkflowIdentity: "workflow-clipboard",
+            layer: layer, clickedFeatureIdentity: feature.stableIdentity,
             selectedFeatureIdentities: [feature.stableIdentity], selectedFeatures: [feature],
             editorCanDeleteSelectedFeatures: false, editorCanUndo: false, editorCanRedo: false,
             editorCanSave: false, canPasteCopiedLines: false)

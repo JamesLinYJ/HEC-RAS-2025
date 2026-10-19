@@ -97,6 +97,11 @@ struct ModelEditorWorkspace: View {
                 Button { Task { await session.save(selectedAsset) } } label: { Label("Save", systemImage: "square.and.arrow.down") }
                     .disabled(!session.canSave)
             }.padding(12)
+            if let warning = session.saveWarning {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(.orange).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+            }
             if let conflict = session.coreLayerReferenceConflict {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill")

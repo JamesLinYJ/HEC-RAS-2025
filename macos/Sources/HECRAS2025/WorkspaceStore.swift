@@ -1003,7 +1003,7 @@ final class WorkspaceStore: ObservableObject {
         }.value
     }
 
-    private func refreshCoreLayerReferenceAfterModelSave(_ session: ModelEditorSession,
+    private func refreshCoreLayerReferenceAfterModelSave(_ committedAsset: ProjectAsset,
         committedSnapshot: EditorSnapshot, capturedCoreLayerContext: CoreLayerRequestContext?,
         committedProjectRevision: String?) {
         guard let document, let projectURL = document.url,
@@ -1011,7 +1011,6 @@ final class WorkspaceStore: ObservableObject {
               let currentProjectRevision = document.sourceRevision,
               currentProjectRevision.caseInsensitiveCompare(projectRevision) == .orderedSame,
               let capturedCoreLayerContext,
-              let sourcePath = session.modelAssetID.map({ URL(fileURLWithPath: $0) }),
               let sourceRevision = committedSnapshot.sourceRevision,
               sourceRevision.count == 64, sourceRevision.allSatisfy({ $0.isHexDigit }),
               let nameField = committedSnapshot.fields["GeometryCatalogSummary/Context_Name"]
@@ -1019,7 +1018,7 @@ final class WorkspaceStore: ObservableObject {
               coreLayerReferenceRegistry.rebaseReference(from: capturedCoreLayerContext,
                   sessionID: projectSessionID,
                   projectURL: projectURL, projectRevision: projectRevision,
-                  sourceURL: sourcePath, sourceRevision: sourceRevision, name: nameField) else { return }
+                  sourceURL: committedAsset.url, sourceRevision: sourceRevision, name: nameField) else { return }
 
         coreLayerReferencesRevision += 1
         assets = assetsIncludingSessionCoreLayers(assets)
@@ -1795,10 +1794,9 @@ final class WorkspaceStore: ObservableObject {
                 guard let self, let session, self.editorSessions[session.id] === session else { return }
                 self.assetsRevision += 1
             }
-            session.didSaveModelSnapshot = { [weak self, weak session] snapshot, capturedContext, committedProjectRevision in
-                guard let self, let session, self.projectSessionID == ownerProjectSession,
-                      self.editorSessions[session.id] === session else { return }
-                self.refreshCoreLayerReferenceAfterModelSave(session, committedSnapshot: snapshot,
+            session.didSaveModelSnapshot = { [weak self] committedAsset, snapshot, capturedContext, committedProjectRevision in
+                guard let self, self.projectSessionID == ownerProjectSession else { return }
+                self.refreshCoreLayerReferenceAfterModelSave(committedAsset, committedSnapshot: snapshot,
                     capturedCoreLayerContext: capturedContext,
                     committedProjectRevision: committedProjectRevision)
             }

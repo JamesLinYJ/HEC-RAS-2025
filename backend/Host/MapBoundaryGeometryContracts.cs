@@ -114,7 +114,12 @@ public sealed record MapResultCulvertBarrel(
     string ID,
     int SourceOrdinal,
     string Name,
-    MapResultCulvertCoordinate[] Coordinates);
+    MapResultCulvertCoordinate[] Coordinates,
+    string BarrelPropertyName,
+    string UpstreamInvert,
+    string DownstreamInvert,
+    string UpstreamOpeningName,
+    string DownstreamOpeningName);
 
 public sealed record MapResultCulvertProfileSnapshot(
     string ProjectCanonicalPath,

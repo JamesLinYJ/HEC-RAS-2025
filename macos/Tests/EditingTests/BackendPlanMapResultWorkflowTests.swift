@@ -450,6 +450,60 @@ struct BackendPlanMapResultWorkflowTests {
         #expect(zip(storedProfile.flow, signedProfile.flow).allSatisfy { pair in
             abs(pair.0 - Double(pair.1)) < 1e-5
         })
+
+        try await waitUntil("current Store-owned Result culvert source", timeout: .seconds(30)) {
+            mapState.storedCulvertProfile.capture?.resultOwner.selectedResultPath == canonical(signedChoice.resultPath)
+                && mapState.storedCulvertProfile.snapshot != nil
+                && !mapState.storedCulvertProfile.isLoading
+        }
+        let barrelSelection = ["barrel:source:1", "barrel:source:0"]
+        let signedFlowRoute = try store.mapResultCulvertTimeSeriesRoute(mapID: mapID,
+            barrelIDs: barrelSelection, variable: "Flow")
+        #expect(signedFlowRoute.request.resultOwner.resultNode == currentResultNode.node)
+        #expect(signedFlowRoute.request.resultOwner.selectionIndex == 0)
+        #expect(signedFlowRoute.request.barrelIDs == barrelSelection)
+        #expect(canonical(signedFlowRoute.request.resultOwner.selectedResultPath) == canonical(signedChoice.resultPath))
+        #expect(signedFlowRoute.request.resultOwner.selectedResultRevision.caseInsensitiveCompare(signedChoice.revision) == .orderedSame)
+        let timeSeriesProvider = BackendMapResultCulvertTimeSeriesProvider(client: client)
+        let signedFlowSeries = try await timeSeriesProvider.load(signedFlowRoute) {
+            store.isCurrentMapResultCulvertTimeSeriesRoute(signedFlowRoute, state: mapState)
+        }
+        let orderedSignedProfiles = signedFixture.profiles.sorted { $0.index < $1.index }
+        #expect(signedFlowSeries.times == orderedSignedProfiles.map(\.time))
+        #expect(signedFlowSeries.noDataValue == -9999)
+        #expect(["CFS", "CMS"].contains(signedFlowSeries.units))
+        #expect(signedFlowSeries.datasets.map(\.id) == barrelSelection)
+        #expect(signedFlowSeries.datasets.map(\.sourceOrdinal) == [1, 0])
+        #expect(signedFlowSeries.datasets.map(\.name) == [manifest.barrelNames[1], manifest.barrelNames[0]])
+        for dataset in signedFlowSeries.datasets {
+            let expectedValues = orderedSignedProfiles.map { Double($0.flow[dataset.sourceOrdinal]) }
+            #expect(dataset.values == expectedValues)
+        }
+        let signedVelocityRoute = try store.mapResultCulvertTimeSeriesRoute(mapID: mapID,
+            barrelIDs: barrelSelection, variable: "Velocity")
+        let signedVelocitySeries = try await timeSeriesProvider.load(signedVelocityRoute) {
+            store.isCurrentMapResultCulvertTimeSeriesRoute(signedVelocityRoute, state: mapState)
+        }
+        #expect(signedVelocitySeries.times == orderedSignedProfiles.map(\.time))
+        #expect(["ft/s", "m/s"].contains(signedVelocitySeries.units))
+        for dataset in signedVelocitySeries.datasets {
+            let expectedValues = orderedSignedProfiles.map { Double($0.outletVelocity[dataset.sourceOrdinal]) }
+            #expect(dataset.values == expectedValues)
+        }
+        let chartData = try #require(MapResultCulvertTimeSeriesChartData.make(
+            from: signedFlowSeries, variable: "Flow"))
+        #expect(chartData.samples.count == orderedSignedProfiles.count * barrelSelection.count)
+        #expect(chartData.presentation.chart?.axes.first(where: { $0.direction == .x })?.isDate == true)
+        #expect(chartData.presentation.chart?.axes.first(where: { $0.direction == .y })?.units
+            == signedFlowSeries.units)
+        #expect(chartData.presentation.chart?.datasets.allSatisfy {
+            $0.noDataValue == signedFlowSeries.noDataValue
+        } == true)
+        #expect(chartData.presentation.chart?.datasets.map(\.id) == barrelSelection)
+        await #expect(throws: MapResultCulvertTimeSeriesError.staleContext) {
+            try await timeSeriesProvider.load(signedFlowRoute) { false }
+        }
+        #expect(try sourceBytes.matches(root: workingRoot))
         storedProfileSession.invalidate()
 
         // Return slot zero to the retained Latest choice, then read the real
@@ -502,6 +556,41 @@ struct BackendPlanMapResultWorkflowTests {
         #expect(zip(zeroCulvert.outletVelocity, zeroProfile.outletVelocity).allSatisfy { pair in
             abs(pair.0 - Double(pair.1)) < 1e-5
         })
+
+        try await waitUntil("current Store-owned MultiResult slot-zero culvert source", timeout: .seconds(30)) {
+            mapState.storedCulvertProfile.capture?.resultOwner.resultNode.nodeType == "MultiResult"
+                && canonical(mapState.storedCulvertProfile.capture?.resultOwner.selectedResultPath ?? "")
+                    == canonical(workingRoot.appendingPathComponent(latestFixture.path).path)
+                && mapState.storedCulvertProfile.snapshot != nil
+                && !mapState.storedCulvertProfile.isLoading
+        }
+        let zeroFlowRoute = try store.mapResultCulvertTimeSeriesRoute(mapID: mapID,
+            barrelIDs: barrelSelection, variable: "Flow")
+        #expect(zeroFlowRoute.request.resultOwner.resultNode.nodeType == "MultiResult")
+        #expect(zeroFlowRoute.request.resultOwner.selectionIndex == 0)
+        #expect(canonical(zeroFlowRoute.request.resultOwner.selectedResultPath)
+            == canonical(workingRoot.appendingPathComponent(latestFixture.path).path))
+        let zeroFlowSeries = try await timeSeriesProvider.load(zeroFlowRoute) {
+            store.isCurrentMapResultCulvertTimeSeriesRoute(zeroFlowRoute, state: mapState)
+        }
+        let orderedZeroProfiles = latestFixture.profiles.sorted { $0.index < $1.index }
+        #expect(zeroFlowSeries.times == orderedZeroProfiles.map(\.time))
+        #expect(zeroFlowSeries.datasets.map(\.id) == barrelSelection)
+        for dataset in zeroFlowSeries.datasets {
+            let expectedValues = orderedZeroProfiles.map { Double($0.flow[dataset.sourceOrdinal]) }
+            #expect(dataset.values == expectedValues)
+        }
+        let zeroVelocityRoute = try store.mapResultCulvertTimeSeriesRoute(mapID: mapID,
+            barrelIDs: barrelSelection, variable: "Velocity")
+        let zeroVelocitySeries = try await timeSeriesProvider.load(zeroVelocityRoute) {
+            store.isCurrentMapResultCulvertTimeSeriesRoute(zeroVelocityRoute, state: mapState)
+        }
+        #expect(zeroVelocitySeries.times == orderedZeroProfiles.map(\.time))
+        for dataset in zeroVelocitySeries.datasets {
+            let expectedValues = orderedZeroProfiles.map { Double($0.outletVelocity[dataset.sourceOrdinal]) }
+            #expect(dataset.values == expectedValues)
+        }
+        #expect(try sourceBytes.matches(root: workingRoot))
 
         // Selecting another real source timeline step must persist the exact
         // profile index on this MultiResult row, without writing solver inputs.

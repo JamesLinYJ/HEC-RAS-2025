@@ -420,7 +420,10 @@ struct PlanPrecomputeAssociatedDraftsCapture: Sendable {
 struct EditorSaveResult: Sendable {
     var sourceRevision: String? = nil
     var snapshot: EditorSnapshot? = nil
+    var refreshWarning: String? = nil
 }
+typealias GridImportCancelHandler = @MainActor @Sendable () -> Bool
+typealias GridImportCancellationInstaller = @MainActor @Sendable (GridImportCancelHandler?) -> Void
 struct EditorContextRefresh: Sendable {
     let baseline: EditorSnapshot
     let draft: EditorSnapshot
@@ -448,6 +451,9 @@ protocol ModelEditorProvider {
     func discardTerrainInputImportBatch(_ asset: ProjectAsset, draftToken: String, batchToken: String) async throws -> Bool
     func inspectGrid(_ asset: ProjectAsset, edits: EditorEdits, layerID: String, files: [URL], subdataset: String?, bands: [SpatialGridBand], previewID: String?) async throws -> SpatialGridInspection
     func importGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: SpatialGridSelection) async throws -> EditorSaveResult
+    func importGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: SpatialGridSelection,
+                    progress: @escaping @MainActor @Sendable (BackendProgressUpdate) -> Void,
+                    installCancellation: @escaping GridImportCancellationInstaller) async throws -> EditorSaveResult
     func importCumulusGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: CumulusGridImportSelection, progress: @escaping @MainActor (BackendProgressUpdate) -> Void) async throws -> EditorSaveResult
     func editSeries(_ asset: ProjectAsset, request: SeriesEditRequest) async throws -> SeriesEditResult
     func editClassification(_ asset: ProjectAsset, action: EditorAction, edits: EditorEdits) async throws -> EditorSnapshot
@@ -475,6 +481,11 @@ extension ModelEditorProvider {
     func discardTerrainInputImportBatch(_ asset: ProjectAsset, draftToken: String, batchToken: String) async throws -> Bool { throw CocoaError(.featureUnsupported) }
     func inspectGrid(_ asset: ProjectAsset, edits: EditorEdits, layerID: String, files: [URL], subdataset: String?, bands: [SpatialGridBand], previewID: String?) async throws -> SpatialGridInspection { throw CocoaError(.featureUnsupported) }
     func importGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: SpatialGridSelection) async throws -> EditorSaveResult { throw CocoaError(.featureUnsupported) }
+    func importGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: SpatialGridSelection,
+                    progress: @escaping @MainActor @Sendable (BackendProgressUpdate) -> Void,
+                    installCancellation: @escaping GridImportCancellationInstaller) async throws -> EditorSaveResult {
+        try await importGrid(asset, edits: edits, selection: selection)
+    }
     func importCumulusGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: CumulusGridImportSelection, progress: @escaping @MainActor (BackendProgressUpdate) -> Void) async throws -> EditorSaveResult { throw CocoaError(.featureUnsupported) }
     func setProject(_ document: ProjectDocument?) {}
     func catalogSurfaceLayers(_ assets: [ProjectAsset]) async throws -> [SurfaceCatalogEntry] { [] }
@@ -823,6 +834,7 @@ final class ModelEditorSession: ObservableObject {
     @Published private(set) var isSaving = false { didSet { if !isSaving { scheduleProjectContextRefresh() } } }
     @Published private(set) var isPerforming = false { didSet { if !isPerforming { scheduleProjectContextRefresh() } } }
     @Published private(set) var isRefreshingContext = false
+    @Published private(set) var saveWarning: String?
     @Published private(set) var loadingSelection = false
     @Published private(set) var terrainInputImportDraftToken: String?
     @Published private(set) var terrainInputImportCleanupWarning: String?
@@ -877,7 +889,7 @@ final class ModelEditorSession: ObservableObject {
     @Published var error: String?
     let provider: (any ModelEditorProvider)?
     var didSave: (@MainActor () -> Void)?
-    var didSaveModelSnapshot: (@MainActor (EditorSnapshot, CoreLayerRequestContext?, String?) -> Void)?
+    var didSaveModelSnapshot: (@MainActor (ProjectAsset, EditorSnapshot, CoreLayerRequestContext?, String?) -> Void)?
     var persistDiagnosticsPreferences: (@MainActor (GeometryMeshDiagnosticsPreferencesCapture) async throws -> String)?
     var workspaceWriteLocked: @MainActor () -> Bool = { false }
     var currentResultPlanSettingsContext: (@MainActor () -> PlanSettingsResultCapture?)?
@@ -1157,6 +1169,7 @@ final class ModelEditorSession: ObservableObject {
         unitNumberInputDrafts = [:]
         invalidateSelection()
         loadRevision += 1; let revision = loadRevision; self.asset = asset
+        saveWarning = nil
         sourceRevision = nil; sourceState = nil; readOnlyFieldIDs = []
         terrainInputImportDraftToken = nil; terrainInputImportCleanupWarning = nil; terrainInputImportCleanupToken = nil
         terrainInputImportCleanupBatchToken = nil; terrainInputImportCleanupAfterSave = false
@@ -2202,13 +2215,16 @@ final class ModelEditorSession: ObservableObject {
     @discardableResult
     func save(_ requestedAsset: ProjectAsset?, gridImport: SpatialGridSelection? = nil, classificationImport: [ClassificationImportFile]? = nil,
               cumulusImport: CumulusGridImportSelection? = nil,
-              cumulusProgress: (@MainActor (BackendProgressUpdate) -> Void)? = nil) async -> Bool {
+              cumulusProgress: (@MainActor (BackendProgressUpdate) -> Void)? = nil,
+              gridProgress: (@MainActor @Sendable (BackendProgressUpdate) -> Void)? = nil,
+              gridCancellationAvailable: GridImportCancellationInstaller? = nil) async -> Bool {
         guard geometryMesh?.isSavingDiagnosticsPreferences != true else { return false }
         if resultPlanSettings?.hasUnsavedChanges == true {
             return await saveResultPlanSettings(requestedAsset)
         }
         guard await saveModel(requestedAsset, gridImport: gridImport, classificationImport: classificationImport,
-                              cumulusImport: cumulusImport, cumulusProgress: cumulusProgress) else { return false }
+                              cumulusImport: cumulusImport, cumulusProgress: cumulusProgress,
+                              gridProgress: gridProgress, gridCancellationAvailable: gridCancellationAvailable) else { return false }
         guard let mesh = geometryMesh, mesh.hasUnsavedDiagnosticsPreferences else { return true }
         guard let persistDiagnosticsPreferences, let capture = mesh.beginDiagnosticsPreferencesSave() else {
             error = L10n.text("Save the mesh diagnostics settings before continuing.")
@@ -2307,7 +2323,9 @@ final class ModelEditorSession: ObservableObject {
     }
     private func saveModel(_ requestedAsset: ProjectAsset?, gridImport: SpatialGridSelection? = nil, classificationImport: [ClassificationImportFile]? = nil,
                            cumulusImport: CumulusGridImportSelection? = nil,
-                           cumulusProgress: (@MainActor (BackendProgressUpdate) -> Void)? = nil) async -> Bool {
+                           cumulusProgress: (@MainActor (BackendProgressUpdate) -> Void)? = nil,
+                           gridProgress: (@MainActor @Sendable (BackendProgressUpdate) -> Void)? = nil,
+                           gridCancellationAvailable: GridImportCancellationInstaller? = nil) async -> Bool {
         guard coreLayerReferenceConflict == nil else {
             error = coreLayerReferenceConflict
             return false
@@ -2365,11 +2383,12 @@ final class ModelEditorSession: ObservableObject {
         // serializes before its first suspension. A late save must not rebase a
         // newer registry entry for the same external HDF path.
         let capturedCoreLayerContext = (provider as? BackendModelProvider)?.captureCoreLayerContext()
+        let committedSnapshotHandler = didSaveModelSnapshot
         protectPlanTimeWindowPrefix(capturedPlanTimeWindowEdits)
         var savedBaseline = EditorSnapshot(fields: fields, rows: rows, samples: samples, canEdit: canEdit, images: images, editableSamplePages: editableSamplePages, choiceOptions: choiceOptions, fieldTitles: fieldTitles, textSuggestions: textSuggestions, sourceCollections: sourceCollections, tablePresentations: tablePresentations, boundaryLines: boundaryLines?.selecting(lineID: selectedBoundaryLineID, payloadIDs: selectedBoundaryPayloadIDs), sourceRevision: sourceRevision, fieldGroups: fieldGroups, availableOperations: availableOperations, diagnosticHistory: diagnosticHistory, seriesPresentations: seriesPresentations, spatialPresentations: spatialPresentations, sourceState: sourceState, readOnlyFieldIDs: readOnlyFieldIDs, planTimeWindowFieldIDs: planTimeWindowFieldIDs,
             terrainInputImportDraftToken: terrainInputImportDraftToken, terrainInputImportCleanupWarning: terrainInputImportCleanupWarning, terrainInputImportCleanupToken: terrainInputImportCleanupToken)
         invalidateProjectContextRefresh(keepPending: true)
-        isSaving = true; error = nil
+        isSaving = true; error = nil; saveWarning = nil
         defer {
             releasePlanTimeWindowPrefix(capturedPlanTimeWindowEdits)
             isSaving = false
@@ -2377,16 +2396,32 @@ final class ModelEditorSession: ObservableObject {
         do {
             let result: EditorSaveResult
             if let classificationImport { result = try await provider.importClassification(requestedAsset, edits: changes, files: classificationImport) }
-            else if let gridImport { result = try await provider.importGrid(requestedAsset, edits: changes, selection: gridImport) }
+            else if let gridImport {
+                if let gridProgress, let gridCancellationAvailable {
+                    result = try await provider.importGrid(requestedAsset, edits: changes, selection: gridImport,
+                        progress: gridProgress, installCancellation: gridCancellationAvailable)
+                } else {
+                    result = try await provider.importGrid(requestedAsset, edits: changes, selection: gridImport)
+                }
+            }
             else if let cumulusImport {
                 result = try await provider.importCumulusGrid(requestedAsset, edits: changes,
                     selection: cumulusImport, progress: { cumulusProgress?($0) })
             }
             else { result = try await provider.saveModel(requestedAsset, changes: changes) }
-            guard loadedRevision == loadRevision, requestedAsset == asset else { return false }
-            if asset?.section == .plans, (changes.sourceState != nil || !capturedPlanTimeWindowEdits.isEmpty), result.snapshot?.planTimeWindowFieldIDs == nil {
+            if requestedAsset.section == .plans, (changes.sourceState != nil || !capturedPlanTimeWindowEdits.isEmpty), result.snapshot?.planTimeWindowFieldIDs == nil {
                 throw ProjectFileError.invalid("The plan save did not return its canonical time-window state.")
             }
+            // A committed file belongs to its captured asset even if its editor
+            // closed or changed selection while the backend drained its receipt.
+            // The project callback verifies the captured registry reference; UI
+            // installation below still requires the original editor generation.
+            if let committedSnapshot = result.snapshot {
+                committedSnapshotHandler?(requestedAsset, committedSnapshot, capturedCoreLayerContext,
+                    capturedCoreLayerContext?.projectRevision)
+            }
+            guard loadedRevision == loadRevision, requestedAsset == asset else { return false }
+            saveWarning = result.refreshWarning.map(L10n.text)
             sourceRevision = result.sourceRevision ?? result.snapshot?.sourceRevision ?? sourceRevision
             savedBaseline = result.snapshot ?? savedBaseline
             if let classificationBefore, classificationImport == nil { Self.rebaseClassificationSelection(in: &savedBaseline, from: classificationBefore) }
@@ -2410,10 +2445,6 @@ final class ModelEditorSession: ObservableObject {
             }
             guard loadedRevision == loadRevision, requestedAsset == asset else { return false }
             didSave?()
-            if let committedSnapshot = result.snapshot {
-                didSaveModelSnapshot?(committedSnapshot, capturedCoreLayerContext,
-                    capturedCoreLayerContext?.projectRevision)
-            }
             // A save acknowledges only the captured edits. Later edits remain
             // dirty even if a provider resumes after the user types again.
             guard revision == editRevision else { return false }
@@ -2430,6 +2461,10 @@ final class ModelEditorSession: ObservableObject {
             }
             modified = false; changedFieldIDs = []; changedSamplePages = []; changedImageFieldIDs = []; clearedMixedFieldIDs = []; patchDisplayFieldIDs = []; changedToolCells = [:]; changedSeriesPages = []
             return true
+        }
+        catch is CancellationError {
+            if loadedRevision == loadRevision { self.error = nil }
+            return false
         }
         catch { if loadedRevision == loadRevision { self.error = L10n.text(error.localizedDescription) }; return false }
     }
@@ -2559,7 +2594,7 @@ final class ModelEditorSession: ObservableObject {
             !changedImageFieldIDs.isEmpty || !changedSamplePages.isEmpty ||
             !changedSeriesPages.isEmpty || !changedTables.isEmpty || sourceState != snapshot.sourceState
         didSave?()
-        didSaveModelSnapshot?(snapshot, capture.model.coreLayerContext, receipt.projectRevision)
+        didSaveModelSnapshot?(capture.asset, snapshot, capture.model.coreLayerContext, receipt.projectRevision)
         return true
     }
 
@@ -3110,6 +3145,13 @@ final class ModelEditorSession: ObservableObject {
     }
     @discardableResult func importClassification(_ files: [ClassificationImportFile]) async -> Bool { await save(asset, classificationImport: files) }
     @discardableResult func importGrid(_ selection: SpatialGridSelection) async -> Bool { await save(asset, gridImport: selection) }
+    @discardableResult
+    func importGrid(_ selection: SpatialGridSelection,
+                    progress: @escaping @MainActor @Sendable (BackendProgressUpdate) -> Void,
+                    cancellationAvailable: @escaping GridImportCancellationInstaller) async -> Bool {
+        await save(asset, gridImport: selection, gridProgress: progress,
+            gridCancellationAvailable: cancellationAvailable)
+    }
     @discardableResult
     func importCumulusGrid(_ selection: CumulusGridImportSelection,
                            progress: @escaping @MainActor (BackendProgressUpdate) -> Void) async -> Bool {

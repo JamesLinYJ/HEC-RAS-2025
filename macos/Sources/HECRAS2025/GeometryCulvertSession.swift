@@ -104,6 +104,10 @@ final class GeometryCulvertSession: ObservableObject {
         return (currentAsset?.id ?? "") + "|" + (currentModel?.assetPath ?? "") + "|"
             + (snapshot?.revision ?? expectedSourceRevision ?? "") + "|" + projectRevision
     }
+    var selectionDraftContextIdentity: String {
+        geometryCulvertIdentity + "|" + (snapshot?.draftState ?? "")
+            + "|" + (isProfileContextStale ? "stale" : "current")
+    }
     var terrainPreviewIdentity: String {
         geometryCulvertIdentity + "|" + (snapshot?.dependencyRevision ?? "")
     }
@@ -884,20 +888,31 @@ final class GeometryCulvertSession: ObservableObject {
     }
 
     func select(_ ids: Set<String>, featureKind: String) async {
-        guard ["barrel", "barrelProperties", "openingProperties"].contains(featureKind), !parentSaveInProgress else { return }
+        guard ["barrel", "barrelProperties", "openingProperties"].contains(featureKind),
+              !parentSaveInProgress, !isEditing else { return }
         selectedFeatureIDs[featureKind] = ids
         guard featureKind == "barrel", let model = currentModel, let asset = currentAsset,
-              let current = snapshot, !isEditing, didLoad else { return }
+              let current = snapshot, didLoad else { return }
         await fetch(model: model, expectedRevision: current.revision, asset: asset,
             draftState: current.draftState)
     }
 
     func setField(featureKind: String, fieldID: String, value: String) async {
-        guard !hasActiveSketch else { return }
-        guard ["barrel", "barrelProperties", "openingProperties"].contains(featureKind) else { return }
-        let ids = selectedFeatureIDs[featureKind, default: []].sorted()
-        guard !ids.isEmpty else { return }
-        await submit(GeometryCulvertMutation(operation: "setField", featureKind: featureKind,
+        let selectedIDs = selectedFeatureIDs[featureKind, default: []]
+        _ = await setField(featureKind: featureKind, fieldID: fieldID, value: value,
+            expectedSelectedIDs: selectedIDs, expectedContextIdentity: selectionDraftContextIdentity)
+    }
+
+    @discardableResult
+    func setField(featureKind: String, fieldID: String, value: String,
+                  expectedSelectedIDs: Set<String>, expectedContextIdentity: String) async -> Bool {
+        guard canEdit, !isLoading, !hasActiveSketch,
+              ["barrel", "barrelProperties", "openingProperties"].contains(featureKind),
+              !expectedSelectedIDs.isEmpty,
+              selectedFeatureIDs[featureKind, default: []] == expectedSelectedIDs,
+              selectionDraftContextIdentity == expectedContextIdentity else { return false }
+        let ids = expectedSelectedIDs.sorted()
+        return await submit(GeometryCulvertMutation(operation: "setField", featureKind: featureKind,
             featureIDs: ids, fieldID: fieldID, value: value))
     }
 
@@ -1218,6 +1233,10 @@ final class GeometryCulvertSession: ObservableObject {
         } catch {
             guard generation == loadGeneration, currentAsset?.id == assetID,
                   currentModel == model, !Task.isCancelled else { return false }
+            if (error as? BackendServiceError)?.code == "sourceChanged" {
+                isProfileContextStale = true
+                invalidateMapCommandPreview()
+            }
             self.error = error.localizedDescription
             return false
         }

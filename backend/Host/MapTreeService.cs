@@ -2219,6 +2219,7 @@ public static partial class MapTreeService
             .Where(root => root.Name == "Results").SelectMany(root => root.Children ?? [])).ToArray();
         CatalogTreeNode[] resultCandidates = projectResultNodes
             .Where(node => node.SourceClass == "ObservableResult" && node.AssetID is not null).ToArray();
+        string? protectedCallbackResultPath = ProtectedCallbackResultPath(request.ComputeReadLease, map);
         var resultGroupCandidates = projectResultNodes
             .Where(node => node.SourceClass == "MultiResultNodeVM").ToList();
         // A saved MultiResult can outlive all stored outputs, or await its
@@ -2265,7 +2266,8 @@ public static partial class MapTreeService
                 var available = children.ToList();
                 var placed = ApplySerializedChildren(rootElement.Elements("Node").ToArray(), available,
                     rootName, [rootIndex], request.MapIndex, Path.GetDirectoryName(Path.GetFullPath(request.ProjectPath))!,
-                    expanded, resultCandidates, ref selected, resultGroupCandidates: resultGroupCandidates.ToList());
+                    expanded, resultCandidates, ref selected, resultGroupCandidates: resultGroupCandidates.ToList(),
+                    protectedCallbackResultPath: protectedCallbackResultPath);
                 children = placed.Concat(available).ToArray();
                 AddState(rootElement, root.Id, defaultExpanded: true, expanded, ref selected);
             }
@@ -2290,7 +2292,8 @@ public static partial class MapTreeService
             var available = new List<CatalogTreeNode>();
             var placed = ApplySerializedChildren(extra.Elements("Node").ToArray(), available, name, [index],
                 request.MapIndex, Path.GetDirectoryName(Path.GetFullPath(request.ProjectPath))!, expanded,
-                resultCandidates, ref selected, resultGroupCandidates: resultGroupCandidates.ToList());
+                resultCandidates, ref selected, resultGroupCandidates: resultGroupCandidates.ToList(),
+                protectedCallbackResultPath: protectedCallbackResultPath);
             result.Add(new CatalogTreeNode(id, "MapTreeRootNode", name, Children: placed.Length == 0 ? null : placed,
                 CanCreateFolder: true, Locator: locator));
             AddState(extra, id, defaultExpanded: true, expanded, ref selected);
@@ -2298,6 +2301,23 @@ public static partial class MapTreeService
 
         CatalogTreeNode[] roots = result.ToArray();
         return (roots, expanded.ToArray(), selected, CollectHiddenLayerIDs(roots, request.MapIndex));
+    }
+
+    private static string? ProtectedCallbackResultPath(MapResultComputeReadLease? lease, XElement map)
+    {
+        if (lease?.CallbackResultPath is not { Length: > 0 } callbackResultPath) return null;
+        string canonical = SourceFilePaths.Canonical(callbackResultPath);
+        if (!(lease.ProtectedSourcePaths ?? []).Any(path =>
+                SourceFilePaths.SameSourceFile(path, canonical)))
+            throw new SourceFileChangedException();
+        string callbackName = Path.GetFileNameWithoutExtension(canonical);
+        IEnumerable<XElement> serializedNodes = map.Element("Tree")?.Descendants("Node")
+            ?? Enumerable.Empty<XElement>();
+        int serializedRows = serializedNodes
+            .Count(node => (string?)node.Attribute("Type") == "Result" &&
+                string.Equals((string?)node.Attribute("Name"), callbackName, StringComparison.Ordinal));
+        if (serializedRows > 1) throw new SourceFileChangedException();
+        return canonical;
     }
 
     private static CatalogTreeNode[][] PrepareResultContexts(CatalogTreeNode[] defaults,
@@ -2626,7 +2646,8 @@ public static partial class MapTreeService
         string rootName, int[] parentPath, int mapIndex, string projectDirectory, HashSet<string> expanded,
         CatalogTreeNode[] resultCandidates, ref string? selected, GeometryOwner? parentGeometry = null,
         PlanOwner? parentPlan = null, List<CatalogTreeNode>? resultGroupCandidates = null,
-        ResultOwner? parentResult = null, BoundaryConditionOwner? parentBoundaryCondition = null)
+        ResultOwner? parentResult = null, BoundaryConditionOwner? parentBoundaryCondition = null,
+        string? protectedCallbackResultPath = null)
     {
         var placed = new List<CatalogTreeNode>(serialized.Length);
         for (int index = 0; index < serialized.Length; index++)
@@ -2641,7 +2662,8 @@ public static partial class MapTreeService
             {
                 CatalogTreeNode[] folderChildren = ApplySerializedChildren(element.Elements("Node").ToArray(), available,
                     rootName, path, mapIndex, projectDirectory, expanded, resultCandidates, ref selected,
-                    parentGeometry, parentPlan, resultGroupCandidates, parentResult, parentBoundaryCondition);
+                    parentGeometry, parentPlan, resultGroupCandidates, parentResult, parentBoundaryCondition,
+                    protectedCallbackResultPath);
                 AddState(element, id, defaultExpanded: true, expanded, ref selected);
                 placed.Add(new CatalogTreeNode(id, "FolderNode", name, Children: folderChildren.Length == 0 ? null : folderChildren,
                     IsPinned: ReadBool(element, "IsPinned"), CanRename: true, CanMove: true,
@@ -2694,13 +2716,22 @@ public static partial class MapTreeService
                 node = node with { Children = null, SelectedResultAssetID = null, SelectedResultRevision = null };
             }
 
+            string? protectedResultPath = ProtectedSerializedResultPath(type, name, node,
+                resultCandidates, protectedCallbackResultPath);
+
             if (node is null)
             {
-                placed.Add(BuildSerializedUnknownNode(element, id, rootName, path, mapIndex, projectDirectory,
+                CatalogTreeNode unknown = BuildSerializedUnknownNode(element, id, rootName, path, mapIndex, projectDirectory,
                     expanded, resultCandidates, ref selected, parentGeometry, parentPlan, parentResult,
-                    resultGroupCandidates, parentBoundaryCondition));
+                    resultGroupCandidates, parentBoundaryCondition, protectedCallbackResultPath);
+                if (protectedResultPath is not null)
+                    unknown = unknown with { ProtectedResultSourcePath = protectedResultPath };
+                placed.Add(unknown);
                 continue;
             }
+
+            if (protectedResultPath is not null)
+                node = node with { ProtectedResultSourcePath = protectedResultPath };
 
             var childPool = (node.Children ?? []).ToList();
             GeometryOwner? childOwner = parentGeometry;
@@ -2730,7 +2761,8 @@ public static partial class MapTreeService
                 childBoundaryCondition).ToList();
             CatalogTreeNode[] children = ApplySerializedChildren(element.Elements("Node").ToArray(), childPool,
                 rootName, path, mapIndex, projectDirectory, expanded, resultCandidates, ref selected,
-                childOwner, childPlan, resultGroupCandidates, childResult, childBoundaryCondition);
+                childOwner, childPlan, resultGroupCandidates, childResult, childBoundaryCondition,
+                protectedCallbackResultPath);
             children = children.Concat(childPool).ToArray();
             bool isGeometryChild = parentGeometry is not null &&
                 (GeometryMapChildTypes.Contains(type) || node.Locator?.AssociationKind is { Length: > 0 });
@@ -2799,6 +2831,25 @@ public static partial class MapTreeService
             });
         }
         return placed.ToArray();
+    }
+
+    private static string? ProtectedSerializedResultPath(string type, string name, CatalogTreeNode? node,
+        CatalogTreeNode[] resultCandidates, string? protectedCallbackResultPath)
+    {
+        if (type != "Result" || protectedCallbackResultPath is null ||
+            !string.Equals(Path.GetFileNameWithoutExtension(protectedCallbackResultPath), name,
+                StringComparison.Ordinal))
+            return null;
+
+        // The source .vis schema has no Result path field. Its source adapter
+        // accepts only unique Result names, so bind this callback path only to
+        // its exact serialized display row when no other Result with that name
+        // or AssetID can compete for the same row.
+        if (resultCandidates.Any(candidate =>
+                string.Equals(candidate.Name, name, StringComparison.Ordinal)) ||
+            node?.AssetID is not null || node?.Locator?.AssetID is not null)
+            throw new SourceFileChangedException();
+        return protectedCallbackResultPath;
     }
 
     private static CatalogTreeNode? TakeDefault(List<CatalogTreeNode> pool, string nodeType, string name)
@@ -3080,7 +3131,7 @@ public static partial class MapTreeService
         CatalogTreeNode[] resultCandidates, ref string? selected, GeometryOwner? parentGeometry,
         PlanOwner? parentPlan, ResultOwner? parentResult,
         List<CatalogTreeNode>? resultGroupCandidates,
-        BoundaryConditionOwner? parentBoundaryCondition)
+        BoundaryConditionOwner? parentBoundaryCondition, string? protectedCallbackResultPath)
     {
         string type = (string?)element.Attribute("Type") ?? "Unknown";
         string name = (string?)element.Attribute("Name") ?? type;
@@ -3106,7 +3157,8 @@ public static partial class MapTreeService
             ? null : parentBoundaryCondition;
         CatalogTreeNode[] children = ApplySerializedChildren(element.Elements("Node").ToArray(), [], rootName,
             path, mapIndex, projectDirectory, expanded, resultCandidates, ref selected,
-            parentGeometry, parentPlan, resultGroupCandidates, childResult, childBoundaryCondition);
+            parentGeometry, parentPlan, resultGroupCandidates, childResult, childBoundaryCondition,
+            protectedCallbackResultPath);
         AddState(element, id, defaultExpanded: type is "Root" or "Folder", expanded, ref selected);
         bool checkable = CheckableNodeTypes.Contains(type) && (type != "WindLayer" ||
             parentBoundaryCondition is not null && parentResult is null);

@@ -4,6 +4,49 @@ import Testing
 @testable import HECRAS2025
 
 struct CoreLayerReferenceStoreRecoveryTests {
+    @Test(arguments: [false, true]) @MainActor
+    func closedEditorCommitRebasesOnlyItsExactCapturedReference(replacedBeforeReceipt: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("core-layer-commit-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = CoreLayerStoreRecoveryModelProvider()
+        let defaults = try #require(UserDefaults(suiteName: "CoreLayerCommit.\(UUID().uuidString)"))
+        let store = WorkspaceStore(system: SourceWorkflowFixtureServices(recoveryFolder: root.appendingPathComponent("Recovery")),
+            modelProvider: provider, launchConfiguration: WorkspaceLaunchConfiguration(arguments: ["--first-launch"]),
+            applicationDefaults: defaults)
+        store.createProject(name: "Commit", units: "SI", description: "", directory: root,
+            projectionType: "Local", projectionValue: "SI")
+        defer { store.releaseProjectOpenLock() }
+        let projectURL = try #require(store.document?.url)
+        let sourceURL = root.appendingPathComponent("External Boundary.h5")
+        let oldRevision = String(repeating: "A", count: 64)
+        let committedRevision = String(repeating: "B", count: 64)
+        let replacementRevision = String(repeating: "D", count: 64)
+        let reference = makeReference(sessionID: store.projectSessionID, projectURL: projectURL,
+            sourceURL: sourceURL, kind: "boundaryCondition", revision: oldRevision, name: "Original")
+        #expect(store.registerCoreLayerReference(reference, projectSessionID: store.projectSessionID, projectURL: projectURL))
+        let context = try #require(store.captureCoreLayerRequestContext())
+        let asset = ProjectAsset(url: sourceURL, section: .boundaryConditions)
+        let editor = ModelEditorSession(provider: provider)
+        await editor.load(asset, kind: .boundaryCondition)
+        store.registerEditor(editor)
+        let callback = try #require(editor.didSaveModelSnapshot)
+        store.unregisterEditor(editor)
+        #expect(store.editorSession(editor.id) == nil)
+        if replacedBeforeReceipt {
+            let replacement = makeReference(sessionID: store.projectSessionID, projectURL: projectURL,
+                sourceURL: sourceURL, kind: "boundaryCondition", revision: replacementRevision, name: "Replacement")
+            #expect(store.registerCoreLayerReference(replacement, projectSessionID: store.projectSessionID, projectURL: projectURL))
+        }
+        let receipt = EditorSnapshot(fields: ["BoundaryConditionCatalogSummary/Context_Name": "Committed"],
+            rows: [:], samples: [:], canEdit: true, images: [:], sourceRevision: committedRevision)
+        callback(asset, receipt, context, context.projectRevision)
+        let current = try #require(store.captureCoreLayerRequestContext()?.references.first)
+        #expect(current.sourceRevision == (replacedBeforeReceipt ? replacementRevision : committedRevision))
+        #expect(current.name == (replacedBeforeReceipt ? "Replacement" : "Committed"))
+        #expect(current.canonicalSourcePath == CoreLayerRequestContext.canonical(sourceURL))
+    }
+
     @Test @MainActor
     func twoBrokenReferencesCanBeRemovedSequentiallyAndConflictedDraftsRemainClosable() async throws {
         let root = FileManager.default.temporaryDirectory

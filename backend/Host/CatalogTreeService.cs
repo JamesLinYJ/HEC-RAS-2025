@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Reflection;
+using System.Text.Json.Serialization;
 using System.Xml.Linq;
 using Geospatial.GDALAssist;
 using Geospatial.Rasters.Modifiers;
@@ -64,6 +65,12 @@ public sealed record CatalogTreeNode(
     string? ResultComputeSourcePath = null,
     string? ResultComputeSourceRevision = null)
 {
+    // Request-scoped marker used only while a compute writer owns this exact
+    // Result source. It is deliberately not a public AssetID and never crosses
+    // the map-tree wire contract.
+    [JsonIgnore]
+    internal string? ProtectedResultSourcePath { get; init; }
+
     // Retained internally so MapTreeService can mirror MultiResultVisualContext's
     // Latest key-frame selection without adding implementation metadata to the
     // native tree wire model.

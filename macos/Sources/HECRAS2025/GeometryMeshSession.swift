@@ -53,6 +53,12 @@ final class GeometryMeshSession: ObservableObject {
     private var diagnosticsPreferencesBaseline = MeshDiagnosticsVisualSettings()
     private var pendingDiagnosticsPreferencesInstall: (settings: MeshDiagnosticsVisualSettings, scope: GeometryMeshDiagnosticsScope)?
     private(set) var diagnosticsPreferencesScope: GeometryMeshDiagnosticsScope?
+    private var meshElementFindGeneration = 0
+    private var meshShapefileExportGeneration = 0
+    private var activeMeshShapefileExportOperationID: String?
+    private var activeMeshShapefileExportProvider: (any GeometryMeshElementToolsProviding)?
+    private var activeMeshShapefileExportOwner: GeometryMeshToolsOwnerCapture?
+    private var meshShapefileExportOwnerMonitor: Task<Void, Never>?
 
     @Published private(set) var snapshot: GeometryMeshSnapshot?
     @Published private(set) var selectedRegionIDs: Set<Int> = []
@@ -87,6 +93,14 @@ final class GeometryMeshSession: ObservableObject {
     @Published private(set) var hasUnsavedDiagnosticsPreferences = false
     @Published private(set) var isSavingDiagnosticsPreferences = false
     @Published private(set) var diagnosticsPreferencesScopeMismatch = false
+    @Published private(set) var meshElementFind: GeometryMeshElementFindPresentation?
+    @Published private(set) var isFindingMeshElement = false
+    @Published private(set) var isExportingMeshShapefile = false
+    @Published private(set) var isCancellingMeshShapefileExport = false
+    @Published private(set) var meshShapefileExportProgress: BackendProgressUpdate?
+    @Published private(set) var meshShapefileExportOutcome: String?
+    @Published private(set) var meshShapefileExportReceipts: [GeometryMeshShapefileExportPresentation] = []
+    @Published private(set) var meshToolsError: String?
     @Published var error: String?
     @Published var diagnosticsPreferencesError: String?
 
@@ -120,6 +134,14 @@ final class GeometryMeshSession: ObservableObject {
         let topologyState = provider.currentTopologyDraftState() ?? ""
         return (currentAsset?.id ?? "") + "|" + (snapshot?.revision ?? expectedSourceRevision ?? "")
             + "|" + Self.hash(topologyState)
+    }
+    var meshToolsChartSourceIdentity: String {
+        let model = currentModel
+        let modelPath = model.map { SourceFilePaths.canonical(URL(fileURLWithPath: $0.assetPath)) } ?? ""
+        return [modelPath, model?.kind ?? "", model?.projectPath ?? "",
+            Self.hash(model?.projectXml ?? ""), model?.coreLayerContext?.identityToken ?? "",
+            currentAsset?.id ?? "", snapshot?.revision ?? expectedSourceRevision ?? "",
+            Self.hash(provider.currentTopologyDraftState() ?? "")].joined(separator: "|")
     }
     var mapCameraIdentity: String {
         let map = snapshot?.map
@@ -207,6 +229,244 @@ final class GeometryMeshSession: ObservableObject {
             ownerIdentity: ownerIdentity)
     }
 
+    func meshToolsOwnerCapture(flowAreaID: String,
+                               projectContext: GeometryMeshToolsProjectContext) -> GeometryMeshToolsOwnerCapture? {
+        guard let asset = currentAsset, let model = currentModel, let current = snapshot,
+              selectedFlowAreaID == flowAreaID,
+              model.coreLayerContext == projectContext.coreLayerContext,
+              let row = flowAreas.first(where: { $0.id == flowAreaID && $0.hasMesh }),
+              expectedSourceRevision == current.revision,
+              let plotOwner = plotRenderingOwnerCapture(for: asset.url.path,
+                  expectedRevision: current.revision) else { return nil }
+        return GeometryMeshToolsOwnerCapture(projectSessionID: projectContext.projectSessionID,
+            assetID: asset.id, plotOwner: plotOwner, flowAreaID: row.id, flowAreaName: row.name)
+    }
+
+    func isMeshToolsOwnerCurrent(_ capture: GeometryMeshToolsOwnerCapture,
+                                 projectContext: GeometryMeshToolsProjectContext?) -> Bool {
+        guard let projectContext,
+              projectContext.projectSessionID == capture.projectSessionID,
+              projectContext.coreLayerContext == capture.coreLayerContext,
+              let current = meshToolsOwnerCapture(flowAreaID: capture.flowAreaID,
+                  projectContext: projectContext) else { return false }
+        return current == capture
+    }
+
+    /// Verifies the stable source identity of a chart request across an
+    /// in-child property-table computation. The mesh draft SHA is expected to
+    /// advance after a successful compute; model, revision, topology, Flow Area
+    /// and project context must remain identical before the caller captures a
+    /// fresh element owner.
+    func isMeshToolsChartSourceCurrent(_ capture: GeometryMeshToolsOwnerCapture,
+                                       projectContext: GeometryMeshToolsProjectContext?) -> Bool {
+        guard let projectContext,
+              projectContext.projectSessionID == capture.projectSessionID,
+              projectContext.coreLayerContext == capture.coreLayerContext,
+              let current = meshToolsOwnerCapture(flowAreaID: capture.flowAreaID,
+                  projectContext: projectContext) else { return false }
+        return Self.sameMeshToolsChartSource(capture, current)
+    }
+
+    static func sameMeshToolsChartSource(_ lhs: GeometryMeshToolsOwnerCapture,
+                                         _ rhs: GeometryMeshToolsOwnerCapture) -> Bool {
+        lhs.projectSessionID == rhs.projectSessionID
+            && lhs.assetID == rhs.assetID
+            && lhs.plotOwner.model == rhs.plotOwner.model
+            && lhs.sourceRevision.caseInsensitiveCompare(rhs.sourceRevision) == .orderedSame
+            && lhs.plotOwner.topologyDraftState == rhs.plotOwner.topologyDraftState
+            && lhs.topologyDraftSHA256.caseInsensitiveCompare(rhs.topologyDraftSHA256) == .orderedSame
+            && lhs.flowAreaID == rhs.flowAreaID
+            && lhs.flowAreaName == rhs.flowAreaName
+            && lhs.coreLayerContext == rhs.coreLayerContext
+    }
+
+    func clearMeshElementFindTargetIfOwnerChanged(projectContext: GeometryMeshToolsProjectContext?) {
+        guard let meshElementFind,
+              !isMeshToolsOwnerCurrent(meshElementFind.owner, projectContext: projectContext) else { return }
+        clearMeshElementFindTarget()
+    }
+
+    @discardableResult
+    func findElement(flowAreaID: String, elementKind: GeometryMeshElementKind, index: Int,
+                     currentProjectContext: @MainActor () -> GeometryMeshToolsProjectContext?,
+                     provider toolsProvider: any GeometryMeshElementToolsProviding) async -> Bool {
+        guard !isFindingMeshElement, !isExportingMeshShapefile, index >= 0,
+              let projectContext = currentProjectContext(),
+              let capture = meshToolsOwnerCapture(flowAreaID: flowAreaID,
+                  projectContext: projectContext) else {
+            meshToolsError = L10n.text("The Flow Area, geometry source, or project context changed. Reload the mesh and try again.")
+            return false
+        }
+
+        meshElementFindGeneration &+= 1
+        let generation = meshElementFindGeneration
+        removeMeshElementFindTarget()
+        isFindingMeshElement = true
+        meshToolsError = nil
+        defer {
+            if meshElementFindGeneration == generation { isFindingMeshElement = false }
+        }
+
+        let request = GeometryMeshElementFindRequest(model: capture.model,
+            revision: capture.sourceRevision, draftState: capture.meshDraftState,
+            topologyDraftState: capture.topologyDraftState,
+            meshDraftSHA256: capture.meshDraftSHA256,
+            topologyDraftSHA256: capture.topologyDraftSHA256,
+            flowAreaID: capture.flowAreaID, expectedFlowAreaName: capture.flowAreaName,
+            elementKind: elementKind.rawValue, index: index)
+        do {
+            let result = try await toolsProvider.findElement(request)
+            guard meshElementFindGeneration == generation,
+                  isMeshToolsOwnerCurrent(capture, projectContext: currentProjectContext()) else { return false }
+            guard GeometryMeshElementToolsValidation.find(result, matches: request) else {
+                throw BackendServiceError(code: "protocolFailure",
+                    message: L10n.text("The mesh service returned a result for a different Flow Area, index, or geometry draft."))
+            }
+            let presentation = GeometryMeshElementFindPresentation(owner: capture, result: result)
+            meshElementFind = presentation
+            selectedMapTargetID = presentation.targetID
+            selectedFlowAreaIDs = [capture.flowAreaID]
+            return true
+        } catch {
+            guard meshElementFindGeneration == generation,
+                  isMeshToolsOwnerCurrent(capture, projectContext: currentProjectContext()) else { return false }
+            meshToolsError = localizedError(error)
+            return false
+        }
+    }
+
+    func clearMeshElementFindTarget() {
+        meshElementFindGeneration &+= 1
+        isFindingMeshElement = false
+        removeMeshElementFindTarget()
+    }
+
+    func reportMeshToolsError(_ message: String?) {
+        meshToolsError = message.map(L10n.text)
+    }
+
+    func exportShapefile(flowAreaID: String, exportKind: GeometryMeshShapefileExportKind,
+                         outputURL: URL,
+                         currentProjectContext: @escaping @MainActor () -> GeometryMeshToolsProjectContext?,
+                         provider toolsProvider: any GeometryMeshElementToolsProviding) async {
+        guard !isExportingMeshShapefile, !isFindingMeshElement,
+              outputURL.pathExtension.lowercased() == "shp",
+              GeometryMeshShapefileDestination.existingFamily(at: outputURL).isEmpty,
+              let projectContext = currentProjectContext(),
+              let capture = meshToolsOwnerCapture(flowAreaID: flowAreaID,
+                  projectContext: projectContext) else {
+            meshToolsError = L10n.text("The Flow Area, geometry source, project context, or output destination changed. Choose a new destination and try again.")
+            return
+        }
+
+        meshShapefileExportGeneration &+= 1
+        let generation = meshShapefileExportGeneration
+        let operationID = UUID().uuidString.lowercased()
+        let request = GeometryMeshShapefileExportRequest(operationID: operationID,
+            model: capture.model, revision: capture.sourceRevision,
+            draftState: capture.meshDraftState, topologyDraftState: capture.topologyDraftState,
+            meshDraftSHA256: capture.meshDraftSHA256,
+            topologyDraftSHA256: capture.topologyDraftSHA256,
+            flowAreaID: capture.flowAreaID, expectedFlowAreaName: capture.flowAreaName,
+            exportKind: exportKind.rawValue,
+            outputPath: outputURL.standardizedFileURL.path)
+
+        isExportingMeshShapefile = true
+        isCancellingMeshShapefileExport = false
+        meshShapefileExportProgress = nil
+        meshShapefileExportOutcome = nil
+        meshToolsError = nil
+        activeMeshShapefileExportOperationID = operationID
+        activeMeshShapefileExportProvider = toolsProvider
+        activeMeshShapefileExportOwner = capture
+        meshShapefileExportOwnerMonitor?.cancel()
+        meshShapefileExportOwnerMonitor = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled, let self,
+                      self.activeMeshShapefileExportOperationID == operationID else { return }
+                guard self.isMeshToolsOwnerCurrent(capture,
+                    projectContext: currentProjectContext()) else {
+                    self.requestMeshShapefileExportCancellation(operationID: operationID)
+                    return
+                }
+            }
+        }
+        defer {
+            meshShapefileExportOwnerMonitor?.cancel()
+            meshShapefileExportOwnerMonitor = nil
+            if activeMeshShapefileExportOperationID == operationID {
+                activeMeshShapefileExportOperationID = nil
+                activeMeshShapefileExportProvider = nil
+                activeMeshShapefileExportOwner = nil
+                isExportingMeshShapefile = false
+                isCancellingMeshShapefileExport = false
+            }
+        }
+
+        do {
+            let result = try await toolsProvider.exportShapefile(request) { [weak self] update in
+                guard let self,
+                      self.activeMeshShapefileExportOperationID == operationID else { return }
+                guard self.isMeshToolsOwnerCurrent(capture,
+                    projectContext: currentProjectContext()) else {
+                    self.requestMeshShapefileExportCancellation(operationID: operationID)
+                    return
+                }
+                if self.meshShapefileExportGeneration == generation {
+                    self.meshShapefileExportProgress = update
+                }
+            }
+            guard GeometryMeshElementToolsValidation.export(result, matches: request) else {
+                if isMeshToolsOwnerCurrent(capture, projectContext: currentProjectContext()) {
+                    meshToolsError = L10n.text("The mesh export returned an incomplete or mismatched Shapefile receipt.")
+                }
+                return
+            }
+            guard activeMeshShapefileExportOperationID == operationID,
+                  meshShapefileExportGeneration == generation else { return }
+            if result.state == "completed" {
+                let receipt = GeometryMeshShapefileExportPresentation(owner: capture,
+                    request: request, result: result)
+                if !meshShapefileExportReceipts.contains(where: { $0.id == operationID }) {
+                    meshShapefileExportReceipts.insert(receipt, at: 0)
+                }
+                meshShapefileExportOutcome = "completed"
+            } else {
+                meshShapefileExportOutcome = "cancelled"
+            }
+        } catch {
+            if activeMeshShapefileExportOperationID == operationID,
+               meshShapefileExportGeneration == generation,
+               isMeshToolsOwnerCurrent(capture, projectContext: currentProjectContext()) {
+                meshToolsError = localizedError(error)
+            }
+        }
+    }
+
+    func cancelMeshShapefileExport() {
+        guard isExportingMeshShapefile, !isCancellingMeshShapefileExport,
+              let operationID = activeMeshShapefileExportOperationID else { return }
+        requestMeshShapefileExportCancellation(operationID: operationID)
+    }
+
+    private func requestMeshShapefileExportCancellation(operationID: String) {
+        guard activeMeshShapefileExportOperationID == operationID,
+              !isCancellingMeshShapefileExport else { return }
+        isCancellingMeshShapefileExport = true
+        if activeMeshShapefileExportProvider?.cancelExport(operationID: operationID) == false,
+           activeMeshShapefileExportOwner != nil {
+            meshToolsError = L10n.text("The export cancellation could not be delivered; waiting for the file writer to finish.")
+        }
+    }
+
+    private func removeMeshElementFindTarget() {
+        if let meshElementFind, selectedMapTargetID == meshElementFind.targetID {
+            selectedMapTargetID = nil
+        }
+        meshElementFind = nil
+    }
+
     var flowAreas: [GeometryMeshFlowAreaRow] { snapshot?.flowAreas ?? [] }
     var regions: GeometryTopologyFeatureTable {
         snapshot?.regions ?? GeometryTopologyFeatureTable(featureKind: "region", columns: [], editableFields: [], rows: [])
@@ -233,6 +493,10 @@ final class GeometryMeshSession: ObservableObject {
         guard !hasUnsavedDiagnosticsPreferences, !isSavingDiagnosticsPreferences else {
             diagnosticsPreferencesError = L10n.text("Save or discard mesh diagnostics settings before switching assets.")
             return
+        }
+        clearMeshElementFindTarget()
+        if let activeMeshShapefileExportOperationID {
+            requestMeshShapefileExportCancellation(operationID: activeMeshShapefileExportOperationID)
         }
         abandonMeshGenerationOperation()
         abandonPropertyTablesOperation()
@@ -433,6 +697,13 @@ final class GeometryMeshSession: ObservableObject {
             }
             invalidate()
         }
+        if !sameSource || expectedSourceRevision != sourceRevision
+            || loadedTopologyDraftState != topologyDraftState {
+            clearMeshElementFindTarget()
+            if let activeMeshShapefileExportOperationID {
+                requestMeshShapefileExportCancellation(operationID: activeMeshShapefileExportOperationID)
+            }
+        }
         if didLoad, sameSource, expectedSourceRevision == sourceRevision,
            loadedTopologyDraftState == topologyDraftState { return }
         if isDirty && expectedSourceRevision != sourceRevision {
@@ -449,6 +720,10 @@ final class GeometryMeshSession: ObservableObject {
 
     func reload() async {
         guard let model = currentModel, let asset = currentAsset else { return }
+        clearMeshElementFindTarget()
+        if let activeMeshShapefileExportOperationID {
+            requestMeshShapefileExportCancellation(operationID: activeMeshShapefileExportOperationID)
+        }
         meshGenerationResultIdentity = nil
         meshGenerationTerminalIdentity = nil
         await fetch(model: model, expectedRevision: expectedSourceRevision, asset: asset,
@@ -465,16 +740,27 @@ final class GeometryMeshSession: ObservableObject {
     /// asset or guessed from row order.
     func selectFlowAreas(_ ids: Set<String>) {
         guard ids.allSatisfy({ id in flowAreas.contains(where: { $0.id == id }) }) else { return }
+        if selectedFlowAreaIDs != ids {
+            clearMeshElementFindTarget()
+            if let activeMeshShapefileExportOwner,
+               !ids.contains(activeMeshShapefileExportOwner.flowAreaID),
+               let operationID = activeMeshShapefileExportOperationID {
+                requestMeshShapefileExportCancellation(operationID: operationID)
+            }
+        }
         selectedFlowAreaIDs = ids
     }
 
     func selectMapTarget(_ id: String?) {
+        if let findTarget = meshElementFind?.targetID, id != findTarget {
+            clearMeshElementFindTarget()
+        }
         selectedMapTargetID = id
     }
 
     func selectDegreeIssue(_ id: String?) {
         guard id == nil || degreeScan?.issues.contains(where: { $0.id == id }) == true else { return }
-        selectedMapTargetID = id
+        selectMapTarget(id)
     }
 
     func selectRegions(_ ids: Set<Int>) async {
@@ -524,6 +810,11 @@ final class GeometryMeshSession: ObservableObject {
         guard topologyState == loadedTopologyDraftState else {
             error = L10n.text("The topology changed after this mesh view loaded. Reload or discard the mesh draft before generating a mesh.")
             return
+        }
+
+        clearMeshElementFindTarget()
+        if let activeMeshShapefileExportOperationID {
+            requestMeshShapefileExportCancellation(operationID: activeMeshShapefileExportOperationID)
         }
 
         let operationID = UUID()
@@ -662,6 +953,11 @@ final class GeometryMeshSession: ObservableObject {
         guard topologyState == loadedTopologyDraftState else {
             error = L10n.text("The topology changed after this mesh view loaded. Reload or discard the mesh draft before computing property tables.")
             return false
+        }
+
+        clearMeshElementFindTarget()
+        if let activeMeshShapefileExportOperationID {
+            requestMeshShapefileExportCancellation(operationID: activeMeshShapefileExportOperationID)
         }
 
         let operationID = UUID()
@@ -840,6 +1136,10 @@ final class GeometryMeshSession: ObservableObject {
 
     func beginParentSave() -> GeometryMeshParentSaveCapture? {
         guard canBeginParentSave else { return nil }
+        clearMeshElementFindTarget()
+        if let activeMeshShapefileExportOperationID {
+            requestMeshShapefileExportCancellation(operationID: activeMeshShapefileExportOperationID)
+        }
         let operationID = UUID()
         activeParentSaveID = operationID
         parentSaveInProgress = true
@@ -885,6 +1185,10 @@ final class GeometryMeshSession: ObservableObject {
 
     func discardDraft() async {
         guard !parentSaveInProgress else { return }
+        clearMeshElementFindTarget()
+        if let activeMeshShapefileExportOperationID {
+            requestMeshShapefileExportCancellation(operationID: activeMeshShapefileExportOperationID)
+        }
         abandonPropertyTablesOperation()
         let hadDraft = isDirty
         loadGeneration += 1
@@ -951,6 +1255,10 @@ final class GeometryMeshSession: ObservableObject {
         guard topologyState == loadedTopologyDraftState else {
             error = L10n.text("The topology changed after this mesh view loaded. Reload or discard the mesh draft before editing.")
             return nil
+        }
+        clearMeshElementFindTarget()
+        if let activeMeshShapefileExportOperationID {
+            requestMeshShapefileExportCancellation(operationID: activeMeshShapefileExportOperationID)
         }
         let generation = loadGeneration
         let modelGeneration = self.modelGeneration

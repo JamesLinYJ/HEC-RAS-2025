@@ -1,36 +1,51 @@
 import Charts
 import SwiftUI
 
+enum GeometryCulvertChoicePickerSelection: Hashable {
+    case mixed
+    case value(String)
+}
+
 struct GeometryCulvertEditDraftState: Equatable {
     var values: [String: String] = [:]
+    var baselineValues: [String: String] = [:]
     var editedMixedCoefficientFields: Set<String> = []
     var clearCommandFieldIDs: Set<String> = []
     var forceSetCommandFieldIDs: Set<String> = []
+    var applySelectionFieldIDs: Set<String> = []
+    var capturedContextIdentity: String?
 
-    mutating func load(_ values: [String: String]) {
+    mutating func load(_ values: [String: String], contextIdentity: String? = nil) {
         self.values = values
+        baselineValues = values
         editedMixedCoefficientFields = []
         clearCommandFieldIDs = []
         forceSetCommandFieldIDs = []
+        applySelectionFieldIDs = []
+        capturedContextIdentity = contextIdentity
     }
 
     mutating func acceptCoefficientReset(fieldID: String, baselineValue: String) {
         values[fieldID] = baselineValue
+        baselineValues[fieldID] = baselineValue
         editedMixedCoefficientFields.remove(fieldID)
         clearCommandFieldIDs.remove(fieldID)
     }
 
     mutating func acceptSourceCommand(fieldID: String, value: String) {
         values[fieldID] = value
+        baselineValues[fieldID] = value
         editedMixedCoefficientFields.remove(fieldID)
         clearCommandFieldIDs.remove(fieldID)
         forceSetCommandFieldIDs.remove(fieldID)
+        applySelectionFieldIDs.remove(fieldID)
     }
 
     mutating func stageClearCommand(fieldID: String) {
         values[fieldID] = ""
         clearCommandFieldIDs.insert(fieldID)
         forceSetCommandFieldIDs.remove(fieldID)
+        applySelectionFieldIDs.remove(fieldID)
         editedMixedCoefficientFields.remove(fieldID)
     }
 
@@ -38,6 +53,49 @@ struct GeometryCulvertEditDraftState: Equatable {
         values[fieldID] = value
         forceSetCommandFieldIDs.insert(fieldID)
         clearCommandFieldIDs.remove(fieldID)
+        applySelectionFieldIDs.remove(fieldID)
+        editedMixedCoefficientFields.remove(fieldID)
+    }
+
+    mutating func stageApplyChoiceToSelection(fieldID: String, value: String) {
+        values[fieldID] = value
+        applySelectionFieldIDs.insert(fieldID)
+        clearCommandFieldIDs.remove(fieldID)
+        forceSetCommandFieldIDs.remove(fieldID)
+        editedMixedCoefficientFields.remove(fieldID)
+    }
+
+    func hasPendingValue(fieldID: String) -> Bool {
+        applySelectionFieldIDs.contains(fieldID)
+            || clearCommandFieldIDs.contains(fieldID)
+            || forceSetCommandFieldIDs.contains(fieldID)
+            || editedMixedCoefficientFields.contains(fieldID)
+            || values[fieldID] != baselineValues[fieldID]
+    }
+
+    var hasPendingEdits: Bool {
+        !applySelectionFieldIDs.isEmpty || !clearCommandFieldIDs.isEmpty
+            || !forceSetCommandFieldIDs.isEmpty || !editedMixedCoefficientFields.isEmpty
+            || values != baselineValues
+    }
+
+    func isStale(currentContextIdentity: String) -> Bool {
+        guard let capturedContextIdentity else { return false }
+        return capturedContextIdentity != currentContextIdentity
+    }
+
+    func canApply(currentContextIdentity: String) -> Bool {
+        capturedContextIdentity == currentContextIdentity
+    }
+
+    mutating func acceptAppliedValue(fieldID: String, value: String, contextIdentity: String) {
+        values[fieldID] = value
+        baselineValues[fieldID] = value
+        editedMixedCoefficientFields.remove(fieldID)
+        clearCommandFieldIDs.remove(fieldID)
+        forceSetCommandFieldIDs.remove(fieldID)
+        applySelectionFieldIDs.remove(fieldID)
+        capturedContextIdentity = contextIdentity
     }
 }
 
@@ -299,25 +357,42 @@ private struct GeometryCulvertEditForm: View {
     @ObservedObject var child: GeometryCulvertSession
     @State private var drafts = GeometryCulvertEditDraftState()
     @State private var isApplyingChanges = false
-    @State private var preserveDraftsForSnapshotWithSelection: String?
 
     private var table: GeometryCulvertFeatureTable { child.table(for: featureKind) }
     private var selectedRows: [GeometryCulvertFeatureRow] { child.selectedRows(for: featureKind) }
     private var selectionIdentity: String {
-        selectedFeatureIdentity
-            + "|" + (child.snapshot?.revision ?? "")
+        selectedFeatureIdentity + "|" + child.selectionDraftContextIdentity
     }
     private var selectedFeatureIdentity: String {
         child.selectedFeatureIDs[featureKind, default: []].sorted().joined(separator: "|")
     }
     private var hasPendingValues: Bool {
-        guard let first = selectedRows.first else { return false }
-        return table.editableFields.contains { hasPendingValue(for: $0, comparedTo: first) }
+        guard !selectedRows.isEmpty, !isDraftContextStale else { return false }
+        return table.editableFields.contains { hasPendingValue(for: $0) }
+    }
+    private var isDraftContextStale: Bool {
+        child.isProfileContextStale || drafts.isStale(currentContextIdentity: selectionIdentity)
     }
 
     var body: some View {
         Group {
-            if selectedRows.isEmpty {
+            if isDraftContextStale {
+                VStack(spacing: 12) {
+                    ContentUnavailableView(L10n.text("Culvert Edit Context Changed"),
+                        systemImage: "arrow.triangle.2.circlepath",
+                        description: Text(L10n.text("Your culvert edits are preserved, but the selected rows or geometry source changed. Reload before editing.")))
+                    Button(L10n.text(child.isProfileContextStale
+                        ? "Discard Culvert Draft and Reload"
+                        : "Discard Draft and Reload"), systemImage: "arrow.clockwise") {
+                        Task {
+                            if child.isProfileContextStale { await child.discardDraft() }
+                            loadValues()
+                        }
+                    }
+                    .disabled(child.parentSaveInProgress || child.hasActiveSketch)
+                }
+                .padding(24)
+            } else if selectedRows.isEmpty {
                 ContentUnavailableView("Select a source row to edit",
                     systemImage: "cursorarrow.click",
                     description: Text("Changes apply to the selected source rows and remain staged until the geometry is saved."))
@@ -342,7 +417,7 @@ private struct GeometryCulvertEditForm: View {
                                 Task { await applyChanges() }
                             }
                             .keyboardShortcut(.defaultAction)
-                            .disabled(!child.canEdit || child.hasActiveSketch || !hasPendingValues)
+                            .disabled(!child.canEdit || child.hasActiveSketch || isDraftContextStale || !hasPendingValues)
                         }
                     }
                     .formStyle(.grouped)
@@ -352,11 +427,8 @@ private struct GeometryCulvertEditForm: View {
         }
         .onAppear(perform: loadValues)
         .onChange(of: selectionIdentity) { _, _ in
-            if let preservedSelection = preserveDraftsForSnapshotWithSelection {
-                preserveDraftsForSnapshotWithSelection = nil
-                if preservedSelection == selectedFeatureIdentity { return }
-            }
-            if !isApplyingChanges { loadValues() }
+            guard !isApplyingChanges, !drafts.hasPendingEdits else { return }
+            loadValues()
         }
     }
 
@@ -364,9 +436,11 @@ private struct GeometryCulvertEditForm: View {
         let value = drafts.values[field.id] ?? selectedRows.first?.values[field.id] ?? ""
         let isOpeningCoefficient = featureKind == "openingProperties" && (field.id == "KIn" || field.id == "KOut")
         let hasMismatch = isOpeningCoefficient && child.openingCoefficientHasMismatch(fieldID: field.id)
-        let hasMixedOpeningType = featureKind == "openingProperties" && field.id == "OpeningType"
-            && child.fieldHasMismatch(featureKind: featureKind, fieldID: field.id)
+        let hasMixedChoice = !field.choices.isEmpty && child.fieldHasMismatch(featureKind: featureKind, fieldID: field.id)
+            && !drafts.applySelectionFieldIDs.contains(field.id)
             && !drafts.forceSetCommandFieldIDs.contains(field.id)
+        let hasMixedOpeningType = featureKind == "openingProperties" && field.id == "OpeningType"
+            && hasMixedChoice
         if field.readOnly {
             LabeledContent(L10n.text(field.title)) {
                 Text(value.isEmpty ? "—" : value)
@@ -375,33 +449,36 @@ private struct GeometryCulvertEditForm: View {
             }
         } else if !field.choices.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
-                Picker(L10n.text(field.title), selection: Binding(
-                    get: { hasMixedOpeningType ? "" : (drafts.values[field.id] ?? value) },
+                Picker(L10n.text(field.title), selection: Binding<GeometryCulvertChoicePickerSelection>(
+                    get: { hasMixedChoice ? .mixed : .value(drafts.values[field.id] ?? value) },
                     set: { proposed in
-                        guard !proposed.isEmpty else { return }
+                        guard case .value(let selectedValue) = proposed else { return }
                         if hasMixedOpeningType, field.forceSetCommand != nil {
-                            drafts.stageForceSetCommand(fieldID: field.id, value: proposed)
+                            drafts.stageForceSetCommand(fieldID: field.id, value: selectedValue)
+                        } else if hasMixedChoice {
+                            drafts.stageApplyChoiceToSelection(fieldID: field.id, value: selectedValue)
                         } else {
-                            drafts.values[field.id] = proposed
+                            drafts.values[field.id] = selectedValue
+                            drafts.applySelectionFieldIDs.remove(field.id)
                         }
                     }
                 )) {
-                    if hasMixedOpeningType {
-                        Text("Mixed values").tag("")
+                    if hasMixedChoice {
+                        Text(L10n.text("Mixed values")).tag(GeometryCulvertChoicePickerSelection.mixed)
                     }
-                    if field.id == "BarrelPropertyName" || field.id == "UpstreamOpeningName" || field.id == "DownstreamOpeningName" {
-                        Text("None").tag("")
+                    if isAssociationChoiceField(field.id) {
+                        Text(L10n.text("None")).tag(GeometryCulvertChoicePickerSelection.value(""))
                     }
                     ForEach(field.choices, id: \.self) { choice in
-                        Text(choiceTitle(choice)).tag(choice)
+                        Text(choiceTitle(choice)).tag(GeometryCulvertChoicePickerSelection.value(choice))
                     }
                     if !value.isEmpty && !field.choices.contains(value) {
-                        Text(L10n.format("Missing: %@", value)).tag(value)
+                        Text(L10n.format("Missing: %@", value)).tag(GeometryCulvertChoicePickerSelection.value(value))
                     }
                 }
                 sourceValidation(for: field)
             }
-            .disabled(!child.canEdit)
+            .disabled(!child.canEdit || isDraftContextStale)
         } else {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
@@ -416,7 +493,7 @@ private struct GeometryCulvertEditForm: View {
                             if isOpeningCoefficient { drafts.editedMixedCoefficientFields.insert(field.id) }
                         }
                     ), prompt: Text(LocalizedStringKey(hasMismatch ? "Mixed values" : "")))
-                    .disabled(!child.canEdit)
+                    .disabled(!child.canEdit || isDraftContextStale)
                     .textFieldStyle(.roundedBorder)
                     .font(.body.monospacedDigit())
 
@@ -430,7 +507,7 @@ private struct GeometryCulvertEditForm: View {
                         .buttonStyle(.borderless)
                         .help(L10n.text("Clear"))
                         .accessibilityLabel(Text("Clear"))
-                        .disabled(!child.canEdit || child.isEditing || child.hasActiveSketch)
+                        .disabled(!child.canEdit || child.isEditing || child.hasActiveSketch || isDraftContextStale)
                     }
                 }
                 sourceValidation(for: field)
@@ -461,12 +538,14 @@ private struct GeometryCulvertEditForm: View {
     }
 
     private func loadValues() {
-        preserveDraftsForSnapshotWithSelection = nil
-        guard let first = selectedRows.first else { drafts.load([:]); return }
-        drafts.load(first.values)
+        guard let first = selectedRows.first else {
+            drafts.load([:], contextIdentity: selectionIdentity)
+            return
+        }
+        drafts.load(first.values, contextIdentity: selectionIdentity)
     }
 
-    private func hasPendingValue(for field: GeometryCulvertField, comparedTo first: GeometryCulvertFeatureRow) -> Bool {
+    private func hasPendingValue(for field: GeometryCulvertField) -> Bool {
         guard !field.readOnly else { return false }
         if drafts.clearCommandFieldIDs.contains(field.id), field.clearCommand == "resetOpeningCoefficient" { return true }
         if drafts.forceSetCommandFieldIDs.contains(field.id), field.forceSetCommand == "forceSetOpeningType" { return true }
@@ -474,7 +553,11 @@ private struct GeometryCulvertEditForm: View {
            child.openingCoefficientHasMismatch(fieldID: field.id), drafts.editedMixedCoefficientFields.contains(field.id) {
             return true
         }
-        return drafts.values[field.id] != (first.values[field.id] ?? "")
+        return drafts.hasPendingValue(fieldID: field.id)
+    }
+
+    private func isAssociationChoiceField(_ fieldID: String) -> Bool {
+        ["BarrelPropertyName", "UpstreamOpeningName", "DownstreamOpeningName"].contains(fieldID)
     }
 
     private func choiceTitle(_ value: String) -> String {
@@ -485,21 +568,30 @@ private struct GeometryCulvertEditForm: View {
     }
 
     private func applyChanges() async {
-        guard let first = selectedRows.first else { return }
-        let pending = table.editableFields.filter { hasPendingValue(for: $0, comparedTo: first) }
+        guard !selectedRows.isEmpty, !isDraftContextStale,
+              drafts.canApply(currentContextIdentity: selectionIdentity) else { return }
+        let capturedSelectionIDs = child.selectedFeatureIDs[featureKind, default: []]
+        var expectedSessionContext = child.selectionDraftContextIdentity
+        let pending = table.editableFields.filter { hasPendingValue(for: $0) }
             .map { ($0, drafts.values[$0.id] ?? "") }
         isApplyingChanges = true
         defer { isApplyingChanges = false }
         for (field, value) in pending {
+            guard child.selectedFeatureIDs[featureKind, default: []] == capturedSelectionIDs,
+                  child.selectionDraftContextIdentity == expectedSessionContext else { return }
             var commandSucceeded = true
             if drafts.clearCommandFieldIDs.contains(field.id), field.clearCommand == "resetOpeningCoefficient" {
                 commandSucceeded = await child.resetSelectedOpeningCoefficient(fieldID: field.id)
             } else if drafts.forceSetCommandFieldIDs.contains(field.id), field.forceSetCommand == "forceSetOpeningType" {
                 commandSucceeded = await child.forceSetChoice(field, value: value)
             } else {
-                await child.setField(featureKind: featureKind, fieldID: field.id, value: value)
+                commandSucceeded = await child.setField(featureKind: featureKind, fieldID: field.id, value: value,
+                    expectedSelectedIDs: capturedSelectionIDs, expectedContextIdentity: expectedSessionContext)
             }
             if !commandSucceeded || child.error != nil { return }
+            expectedSessionContext = child.selectionDraftContextIdentity
+            drafts.acceptAppliedValue(fieldID: field.id, value: value,
+                contextIdentity: capturedSelectionIDs.sorted().joined(separator: "|") + "|" + expectedSessionContext)
         }
         loadValues()
     }

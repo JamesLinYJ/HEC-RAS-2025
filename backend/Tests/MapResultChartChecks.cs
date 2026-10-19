@@ -313,7 +313,7 @@ internal static class MapResultChartChecks
             "yyyy-MM-dd'T'HH:mm:ss.fffffff", System.Globalization.CultureInfo.InvariantCulture);
     }
 
-    private static Fixture CreateFixture(string directory)
+    internal static Fixture CreateFixture(string directory)
     {
         string projectPath = Path.Combine(directory, "Map Result Chart.ras");
         Project project = Project.CreateNew(projectPath, UnitSystem.USCustomary);
@@ -671,7 +671,7 @@ internal static class MapResultChartChecks
         throw new InvalidOperationException("Expected " + typeof(T).Name + ".");
     }
 
-    private sealed record Fixture(string ProjectPath, string VisualizationPath, string VectorPath,
+    internal sealed record Fixture(string ProjectPath, string VisualizationPath, string VectorPath,
         string[] ResultPaths, string UnrelatedResultPath, string GeometryPath, string BoundaryPath,
         string PlanPath, string PlanName, MapTreeRequest Map);
 }

@@ -3,6 +3,43 @@ import Testing
 
 struct GeometryCulvertEditDraftTests {
     @Test
+    func explicitlyChoosingFirstRowsCurrentValueRemainsAnApplyToSelectionEdit() {
+        var drafts = GeometryCulvertEditDraftState()
+        drafts.load(["BarrelPropertyName": "Barrel A"], contextIdentity: "selection-a|source-1|draft-0")
+
+        #expect(!drafts.hasPendingValue(fieldID: "BarrelPropertyName"))
+        drafts.stageApplyChoiceToSelection(fieldID: "BarrelPropertyName", value: "Barrel A")
+
+        #expect(drafts.values["BarrelPropertyName"] == "Barrel A")
+        #expect(drafts.hasPendingValue(fieldID: "BarrelPropertyName"))
+        #expect(drafts.canApply(currentContextIdentity: "selection-a|source-1|draft-0"))
+
+        drafts.acceptAppliedValue(fieldID: "BarrelPropertyName", value: "Barrel A",
+            contextIdentity: "selection-a|source-1|draft-1")
+        #expect(!drafts.hasPendingValue(fieldID: "BarrelPropertyName"))
+        #expect(drafts.canApply(currentContextIdentity: "selection-a|source-1|draft-1"))
+    }
+
+    @Test
+    func staleSelectionPreservesChoiceDraftAndRejectsApplyUntilReloaded() {
+        var drafts = GeometryCulvertEditDraftState()
+        drafts.load(["UpstreamOpeningName": "Opening A"], contextIdentity: "selection-a|source-1|draft-0")
+        drafts.stageApplyChoiceToSelection(fieldID: "UpstreamOpeningName", value: "Opening A")
+
+        #expect(drafts.hasPendingValue(fieldID: "UpstreamOpeningName"))
+        #expect(drafts.isStale(currentContextIdentity: "selection-b|source-1|draft-0"))
+        #expect(!drafts.canApply(currentContextIdentity: "selection-b|source-1|draft-0"))
+        #expect(drafts.isStale(currentContextIdentity: "selection-a|source-2|draft-0"))
+        #expect(!drafts.canApply(currentContextIdentity: "selection-a|source-2|draft-0"))
+        #expect(drafts.values["UpstreamOpeningName"] == "Opening A")
+        #expect(drafts.hasPendingEdits)
+
+        drafts.load(["UpstreamOpeningName": "Opening B"], contextIdentity: "selection-b|source-1|draft-0")
+        #expect(!drafts.hasPendingEdits)
+        #expect(drafts.values["UpstreamOpeningName"] == "Opening B")
+    }
+
+    @Test
     func resettingMixedCoefficientRebasesOnlyThatFieldAndRetainsOtherPendingEdits() {
         var drafts = GeometryCulvertEditDraftState(
             values: ["KIn": "0.5", "UpstreamInvert": "41.25", "Name": "Pending name"],

@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Ras.Layers;
 
 namespace Ras.Backend;
@@ -25,7 +26,8 @@ public sealed record RasterRgbExportExecuteRequest(RasterMapSourceIdentity Sourc
     string? ProjectXml, string Region, double CellSize, RasterMapViewExtent? CurrentView,
     string OutputPath, Dictionary<string, string>? PlotOptions = null);
 
-public sealed record ExportArtifactReceipt(string Path, long SizeBytes, string SHA256);
+public sealed record ExportArtifactReceipt(string Path, long SizeBytes,
+    [property: JsonPropertyName("sha256")] string SHA256);
 
 public sealed record RasterRgbExportExecuteResult(string State, string? OutputPath,
     string SourceID, string SourceRevision, string VisualizationRevision,

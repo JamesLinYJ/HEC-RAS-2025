@@ -1,6 +1,35 @@
 import Foundation
 import RASWorkspaceCore
 
+private final class SpatialGridImportCancelSender: @unchecked Sendable {
+    private let lock = NSLock()
+    private let operation: BackendDuplexOperation<DssGridImportControl,
+        BackendProgressUpdate, DssGridImportDuplexResult>
+    private var sent = false
+    private var sequence: UInt64 = 0
+
+    init(operation: BackendDuplexOperation<DssGridImportControl,
+         BackendProgressUpdate, DssGridImportDuplexResult>) {
+        self.operation = operation
+    }
+
+    func cancel() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !sent else { return true }
+        sequence &+= 1
+        do {
+            try operation.sendControl(.cancel, sequence: sequence)
+            sent = true
+            return true
+        } catch {
+            // Never terminate the child as a cancellation fallback. It may
+            // already have committed the model and still need to return it.
+            return false
+        }
+    }
+}
+
 @MainActor
 final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
     let client: BackendProcessClient
@@ -221,6 +250,52 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
         struct Request: Encodable, Sendable { let model: ModelSaveRequest; let selection: SpatialGridSelection }
         let result = try await client.request("model.gridImport", parameters: Request(model: try saveRequest(asset, changes: edits), selection: selection), as: ModelSnapshot.self)
         return .init(sourceRevision: result.revision, snapshot: try result.editorSnapshot)
+    }
+    func importGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: SpatialGridSelection,
+                    progress: @escaping @MainActor @Sendable (BackendProgressUpdate) -> Void,
+                    installCancellation: @escaping GridImportCancellationInstaller) async throws -> EditorSaveResult {
+        guard selection.dssSource != nil else {
+            return try await importGrid(asset, edits: edits, selection: selection)
+        }
+        struct Request: Encodable, Sendable { let model: ModelSaveRequest; let selection: SpatialGridSelection }
+        try Task.checkCancellation()
+        let request = Request(model: try saveRequest(asset, changes: edits), selection: selection)
+        let operation = try client.startDuplex("model.gridImport", parameters: request,
+            control: DssGridImportControl.self, event: BackendProgressUpdate.self,
+            as: DssGridImportDuplexResult.self)
+        let cancelSender = SpatialGridImportCancelSender(operation: operation)
+        installCancellation { cancelSender.cancel() }
+        defer { installCancellation(nil) }
+
+        // Keep draining the source after a view task is cancelled. The control
+        // asks the backend to stop cooperatively; the terminal response still
+        // determines whether publication won the cancel/commit race.
+        let importTask = Task.detached(priority: .userInitiated) {
+            do {
+                for try await update in operation.events { await progress(update) }
+            } catch {
+                // Preserve the terminal result, including a snapshot committed
+                // before a cancellation or progress-stream shutdown.
+            }
+            return try await operation.value()
+        }
+        let response = try await withTaskCancellationHandler {
+            try await importTask.value
+        } onCancel: {
+            _ = cancelSender.cancel()
+        }
+        switch response.state {
+        case "completed":
+            guard let snapshot = response.snapshot else {
+                throw BackendServiceError(code: "protocolFailure", message: "The DSS grid import completed without a saved model snapshot.")
+            }
+            return .init(sourceRevision: snapshot.revision, snapshot: try snapshot.editorSnapshot,
+                refreshWarning: response.refreshWarning)
+        case "cancelled": throw CancellationError()
+        default:
+            throw BackendServiceError(code: "processFailure",
+                message: response.errorMessage ?? "The DSS grid import did not complete.")
+        }
     }
     func perform(_ asset: ProjectAsset, action: EditorAction, edits: EditorEdits) async throws -> EditorSnapshot {
         if case .selectTableRows = action, asset.section == .terrains {

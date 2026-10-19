@@ -23,9 +23,16 @@ struct ProjectMapView: View {
     @GestureState private var isDragging = false
     @StateObject private var projectionPresentation = MapProjectionPresentation()
     @StateObject private var linkedFeatureSelectionSession = MapLinkedFeatureSelectionSession()
+    @StateObject private var hoverIdentifySession = MapHoverIdentifySession()
     @State private var showScaleBar = true
     @State private var showMapOverlays = true
     @State private var overlayOpacity = 1.0
+    private var canvasOffset: CGSize {
+        CGSize(width: offset.width + dragOffset.width, height: offset.height + dragOffset.height)
+    }
+    private var canvasTransformPoints: [MapPoint] {
+        mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers)
+    }
     private var visibleLayers: [MapVectorLayer] {
         MapRenderComposition.vectorLayers(records: mapState.sourceMapRenderRows,
             candidates: mapState.visibleVectors(store.mapLayers))
@@ -68,6 +75,64 @@ struct ProjectMapView: View {
             || mapState.polylineEditor.endpointAttachDraft != nil
             || !["select", "Map.Pan"].contains(mapState.toolID)
     }
+    private var mapCanPan: Bool {
+        mapState.toolID == "Map.Pan" || mapState.toolID == "select"
+    }
+    private var mapPanGesture: some Gesture {
+        DragGesture()
+            .updating($isDragging) { _, state, _ in state = true }
+            .updating($dragOffset) { value, state, _ in
+                if mapCanPan { state = value.translation }
+            }
+            .onEnded { value in
+                if mapCanPan,
+                   let moved = MapPointerCamera.pan(offset: offset, by: value.translation) { offset = moved }
+            }
+    }
+    private var mapMagnificationGesture: some Gesture {
+        MagnifyGesture().onEnded { value in
+            scale = min(max(scale * value.magnification, 0.125), 256)
+        }
+    }
+    private func mapTapGesture(size: CGSize) -> some Gesture {
+        SpatialTapGesture().onEnded { value in
+            routeTap(value.location, size: size, scale: scale, offset: canvasOffset)
+        }
+    }
+    private func mapDoubleTapGesture(size: CGSize) -> some Gesture {
+        SpatialTapGesture(count: 2).onEnded { value in
+            guard !mapCanPan else { return }
+            if MapSelectionMeasurementTool.measurements.contains(mapState.toolID) {
+                let owner = MapSelectionMeasurementOwnerResolver.activeTool(
+                    projectSessionID: store.projectSessionID, mapState: mapState,
+                    visibleLayers: visibleLayers, toolID: mapState.toolID)?.owner
+                let transform = mapTransform(size: size, scale: scale, offset: canvasOffset)
+                mapState.mapSelectionMeasurement.activate(toolID: mapState.toolID, owner: owner,
+                    store: store, mapState: mapState)
+                mapState.mapSelectionMeasurement.handleDoubleClick(at: transform.world(value.location),
+                    owner: owner, store: store, mapState: mapState)
+            } else if !MapSelectionMeasurementTool.selectors.contains(mapState.toolID) {
+                enqueueInput(.doubleClick, at: value.location, size: size)
+            }
+        }
+    }
+    private func mapToolDragGesture(size: CGSize) -> some Gesture {
+        DragGesture().onChanged { value in
+            if MapSelectionMeasurementTool.contains(mapState.toolID) {
+                routeNativeDragChanged(value, size: size)
+            } else if !mapCanPan {
+                enqueueInput(.drag, at: value.location, size: size)
+            }
+        }.onEnded { value in
+            if MapSelectionMeasurementTool.selectors.contains(mapState.toolID) {
+                routeNativeDragEnded(value, size: size)
+            } else if MapSelectionMeasurementTool.measurements.contains(mapState.toolID) {
+                mapState.mapSelectionMeasurement.finishMeasureDrag()
+            } else if !mapCanPan {
+                enqueueInput(.dragEnded, at: value.location, size: size)
+            }
+        }
+    }
     private var visibleLayerCount: Int {
         visibleLayers.count
             + orderedRasterLayers.count
@@ -85,6 +150,217 @@ struct ProjectMapView: View {
                     .map { $0.stableIdentity + ":" + String($0.hasUniqueStableIdentity) }
         }
     }
+    private var hoverVectorSourceIdentity: [String] {
+        visibleLayers.flatMap { layer in
+            [layer.id, SourceFilePaths.canonical(layer.url), layer.sourceRevision ?? "",
+             layer.sourceMapID?.uuidString ?? "", String(layer.features.count)]
+        } + [mapState.polylineEditor.draftGeneration]
+    }
+    private func mapCanvasInteractions(size: CGSize) -> some View {
+        ZStack {
+            ProjectMapBaseCanvasLayers(store: store, mapState: mapState, mapID: mapID,
+                points: canvasTransformPoints,
+                scale: scale, offset: canvasOffset, orderedRasterLayers: orderedRasterLayers,
+                liveScreenRasterCellSize: liveScreenRasterCellSize,
+                vectorSurface: vectorSurface(offset: canvasOffset))
+            ProjectMapCanvasStatusOverlays(store: store, mapState: mapState, mapID: mapID,
+                hoverSession: hoverIdentifySession, visibleLayerCount: visibleLayerCount,
+                mapTitle: mapTitle, canvasSize: size)
+            MapPointerInteraction(onModifiersChanged: { mapModifierFlags = $0 }) { location, delta in
+                let toolIsActive = isDragging || !mapState.preview.isEmpty
+                    || mapState.polylineEditor.isBusy
+                    || !mapState.polylineEditor.previewPoints.isEmpty
+                    || mapState.polylineEditor.endpointAttachDraft != nil
+                guard MapCanvasNavigation.allowsWheelZoom(toolIsActive: toolIsActive),
+                      let camera = MapPointerCamera.wheelZoom(scale: scale, offset: offset,
+                        canvasSize: size, pointer: location, delta: delta) else { return }
+                store.activateMap(mapID)
+                scale = camera.scale
+                offset = camera.offset
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .allowsHitTesting(false)
+            MapSelectionMeasurementRightClickInteraction { location in
+                guard MapSelectionMeasurementTool.selectors.contains(mapState.toolID),
+                      let active = MapSelectionMeasurementOwnerResolver.activeVector(
+                        projectSessionID: store.projectSessionID, mapState: mapState,
+                        visibleLayers: visibleLayers) else { return }
+                let transform = mapTransform(size: size, scale: scale,
+                    offset: CGSize(width: offset.width + dragOffset.width,
+                                   height: offset.height + dragOffset.height))
+                mapState.mapSelectionMeasurement.activate(toolID: mapState.toolID, owner: active.owner,
+                    store: store, mapState: mapState)
+                mapState.mapSelectionMeasurement.handleRightClick(location,
+                    owner: active.owner, layer: active.layer, transform: transform,
+                    store: store, mapState: mapState)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .allowsHitTesting(false)
+            MapSourceAnnotations(store: store, mapState: mapState,
+                terrainOverlay: store.terrainUSGSTileOverlay,
+                points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
+                scale: scale,
+                offset: CGSize(width: offset.width + dragOffset.width,
+                               height: offset.height + dragOffset.height), pointer: screenPointer,
+                allowsTerrainHover: !mapToolIsActive && !mapModifierFlags.contains(.shift))
+            MapSelectionMeasurementCanvas(session: mapState.mapSelectionMeasurement,
+                owner: activeMapToolOwner?.owner,
+                transform: mapTransform(size: size, scale: scale,
+                    offset: CGSize(width: offset.width + dragOffset.width,
+                                   height: offset.height + dragOffset.height)))
+        }
+        .contentShape(Rectangle())
+        .gesture(mapPanGesture)
+        .simultaneousGesture(mapMagnificationGesture)
+        .simultaneousGesture(mapTapGesture(size: size))
+        .simultaneousGesture(mapDoubleTapGesture(size: size))
+        .simultaneousGesture(mapToolDragGesture(size: size))
+        .dropDestination(for: String.self) { (ids: [String], _: CGPoint) -> Bool in
+            return acceptDroppedAssetIDs(ids)
+        }
+        .dropDestination(for: URL.self) { (files: [URL], _: CGPoint) -> Bool in
+            return acceptDroppedFiles(files)
+        }
+        .overlay(alignment: .bottom) {
+            let bottomChromePoints = mapState.transformPoints(
+                vectors: store.mapLayers, rasters: store.rasterLayers)
+            let bottomChromeOffset = CGSize(
+                width: offset.width + dragOffset.width,
+                height: offset.height + dragOffset.height)
+            ProjectMapCanvasBottomChrome(store: store, mapState: mapState,
+                linkedSession: linkedFeatureSelectionSession,
+                canvasSize: size, visibleLayerCount: visibleLayerCount,
+                vectorLayers: visibleLayers, mapPoints: bottomChromePoints,
+                scale: scale, offset: bottomChromeOffset,
+                showMapOverlays: showMapOverlays, showScaleBar: showScaleBar,
+                overlayOpacity: overlayOpacity, units: projectionPresentation.units)
+        }
+    }
+    private func mapCanvasCameraEvents(size: CGSize) -> some View {
+        mapCanvasInteractions(size: size)
+        .onAppear {
+            synchronizeMapSelectionMeasurementTool()
+            applyPendingViewport(size: size); updateExtent(size: size)
+        }
+        .onChange(of: mapState.toolID) { _, _ in
+            synchronizeMapSelectionMeasurementTool()
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: mapState.selectedLayerID) { _, _ in synchronizeMapSelectionMeasurementTool() }
+        .onChange(of: mapState.selectedSourceContextIdentity) { _, _ in synchronizeMapSelectionMeasurementTool() }
+        .onChange(of: size) { _, _ in applyPendingViewport(size: size); updateExtent(size: size) }
+        .onChange(of: dragOffset) { _, _ in
+            updateBackgroundViewport(size: size)
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: scale) { _, _ in
+            updateExtent(size: size)
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: offset) { _, _ in
+            updateExtent(size: size)
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: store.mapRevision) { _, _ in updateExtent(size: size) }
+    }
+    private var hoverRasterSourceIdentity: [String] {
+        store.rasterMapSources.map { source in
+            [source.id, source.sourceRevision ?? ""].joined(separator: "|")
+        }.sorted()
+    }
+    private var hoverResultSourceIdentity: [String] {
+        mapState.resultMap.nodes.map { node in
+            let profile = node.profileIndex.map(String.init) ?? "-1"
+            return [node.id, node.selectedMapType ?? "", profile].joined(separator: "|")
+        }
+    }
+    private func mapCanvasSourceEvents(size: CGSize) -> some View {
+        mapCanvasCameraEvents(size: size)
+        .onChange(of: hoverRasterSourceIdentity) { _, _ in
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: mapState.sourceMapRenderRows) { _, _ in
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: hoverResultSourceIdentity) { _, _ in
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: mapState.associatedMapLayers.renderRevision) { _, _ in
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: mapState.projectGeometryMap.renderRevision) { _, _ in
+            refreshHoverIdentify(size: size)
+        }
+    }
+    private func mapCanvasVisibilityEvents(size: CGSize) -> some View {
+        mapCanvasSourceEvents(size: size)
+        .onChange(of: mapState.hiddenLayers) { _, _ in
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: mapState.selectedLayerID) { _, _ in
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: mapState.selectedSourceContextIdentity) { _, _ in
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: mapModifierFlags) { _, _ in
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: isDragging) { _, _ in
+            refreshHoverIdentify(size: size)
+        }
+    }
+    private func mapCanvasLifecycleEvents(size: CGSize) -> some View {
+        mapCanvasVisibilityEvents(size: size)
+        .onChange(of: store.projectSessionID) { _, _ in
+            synchronizeMapSelectionMeasurementTool()
+            updateExtent(size: size)
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: store.document?.projectionType) { _, _ in updateExtent(size: size) }
+        .onChange(of: store.document?.projectionValue) { _, _ in updateExtent(size: size) }
+        .onChange(of: mapState.profileRenderRevision) { _, _ in updateExtent(size: size) }
+        .onChange(of: hoverVectorSourceIdentity) { _, _ in
+            refreshHoverIdentify(size: size)
+        }
+        .onChange(of: mapState.referenceRevision) { _, _ in updateExtent(size: size) }
+        .onChange(of: mapState.currentExtent?.id) { _, _ in
+            Task { await mapState.projectGeometryMap.updateViewport(mapState.currentExtent) }
+        }
+        .onChange(of: mapState.resultViewport) { _, viewport in
+            Task { await mapState.associatedMapLayers.updateViewport(viewport) }
+        }
+        .onChange(of: mapState.boundaryMap.renderRevision) { _, _ in updateExtent(size: size) }
+        .onChange(of: mapState.storedCulvertProfile.renderRevision) { _, _ in updateExtent(size: size) }
+    }
+    private func mapCanvasSurface(size: CGSize) -> some View {
+        mapCanvasLifecycleEvents(size: size)
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let location):
+                mapModifierFlags = NSEvent.modifierFlags
+                screenPointer = location
+                store.activateMap(mapID)
+                let transform = mapTransform(size: size, scale: scale,
+                    offset: CGSize(width: offset.width + dragOffset.width,
+                                   height: offset.height + dragOffset.height))
+                pointer = visibleLayerCount == 0 ? nil : transform.world(location)
+                if !["select", "Map.Pan"].contains(mapState.toolID) {
+                    enqueueInput(.pointerMoved, at: location, size: size)
+                }
+                updateHoverIdentify(at: location, size: size)
+            case .ended:
+                pointer = nil
+                screenPointer = nil
+                hoverIdentifySession.cancel()
+                let owner = MapSelectionMeasurementOwnerResolver.activeTool(
+                    projectSessionID: store.projectSessionID, mapState: mapState,
+                    visibleLayers: visibleLayers, toolID: mapState.toolID)?.owner
+                mapState.mapSelectionMeasurement.updatePointer(nil, owner: owner)
+            }
+        }
+        .onChange(of: mapState.viewport?.id) { _, _ in applyPendingViewport(size: size) }
+    }
     var body: some View {
         VStack(spacing: 0) {
             ProjectMapTopChrome(store: store, mapState: mapState, mapID: mapID,
@@ -92,273 +368,7 @@ struct ProjectMapView: View {
                 overlayOpacity: $overlayOpacity)
 
             GeometryReader { proxy in
-                ZStack {
-                    Color(nsColor: .textBackgroundColor)
-                    BackgroundMapCanvas(session: mapState.backgroundMapSession,
-                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
-                        scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width,
-                                       height: offset.height + dragOffset.height))
-                    Canvas { context, size in
-                        if mapState.showGrid {
-                            let spacing: CGFloat = 64 * scale
-                            let translation = CGSize(width: offset.width + dragOffset.width, height: offset.height + dragOffset.height)
-                            var grid = Path()
-                            for column in 0...Int(size.width / max(spacing, 8)) + 2 {
-                                let x = CGFloat(column) * max(spacing, 8) + translation.width.truncatingRemainder(dividingBy: max(spacing, 8))
-                                grid.move(to: CGPoint(x: x, y: 0)); grid.addLine(to: CGPoint(x: x, y: size.height))
-                            }
-                            for row in 0...Int(size.height / max(spacing, 8)) + 2 {
-                                let y = CGFloat(row) * max(spacing, 8) + translation.height.truncatingRemainder(dividingBy: max(spacing, 8))
-                                grid.move(to: CGPoint(x: 0, y: y)); grid.addLine(to: CGPoint(x: size.width, y: y))
-                            }
-                            context.stroke(grid, with: .color(.secondary.opacity(0.10)), lineWidth: 0.5)
-                        }
-                    }
-                    RasterMapCanvas(store: store, mapState: mapState, scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width, height: offset.height + dragOffset.height),
-                        orderedLayers: orderedRasterLayers)
-                    CalculatorMapLayerCanvas(store: store, mapID: mapID,
-                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
-                        scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width,
-                                       height: offset.height + dragOffset.height),
-                        viewport: mapState.resultViewport)
-                    MapResultDiagnosticCanvas(session: mapState.resultMap,
-                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
-                        scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width,
-                                       height: offset.height + dragOffset.height),
-                        visibleLayerIDs: Set(orderedRasterLayers.map(\.id)))
-                    ProjectGeometryMapCanvas(store: store, mapState: mapState,
-                        session: mapState.projectGeometryMap, mapID: mapID, scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width,
-                                       height: offset.height + dragOffset.height), isInteractive: false)
-                    MapTreeMeshErrorOverlayCanvas(session: mapState.meshErrors, mapState: mapState,
-                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
-                        scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width,
-                                       height: offset.height + dragOffset.height))
-                    BoundaryMapCanvas(session: mapState.boundaryMap, mapState: mapState,
-                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
-                        scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width,
-                                       height: offset.height + dragOffset.height), isInteractive: false)
-                    TerrainInputMapCanvas(session: mapState.terrainInputMap,
-                        features: mapState.terrainInputMap.features,
-                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
-                        scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width,
-                                       height: offset.height + dragOffset.height))
-                    vectorSurface(offset: CGSize(width: offset.width + dragOffset.width,
-                                                 height: offset.height + dragOffset.height))
-                    MapResultVelocityParticlesCanvas(session: mapState.resultMap.velocityParticles,
-                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
-                        scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width,
-                                       height: offset.height + dragOffset.height))
-                    MapDynamicProfileOverlayCanvas(session: mapState.dynamicProfileOverlay,
-                        mapState: mapState,
-                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
-                        scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width,
-                                       height: offset.height + dragOffset.height))
-                    StoredCulvertParticleCanvas(session: mapState.storedCulvertProfile,
-                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
-                        scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width,
-                                       height: offset.height + dragOffset.height),
-                        cellSize: liveScreenRasterCellSize,
-                        isActive: mapState.selectedSourceContextIdentity
-                            == mapState.storedCulvertProfile.sourceContextIdentity)
-                    SourceMapVectorLoadProgressView(store: store, mapID: mapID)
-                    if store.isMapLoading || store.isRasterMapLoading {
-                        VStack(spacing: 12) { ProgressView(); Text("Loading Map Layers…"); Button("Cancel", action: store.cancelMapLoading) }
-                            .padding(20).workspaceGlass()
-                    } else if visibleLayerCount == 0 { VStack(spacing: 12) {
-                        Image(systemName: "map").font(.system(size: 38, weight: .light)).foregroundStyle(.tertiary)
-                        Text(mapTitle).font(.headline)
-                        if mapState.kind != .unsupported {
-                            Button("Add Map Layer…") { store.addMapLayer(for: mapID) }.disabled(!store.hasProject)
-                        }
-                    }
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-                    }
-                    MapPointerInteraction(onModifiersChanged: { mapModifierFlags = $0 }) { location, delta in
-                        let toolIsActive = isDragging || !mapState.preview.isEmpty
-                            || mapState.polylineEditor.isBusy
-                            || !mapState.polylineEditor.previewPoints.isEmpty
-                            || mapState.polylineEditor.endpointAttachDraft != nil
-                        guard MapCanvasNavigation.allowsWheelZoom(toolIsActive: toolIsActive),
-                              let camera = MapPointerCamera.wheelZoom(scale: scale, offset: offset,
-                                canvasSize: proxy.size, pointer: location, delta: delta) else { return }
-                        store.activateMap(mapID)
-                        scale = camera.scale
-                        offset = camera.offset
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(false)
-                    MapSelectionMeasurementRightClickInteraction { location in
-                        guard MapSelectionMeasurementTool.selectors.contains(mapState.toolID),
-                              let active = MapSelectionMeasurementOwnerResolver.activeVector(
-                                projectSessionID: store.projectSessionID, mapState: mapState,
-                                visibleLayers: visibleLayers) else { return }
-                        let transform = mapTransform(size: proxy.size, scale: scale,
-                            offset: CGSize(width: offset.width + dragOffset.width,
-                                           height: offset.height + dragOffset.height))
-                        mapState.mapSelectionMeasurement.activate(toolID: mapState.toolID, owner: active.owner,
-                            store: store, mapState: mapState)
-                        mapState.mapSelectionMeasurement.handleRightClick(location,
-                            owner: active.owner, layer: active.layer, transform: transform,
-                            store: store, mapState: mapState)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(false)
-                    MapSourceAnnotations(store: store, mapState: mapState,
-                        terrainOverlay: store.terrainUSGSTileOverlay,
-                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
-                        scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width,
-                                       height: offset.height + dragOffset.height), pointer: screenPointer,
-                        allowsTerrainHover: !mapToolIsActive && !mapModifierFlags.contains(.shift))
-                    MapSelectionMeasurementCanvas(session: mapState.mapSelectionMeasurement,
-                        owner: activeMapToolOwner?.owner,
-                        transform: mapTransform(size: proxy.size, scale: scale,
-                            offset: CGSize(width: offset.width + dragOffset.width,
-                                           height: offset.height + dragOffset.height)))
-                }
-                .contentShape(Rectangle())
-                .gesture(DragGesture().updating($isDragging) { _, state, _ in state = true }
-                    .updating($dragOffset) { value, state, _ in
-                    if ["Map.Pan", "select"].contains(mapState.toolID) { state = value.translation }
-                }.onEnded { value in
-                    if ["Map.Pan", "select"].contains(mapState.toolID),
-                       let moved = MapPointerCamera.pan(offset: offset, by: value.translation) { offset = moved }
-                })
-                .simultaneousGesture(MagnifyGesture().onEnded { value in scale = min(max(scale * value.magnification, 0.125), 256) })
-                .simultaneousGesture(SpatialTapGesture().onEnded { value in
-                    routeTap(value.location, size: proxy.size, scale: scale,
-                             offset: CGSize(width: offset.width + dragOffset.width,
-                                            height: offset.height + dragOffset.height))
-                })
-                .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { value in
-                    guard !["select", "Map.Pan"].contains(mapState.toolID) else { return }
-                    if MapSelectionMeasurementTool.measurements.contains(mapState.toolID) {
-                        let owner = MapSelectionMeasurementOwnerResolver.activeTool(
-                            projectSessionID: store.projectSessionID, mapState: mapState,
-                            visibleLayers: visibleLayers, toolID: mapState.toolID)?.owner
-                        let transform = mapTransform(size: proxy.size, scale: scale,
-                            offset: CGSize(width: offset.width + dragOffset.width,
-                                           height: offset.height + dragOffset.height))
-                        mapState.mapSelectionMeasurement.activate(toolID: mapState.toolID, owner: owner,
-                            store: store, mapState: mapState)
-                        mapState.mapSelectionMeasurement.handleDoubleClick(at: transform.world(value.location),
-                            owner: owner, store: store, mapState: mapState)
-                    } else if !MapSelectionMeasurementTool.selectors.contains(mapState.toolID) {
-                        enqueueInput(.doubleClick, at: value.location, size: proxy.size)
-                    }
-                })
-                .simultaneousGesture(DragGesture().onChanged { value in
-                    if MapSelectionMeasurementTool.contains(mapState.toolID) {
-                        routeNativeDragChanged(value, size: proxy.size)
-                    } else if !["select", "Map.Pan"].contains(mapState.toolID) {
-                        enqueueInput(.drag, at: value.location, size: proxy.size)
-                    }
-                }.onEnded { value in
-                    if MapSelectionMeasurementTool.selectors.contains(mapState.toolID) {
-                        routeNativeDragEnded(value, size: proxy.size)
-                    } else if MapSelectionMeasurementTool.measurements.contains(mapState.toolID) {
-                        mapState.mapSelectionMeasurement.finishMeasureDrag()
-                    } else if !["select", "Map.Pan"].contains(mapState.toolID) {
-                        enqueueInput(.dragEnded, at: value.location, size: proxy.size)
-                    }
-                })
-                .dropDestination(for: String.self) { ids, _ in
-                    guard mapState.kind != .unsupported else { return false }
-                    let assets = ids.compactMap { id in store.assets.first { $0.id == id } }
-                    let availableLayerIDs = Set(store.mapLayers.map(\.id) + store.rasterLayers.map(\.id))
-                    let sources = assets.filter { $0.section == .results || availableLayerIDs.contains($0.id) || ["geojson", "json", "shp", "tif", "tiff"].contains($0.url.pathExtension.lowercased()) }
-                    guard !sources.isEmpty else { return false }
-                    Task { await store.addAssetsToMap(sources, mapID: mapID) }
-                    return true
-                }
-                .dropDestination(for: URL.self) { files, _ in
-                    guard store.hasProject, mapState.kind != .unsupported else { return false }
-                    let mapFiles = files.filter { $0.isFileURL && ["json", "geojson", "shp", "tif", "tiff"].contains($0.pathExtension.lowercased()) }
-                    let project = store.projectSessionID
-                    Task {
-                        for file in mapFiles {
-                            guard store.projectSessionID == project else { return }
-                            _ = await store.connectMapSource(file, for: mapID)
-                        }
-                    }
-                    return !mapFiles.isEmpty
-                }
-                .overlay(alignment: .bottom) {
-                    let bottomChromePoints = mapState.transformPoints(
-                        vectors: store.mapLayers, rasters: store.rasterLayers)
-                    let bottomChromeOffset = CGSize(
-                        width: offset.width + dragOffset.width,
-                        height: offset.height + dragOffset.height)
-                    ProjectMapCanvasBottomChrome(store: store, mapState: mapState,
-                        linkedSession: linkedFeatureSelectionSession,
-                        canvasSize: proxy.size, visibleLayerCount: visibleLayerCount,
-                        vectorLayers: visibleLayers, mapPoints: bottomChromePoints,
-                        scale: scale, offset: bottomChromeOffset,
-                        showMapOverlays: showMapOverlays, showScaleBar: showScaleBar,
-                        overlayOpacity: overlayOpacity, units: projectionPresentation.units)
-                }
-                .onAppear {
-                    synchronizeMapSelectionMeasurementTool()
-                    applyPendingViewport(size: proxy.size); updateExtent(size: proxy.size)
-                }
-                .onChange(of: mapState.toolID) { _, _ in synchronizeMapSelectionMeasurementTool() }
-                .onChange(of: mapState.selectedLayerID) { _, _ in synchronizeMapSelectionMeasurementTool() }
-                .onChange(of: mapState.selectedSourceContextIdentity) { _, _ in synchronizeMapSelectionMeasurementTool() }
-                .onChange(of: proxy.size) { _, _ in applyPendingViewport(size: proxy.size); updateExtent(size: proxy.size) }
-                .onChange(of: dragOffset) { _, _ in updateBackgroundViewport(size: proxy.size) }
-                .onChange(of: scale) { _, _ in updateExtent(size: proxy.size) }
-                .onChange(of: offset) { _, _ in updateExtent(size: proxy.size) }
-                .onChange(of: store.mapRevision) { _, _ in updateExtent(size: proxy.size) }
-                .onChange(of: store.projectSessionID) { _, _ in
-                    synchronizeMapSelectionMeasurementTool()
-                    updateExtent(size: proxy.size)
-                }
-                .onChange(of: store.document?.projectionType) { _, _ in updateExtent(size: proxy.size) }
-                .onChange(of: store.document?.projectionValue) { _, _ in updateExtent(size: proxy.size) }
-                .onChange(of: mapState.profileRenderRevision) { _, _ in updateExtent(size: proxy.size) }
-                .onChange(of: mapState.referenceRevision) { _, _ in updateExtent(size: proxy.size) }
-                .onChange(of: mapState.currentExtent?.id) { _, _ in
-                    Task { await mapState.projectGeometryMap.updateViewport(mapState.currentExtent) }
-                }
-                .onChange(of: mapState.resultViewport) { _, viewport in
-                    Task { await mapState.associatedMapLayers.updateViewport(viewport) }
-                }
-                .onChange(of: mapState.boundaryMap.renderRevision) { _, _ in updateExtent(size: proxy.size) }
-                .onChange(of: mapState.storedCulvertProfile.renderRevision) { _, _ in updateExtent(size: proxy.size) }
-                .onContinuousHover { phase in
-                    switch phase {
-                    case .active(let location):
-                        mapModifierFlags = NSEvent.modifierFlags
-                        screenPointer = location
-                        store.activateMap(mapID)
-                        let transform = mapTransform(size: proxy.size, scale: scale,
-                            offset: CGSize(width: offset.width + dragOffset.width,
-                                           height: offset.height + dragOffset.height))
-                        pointer = visibleLayerCount == 0 ? nil : transform.world(location)
-                        if !["select", "Map.Pan"].contains(mapState.toolID) {
-                            enqueueInput(.pointerMoved, at: location, size: proxy.size)
-                        }
-                    case .ended:
-                        pointer = nil
-                        screenPointer = nil
-                        let owner = MapSelectionMeasurementOwnerResolver.activeTool(
-                            projectSessionID: store.projectSessionID, mapState: mapState,
-                            visibleLayers: visibleLayers, toolID: mapState.toolID)?.owner
-                        mapState.mapSelectionMeasurement.updatePointer(nil, owner: owner)
-                    }
-                }
-                .onChange(of: mapState.viewport?.id) { _, _ in applyPendingViewport(size: proxy.size) }
+                mapCanvasSurface(size: proxy.size)
 
             }
             if showMapOverlays {
@@ -381,6 +391,7 @@ struct ProjectMapView: View {
                 value: store.document?.projectionValue ?? "", provider: store.projectionProvider)
         }
         .onDisappear {
+            hoverIdentifySession.cancel()
             mapState.mapSelectionMeasurement.close(store: store, mapState: mapState)
             mapState.projectGeometryMap.cancel(); mapState.backgroundMapSession.cancelRendering()
         }
@@ -388,6 +399,7 @@ struct ProjectMapView: View {
         .onChange(of: mapState.resultViewport) { _, viewport in mapState.resultViewportDidChange(viewport) }
         .onChange(of: store.mapWorkflowIdentity(mapID)) { _, identity in
             mapState.retireLinkedResultsIfOwnerChanged(mapWorkflowIdentity: identity)
+            hoverIdentifySession.cancel()
         }
         .onChange(of: mapState.linkedResultSourceIdentity) { _, identity in
             mapState.retireLinkedResultsIfOwnerChanged(sourceIdentity: identity)
@@ -401,6 +413,40 @@ struct ProjectMapView: View {
             if !mapState.polylineEditor.hasUnsavedChanges { mapState.resetViewport() }
         }
     }
+
+    private func acceptDroppedAssetIDs(_ identifiers: [String]) -> Bool {
+        guard mapState.kind != .unsupported else { return false }
+        let assets = identifiers.compactMap { identifier in
+            store.assets.first { $0.id == identifier }
+        }
+        let availableLayerIDs = Set(store.mapLayers.map(\.id) + store.rasterLayers.map(\.id))
+        let supportedExtensions: Set<String> = ["geojson", "json", "shp", "tif", "tiff"]
+        let sources = assets.filter { asset in
+            asset.section == .results || availableLayerIDs.contains(asset.id)
+                || supportedExtensions.contains(asset.url.pathExtension.lowercased())
+        }
+        guard !sources.isEmpty else { return false }
+        Task { await store.addAssetsToMap(sources, mapID: mapID) }
+        return true
+    }
+
+    private func acceptDroppedFiles(_ files: [URL]) -> Bool {
+        guard store.hasProject, mapState.kind != .unsupported else { return false }
+        let supportedExtensions: Set<String> = ["json", "geojson", "shp", "tif", "tiff"]
+        let mapFiles = files.filter { file in
+            file.isFileURL && supportedExtensions.contains(file.pathExtension.lowercased())
+        }
+        guard !mapFiles.isEmpty else { return false }
+        let projectSessionID = store.projectSessionID
+        Task {
+            for file in mapFiles {
+                guard store.projectSessionID == projectSessionID else { return }
+                _ = await store.connectMapSource(file, for: mapID)
+            }
+        }
+        return true
+    }
+
     private func applyPendingViewport(size: CGSize) {
         guard let request = mapState.viewport else { return }
         let points = mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers)
@@ -446,6 +492,41 @@ struct ProjectMapView: View {
                 pixelWidth: max(Int(size.width.rounded()), 1),
                 pixelHeight: max(Int(size.height.rounded()), 1)),
             worldUnitsPerPixel: 1 / Double(transform.factor))
+    }
+
+    private func refreshHoverIdentify(size: CGSize) {
+        guard let screenPointer else {
+            hoverIdentifySession.cancel()
+            return
+        }
+        updateHoverIdentify(at: screenPointer, size: size)
+    }
+
+    private func updateHoverIdentify(at location: CGPoint, size: CGSize) {
+        guard !mapToolIsActive, !mapModifierFlags.contains(.shift),
+              visibleLayerCount > 0, size.width > 0, size.height > 0 else {
+            hoverIdentifySession.cancel()
+            return
+        }
+        let transform = mapTransform(size: size, scale: scale,
+            offset: CGSize(width: offset.width + dragOffset.width,
+                           height: offset.height + dragOffset.height))
+        let worldUnitsPerScreenPoint = 1 / Double(transform.factor)
+        let vectorEntries = MapHoverIdentifyVector.entries(at: location, transform: transform,
+            mapID: mapID, records: mapState.sourceMapRenderRows, candidates: visibleLayers,
+            selectedLayerID: mapState.selectedLayerID,
+            selectedContextIdentity: mapState.selectedSourceContextIdentity,
+            vectorStyles: mapState.vectorStyles)
+        guard let flight = store.captureMapHoverIdentify(mapID: mapID,
+            point: transform.world(location),
+            worldUnitsPerScreenPoint: worldUnitsPerScreenPoint,
+            screenPoint: location, localEntries: vectorEntries) else {
+            hoverIdentifySession.cancel()
+            return
+        }
+        hoverIdentifySession.update(flight) {
+            store.currentMapHoverIdentifySourceIdentity(mapID: mapID)
+        }
     }
 
     private func mapTransform(size: CGSize, scale: CGFloat, offset: CGSize) -> MapTransform {
@@ -566,6 +647,117 @@ struct ProjectMapView: View {
                 return L10n.text("Map Type")
             }
             return "\(L10n.text("Map Type")): \(sourceType)"
+        }
+    }
+}
+
+/// Keeps the map's rendering stack out of the interaction modifier expression.
+/// The visual order is intentional: source rasters and project overlays precede
+/// vectors, with transient result and culvert marks above their source layers.
+private struct ProjectMapBaseCanvasLayers<VectorSurface: View>: View {
+    let store: WorkspaceStore
+    let mapState: MapState
+    let mapID: UUID
+    let points: [MapPoint]
+    let scale: CGFloat
+    let offset: CGSize
+    let orderedRasterLayers: [MapRasterLayer]
+    let liveScreenRasterCellSize: Double?
+    let vectorSurface: VectorSurface
+
+    var body: some View {
+        ZStack {
+            Color(nsColor: .textBackgroundColor)
+            BackgroundMapCanvas(session: mapState.backgroundMapSession,
+                points: points, scale: scale, offset: offset)
+            gridCanvas
+            RasterMapCanvas(store: store, mapState: mapState, scale: scale,
+                offset: offset, orderedLayers: orderedRasterLayers)
+            CalculatorMapLayerCanvas(store: store, mapID: mapID,
+                points: points, scale: scale, offset: offset,
+                viewport: mapState.resultViewport)
+            MapResultDiagnosticCanvas(session: mapState.resultMap,
+                points: points, scale: scale, offset: offset,
+                visibleLayerIDs: Set(orderedRasterLayers.map(\.id)))
+            ProjectGeometryMapCanvas(store: store, mapState: mapState,
+                session: mapState.projectGeometryMap, mapID: mapID, scale: scale,
+                offset: offset, isInteractive: false)
+            MapTreeMeshErrorOverlayCanvas(session: mapState.meshErrors, mapState: mapState,
+                points: points, scale: scale, offset: offset)
+            BoundaryMapCanvas(session: mapState.boundaryMap, mapState: mapState,
+                points: points, scale: scale, offset: offset, isInteractive: false)
+            TerrainInputMapCanvas(session: mapState.terrainInputMap,
+                features: mapState.terrainInputMap.features,
+                points: points, scale: scale, offset: offset)
+            vectorSurface
+            MapResultVelocityParticlesCanvas(session: mapState.resultMap.velocityParticles,
+                points: points, scale: scale, offset: offset)
+            MapDynamicProfileOverlayCanvas(session: mapState.dynamicProfileOverlay,
+                mapState: mapState, points: points, scale: scale, offset: offset)
+            StoredCulvertParticleCanvas(session: mapState.storedCulvertProfile,
+                points: points, scale: scale, offset: offset,
+                cellSize: liveScreenRasterCellSize,
+                isActive: mapState.selectedSourceContextIdentity
+                    == mapState.storedCulvertProfile.sourceContextIdentity)
+        }
+    }
+
+    private var gridCanvas: some View {
+        Canvas { context, size in
+            guard mapState.showGrid else { return }
+            let spacing = max(64 * scale, 8)
+            var grid = Path()
+            for column in 0...Int(size.width / spacing) + 2 {
+                let x = CGFloat(column) * spacing + offset.width.truncatingRemainder(dividingBy: spacing)
+                grid.move(to: CGPoint(x: x, y: 0))
+                grid.addLine(to: CGPoint(x: x, y: size.height))
+            }
+            for row in 0...Int(size.height / spacing) + 2 {
+                let y = CGFloat(row) * spacing + offset.height.truncatingRemainder(dividingBy: spacing)
+                grid.move(to: CGPoint(x: 0, y: y))
+                grid.addLine(to: CGPoint(x: size.width, y: y))
+            }
+            context.stroke(grid, with: .color(.secondary.opacity(0.10)), lineWidth: 0.5)
+        }
+    }
+}
+
+/// Transient status and identify visuals are separate from source rendering so
+/// the large map stack does not share SwiftUI's type-inference workload with it.
+private struct ProjectMapCanvasStatusOverlays: View {
+    let store: WorkspaceStore
+    let mapState: MapState
+    let mapID: UUID
+    let hoverSession: MapHoverIdentifySession
+    let visibleLayerCount: Int
+    let mapTitle: String
+    let canvasSize: CGSize
+
+    var body: some View {
+        ZStack {
+            MapHoverIdentifyOverlay(session: hoverSession)
+            SourceMapVectorLoadProgressView(store: store, mapID: mapID)
+            if store.isMapLoading || store.isRasterMapLoading {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Loading Map Layers…")
+                    Button("Cancel", action: store.cancelMapLoading)
+                }
+                .padding(20)
+                .workspaceGlass()
+            } else if visibleLayerCount == 0 {
+                VStack(spacing: 12) {
+                    Image(systemName: "map")
+                        .font(.system(size: 38, weight: .light))
+                        .foregroundStyle(.tertiary)
+                    Text(mapTitle).font(.headline)
+                    if mapState.kind != .unsupported {
+                        Button("Add Map Layer…") { store.addMapLayer(for: mapID) }
+                            .disabled(!store.hasProject)
+                    }
+                }
+                .frame(width: canvasSize.width, height: canvasSize.height)
+            }
         }
     }
 }

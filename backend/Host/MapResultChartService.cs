@@ -370,7 +370,11 @@ public static class MapResultChartService
         IReadOnlySet<string> protectedSourcePaths,
         out List<ResolvedMapResultNode> resolvedResults)
     {
+        StringComparer pathComparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
         List<(CatalogTreeNode Node, XElement SourceNode)> active = [];
+        var protectedResultMarkers = new HashSet<string>(pathComparer);
         Visit(roots);
         var byLocator = active.ToDictionary(item => LocatorKey(item.Node.Locator!), item => item,
             StringComparer.Ordinal);
@@ -386,9 +390,6 @@ public static class MapResultChartService
         var matchedPlanResults = new HashSet<Result>(ReferenceEqualityComparer.Instance);
         foreach (HashSet<Result> planResults in activePlanResults.Values)
             matchedPlanResults.UnionWith(planResults);
-        StringComparer pathComparer = OperatingSystem.IsWindows()
-            ? StringComparer.OrdinalIgnoreCase
-            : StringComparer.Ordinal;
         HashSet<string> standaloneResultPaths = active
             .Where(item => item.Node.Locator?.NodeType == "Result")
             .Select(item => item.Node.Locator?.AssetID ?? item.Node.AssetID)
@@ -510,6 +511,29 @@ public static class MapResultChartService
                 bool checkable = item.Checked is not null;
                 bool visible = !checkable || item.Checked == "checked";
                 if (checkable && !visible) continue;
+                if (item.ProtectedResultSourcePath is { } protectedPath)
+                {
+                    if (item.Locator is not { NodeType: "Result" } protectedLocator ||
+                        item.AssetID is not null ||
+                        protectedLocator.AssetID is not null ||
+                        !Path.IsPathFullyQualified(protectedPath) ||
+                        !protectedSourcePaths.Contains(SourceFilePaths.Canonical(protectedPath)) ||
+                        !string.Equals(Path.GetFileNameWithoutExtension(protectedPath), item.Name,
+                            StringComparison.Ordinal) ||
+                        !protectedResultMarkers.Add(SourceFilePaths.Canonical(protectedPath)))
+                        throw new SourceFileChangedException();
+                    XElement raw = ResolveSerializedNode(serializedMap, protectedLocator)
+                        ?? throw new SourceFileChangedException();
+                    if ((string?)raw.Attribute("Type") != "Result" ||
+                        !string.Equals((string?)raw.Attribute("Name"), item.Name, StringComparison.Ordinal) ||
+                        !bool.TryParse((string?)raw.Attribute("IsChecked"), out bool isChecked) || !isChecked)
+                        throw new SourceFileChangedException();
+                    // Keep the checked .vis row intact, but do not expose it as
+                    // an active readable Result while its exact callback path
+                    // is held by the compute writer. Its children share that
+                    // unavailable owner and are omitted too.
+                    continue;
+                }
                 if (item.Locator is { NodeType: "Result" or "MultiResult" } locator &&
                     item.Checked == "checked")
                 {
