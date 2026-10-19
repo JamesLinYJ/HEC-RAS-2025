@@ -107,7 +107,19 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
         return try await client.request("model.classificationTransform", parameters: request, as: ModelSnapshot.self).editorSnapshot
     }
     func editTerrain(_ asset: ProjectAsset, action: EditorAction, edits: EditorEdits) async throws -> EditorSnapshot {
-        struct Request: Encodable, Sendable { let model: ModelSaveRequest; let operation: String; let itemId: String?; let from: Int?; let to: Int?; var inputKind: String? = nil; var hintExtent: TerrainInputValidExtent? = nil; var tableId: String? = nil; var rowIDs: [String]? = nil }
+        struct LeveeForceSet: Encodable, Sendable { let command: String; let value: String; let rowIDs: [String] }
+        struct Request: Encodable, Sendable {
+            let model: ModelSaveRequest
+            let operation: String
+            let itemId: String?
+            let from: Int?
+            let to: Int?
+            var inputKind: String? = nil
+            var hintExtent: TerrainInputValidExtent? = nil
+            var tableId: String? = nil
+            var rowIDs: [String]? = nil
+            var leveeForceSet: LeveeForceSet? = nil
+        }
         let request: Request
         switch action {
         case .addRow(let table): request = .init(model: try saveRequest(asset, changes: edits), operation: "addRow", itemId: nil, from: nil, to: nil, tableId: table)
@@ -119,6 +131,11 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
         case .addTerrainInput(let kind, let hintExtent): request = .init(model: try saveRequest(asset, changes: edits), operation: "add", itemId: nil, from: nil, to: nil, inputKind: kind.rawValue, hintExtent: hintExtent)
         case .reorderSource(_, let from, let to): request = .init(model: try saveRequest(asset, changes: edits), operation: "reorder", itemId: nil, from: from, to: to)
         case .removeSource(_, let id): request = .init(model: try saveRequest(asset, changes: edits), operation: "remove", itemId: id, from: nil, to: nil)
+        case .forceSetLeveeProperty(let command, let value, let rowIDs, _):
+            request = .init(model: try saveRequest(asset, changes: edits), operation: "forceSetLeveeProperty",
+                itemId: nil, from: nil, to: nil, tableId: "LeveeModPropertiesEditor/PropertySets",
+                rowIDs: rowIDs.sorted(),
+                leveeForceSet: .init(command: command.rawValue, value: value, rowIDs: rowIDs.sorted()))
         default: throw CocoaError(.featureUnsupported)
         }
         return try await client.request("model.terrainTransform", parameters: request, as: ModelSnapshot.self).editorSnapshot

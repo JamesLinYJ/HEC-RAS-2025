@@ -16,10 +16,15 @@ dotnet = environment.get('HECRAS_DOTNET') or shutil.which('dotnet')
 if not dotnet:
     raise SystemExit('.NET 10 SDK is required.')
 
-def run(command):
-    subprocess.run(command, cwd=ROOT, env=environment, check=True)
+def run(command, *, command_environment=None):
+    subprocess.run(command, cwd=ROOT,
+                   env=environment if command_environment is None else command_environment,
+                   check=True)
 
-run(['bash', 'build-all.sh'])
+build_environment = environment.copy()
+if app_scratch := environment.get('HECRAS_APP_SWIFT_SCRATCH_PATH'):
+    build_environment['HECRAS_SWIFT_SCRATCH_PATH'] = app_scratch
+run(['bash', 'build-all.sh'], command_environment=build_environment)
 artifacts = BACKEND / 'build/tests'
 run([dotnet, 'build', 'backend/Tests/Ras.Backend.Tests.csproj', '-c', 'Release', '-warnaserror',
      '-m:1', '-nr:false', '-p:UseSharedCompilation=false',

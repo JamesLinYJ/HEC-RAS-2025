@@ -1113,6 +1113,7 @@ final class WorkspaceStore: ObservableObject {
     private var editorSessions: [UUID: ModelEditorSession] = [:]
     private var primaryEditorIDs: [ModelEditorKind: UUID] = [:]
     private var editorSubscriptions: [UUID: AnyCancellable] = [:]
+    private var geometryCulvertMapPreparationEditorIDs: Set<UUID> = []
     @Published private(set) var isSavingAll = false
     @Published private(set) var isRunningBackendTool = false
     @Published private(set) var isRunningLibraryImport = false
@@ -2073,6 +2074,131 @@ final class WorkspaceStore: ObservableObject {
             guard let assetID = editor.modelAssetID else { return false }
             return SourceFilePaths.canonical(URL(fileURLWithPath: assetID)) == path
         }.count
+    }
+
+    /// Changes when the exact map owner becomes available, busy, ready, or
+    /// stale. ProjectGeometryMapCanvas uses this as a task key so preparation
+    /// retries on owner/context transitions without initiating IO from body.
+    func geometryCulvertMapHoverPreparationIdentity(assetID: String,
+                                                    projectSessionID expectedSession: UUID,
+                                                    expectedRevision: String,
+                                                    model: GeometryCulvertModelRequest) -> String {
+        let path = SourceFilePaths.canonical(URL(fileURLWithPath: assetID))
+        let modelContext = [model.assetPath, model.kind, model.projectPath ?? "",
+            model.projectXml ?? "", model.coreLayerContext?.identityToken ?? ""].joined(separator: "\n")
+        let modelDigest = SHA256.hash(data: Data(modelContext.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        let base = [expectedSession.uuidString, path, expectedRevision, modelDigest].joined(separator: "|")
+        guard expectedSession == projectSessionID, !assetID.isEmpty, !model.assetPath.isEmpty,
+              !expectedRevision.isEmpty, model.kind == "Geometry",
+              SourceFilePaths.canonical(URL(fileURLWithPath: model.assetPath)) == path else {
+            return base + "|invalid-owner-context"
+        }
+        let matches = editorSessions.values.filter { editor in
+            guard let owner = editor.modelAssetID else { return false }
+            return SourceFilePaths.canonical(URL(fileURLWithPath: owner)) == path
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
+        guard matches.count == 1, let editor = matches.first else {
+            return base + "|editor-count:" + matches.map { $0.id.uuidString }.joined(separator: ",")
+        }
+        let parentState = [editor.id.uuidString, editor.loaded ? "loaded" : "not-loaded",
+            editor.loadingSelection ? "selection-loading" : "selection-idle",
+            editor.canEdit ? "editable" : "read-only", editor.isBusy ? "busy" : "idle",
+            editor.sourceFileRevision ?? "no-source-revision"].joined(separator: "|")
+        return base + "|" + parentState + "|"
+            + (editor.geometryCulvert?.mapHoverPreparationIdentity ?? "no-culvert-child")
+    }
+
+    /// Loads the exact Geometry editor's culvert child for map rendering when
+    /// it is absent. Loading is deduplicated per editor and isolated from a
+    /// cancelling SwiftUI task; the result is returned only if the same
+    /// project, editor, asset, source revision, and child still own the map.
+    func prepareGeometryCulvertMapHoverSnapshot(assetID: String,
+                                                projectSessionID expectedSession: UUID,
+                                                expectedRevision: String,
+                                                model: GeometryCulvertModelRequest) async
+        -> GeometryCulvertSnapshot? {
+        guard !model.assetPath.isEmpty,
+              let editor = geometryCulvertMapHoverOwner(assetID: assetID,
+                  projectSessionID: expectedSession, expectedRevision: expectedRevision, model: model),
+              editor.loaded, !editor.loadingSelection,
+              editor.canEdit, !editor.isBusy,
+              let sourceRevision = editor.sourceFileRevision,
+              sourceRevision.caseInsensitiveCompare(expectedRevision) == .orderedSame,
+              let child = editor.geometryCulvert else { return nil }
+        if let current = child.mapHoverSnapshot(model: model, expectedRevision: expectedRevision) {
+            return current
+        }
+        guard child.canPrepareMapHover(model: model, expectedRevision: expectedRevision),
+              geometryCulvertMapPreparationEditorIDs.insert(editor.id).inserted else { return nil }
+        let editorID = editor.id
+        let canonicalAssetID = SourceFilePaths.canonical(URL(fileURLWithPath: assetID))
+        defer { geometryCulvertMapPreparationEditorIDs.remove(editorID) }
+
+        // A map view may cancel/restart its task as observed readiness changes.
+        // Keep the one child load alive; every continuation still validates the
+        // owner before returning a usable snapshot.
+        let loadTask = Task { @MainActor [weak self, weak editor] in
+            guard let self, let editor,
+                  self.projectSessionID == expectedSession,
+                  self.editorSessions[editorID] === editor,
+                  editor.loaded, !editor.loadingSelection,
+                  editor.canEdit, !editor.isBusy,
+                  editor.modelAssetID.map({
+                      SourceFilePaths.canonical(URL(fileURLWithPath: $0))
+                  }) == canonicalAssetID,
+                  editor.sourceFileRevision?.caseInsensitiveCompare(expectedRevision) == .orderedSame,
+                  editor.geometryCulvert === child,
+                  child.canPrepareMapHover(model: model, expectedRevision: expectedRevision) else { return }
+            await editor.ensureGeometryCulvertLoaded()
+        }
+        await loadTask.value
+        geometryCulvertMapPreparationEditorIDs.remove(editorID)
+
+        guard !Task.isCancelled,
+              expectedSession == projectSessionID,
+              let currentEditor = geometryCulvertMapHoverOwner(assetID: assetID,
+                  projectSessionID: expectedSession, expectedRevision: expectedRevision, model: model),
+              currentEditor === editor, currentEditor.id == editorID,
+              currentEditor.loaded, !currentEditor.loadingSelection,
+              currentEditor.canEdit, !currentEditor.isBusy,
+              currentEditor.sourceFileRevision?.caseInsensitiveCompare(expectedRevision) == .orderedSame,
+              currentEditor.geometryCulvert === child else { return nil }
+        return child.mapHoverSnapshot(model: model, expectedRevision: expectedRevision)
+    }
+
+    /// Captures a culvert child only from the one ready, editable Geometry
+    /// editor that owns this exact source in the current project session. A
+    /// registered-but-loading editor deliberately blocks saved-source fallback
+    /// so map hover and map rendering cannot identify a different owner.
+    func geometryCulvertMapHoverSnapshot(assetID: String,
+                                         projectSessionID expectedSession: UUID,
+                                         expectedRevision: String,
+                                         model: GeometryCulvertModelRequest) -> GeometryCulvertSnapshot? {
+        guard let editor = geometryCulvertMapHoverOwner(assetID: assetID,
+                  projectSessionID: expectedSession, expectedRevision: expectedRevision, model: model),
+              editor.loaded, !editor.loadingSelection,
+              editor.canEdit, !editor.isBusy,
+              let sourceRevision = editor.sourceFileRevision,
+              sourceRevision.caseInsensitiveCompare(expectedRevision) == .orderedSame,
+              let child = editor.geometryCulvert else { return nil }
+        return child.mapHoverSnapshot(model: model, expectedRevision: expectedRevision)
+    }
+
+    private func geometryCulvertMapHoverOwner(assetID: String,
+                                              projectSessionID expectedSession: UUID,
+                                              expectedRevision: String,
+                                              model: GeometryCulvertModelRequest) -> ModelEditorSession? {
+        guard expectedSession == projectSessionID,
+              !assetID.isEmpty, !model.assetPath.isEmpty, !expectedRevision.isEmpty,
+              model.kind == "Geometry" else { return nil }
+        let path = SourceFilePaths.canonical(URL(fileURLWithPath: assetID))
+        guard SourceFilePaths.canonical(URL(fileURLWithPath: model.assetPath)) == path else { return nil }
+        let matches = editorSessions.values.filter { editor in
+            guard let owner = editor.modelAssetID else { return false }
+            return SourceFilePaths.canonical(URL(fileURLWithPath: owner)) == path
+        }
+        return matches.count == 1 ? matches.first : nil
     }
 
     func geometryMeshSession(assetID: String,

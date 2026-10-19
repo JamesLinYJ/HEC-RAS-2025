@@ -27,6 +27,10 @@ struct MapHoverIdentifyTooltip: View {
     }
 
     private func displayLabel(for entry: MapHoverIdentifyEntry) -> String {
+        if entry.kind == "modelVector", entry.valueType == "boundaryConditionLine",
+           let ordinal = entry.elementIndex {
+            return L10n.format("BCL: %d", ordinal)
+        }
         guard entry.kind == "mesh", let valueType = entry.valueType,
               let elementIndex = entry.elementIndex else { return entry.label }
         let elementName: String

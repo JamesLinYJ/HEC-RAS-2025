@@ -2187,6 +2187,9 @@
 "Subdataset" = "Subdataset";
 "Importing Grids…" = "Importing Grids…";
 "Reading Raster Data…" = "Reading Raster Data…";
+"Grid import" = "Grid import";
+"Reading selected DSS grid records..." = "Reading selected DSS grid records...";
+"Grid data and boundary edits were saved." = "Grid data and boundary edits were saved.";
 "Sampled Range" = "Sampled Range";
 "Preview uses the source raster coordinate system." = "Preview uses the source raster coordinate system.";
 "Every selected raster band needs a valid timestep." = "Every selected raster band needs a valid timestep.";
@@ -4422,6 +4425,8 @@
 "Data available" = "Data available";
 "Choose raster files or drop them here." = "Choose raster files or drop them here.";
 "Drop more raster files here to add them." = "Drop more raster files here to add them.";
+"A DSS import uses one source file." = "A DSS import uses one source file.";
+"No valid frames" = "No valid frames";
 "File access was not granted." = "File access was not granted.";
 "The model changed. Close and reopen the grid importer." = "The model changed. Close and reopen the grid importer.";
 "Drop files, not folders." = "Drop files, not folders.";
@@ -7182,6 +7187,14 @@
 "Copy Cell" = "Copy Cell";
 "Copy Cell Selection" = "Copy Cell Selection";
 "Paste Cells" = "Paste Cells";
+"Select a current cell or range before pasting." = "Select a current cell or range before pasting.";
+"The clipboard does not contain valid table text." = "The clipboard does not contain valid table text.";
+"The table selection changed. Select a current range and paste again." = "The table selection changed. Select a current range and paste again.";
+"The pasted range exceeds the available table cells; no cells were changed." = "The pasted range exceeds the available table cells; no cells were changed.";
+"Pasted %d cell edits." = "Pasted %d cell edits.";
+"Skipped %d read-only cells." = "Skipped %d read-only cells.";
+"Skipped %d invalid cells." = "Skipped %d invalid cells.";
+"Kept %d invalid numeric entries as drafts; correct them before saving." = "Kept %d invalid numeric entries as drafts; correct them before saving.";
 "Select All Cells" = "Select All Cells";
 "Drag to resize column" = "Drag to resize column";
 "Delete Selected Features" = "Delete Selected Features";
@@ -7475,6 +7488,7 @@
 "The requested Levee validation property does not match its field." = "The requested Levee validation property does not match its field.";
 "The requested source validation owner is unsupported." = "The requested source validation owner is unsupported.";
 "The selected Levee property set no longer exists." = "The selected Levee property set no longer exists.";
+"The selected Levee property sets changed. Select them again before applying this value." = "The selected Levee property sets changed. Select them again before applying this value.";
 "The source validation capture is incomplete." = "The source validation capture is incomplete.";
 "The source validation capture is missing current table selections." = "The source validation capture is missing current table selections.";
 "The source validation capture is missing current time-window events." = "The source validation capture is missing current time-window events.";
@@ -8650,3 +8664,4 @@
 "Mesh Element Result Time Series" = "Mesh Element Result Time Series";
 "Mesh tools" = "Mesh tools";
 "No matching Result values are available." = "No matching Result values are available.";
+"The selected file is not a readable HDF5 file." = "The selected file is not a readable HDF5 file.";

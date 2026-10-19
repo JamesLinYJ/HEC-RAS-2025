@@ -3,7 +3,9 @@ using System.Security.Cryptography;
 using System.Text;
 using Ras.Backend;
 using Geospatial.GDALAssist;
+using Geospatial.Vectors;
 using OSGeo.GDAL;
+using Ras.Layers;
 using Utility.Units;
 
 /// <summary>
@@ -78,6 +80,7 @@ internal static class MapHoverIdentifyChecks
 
         await CheckOrdinaryGeometryMesh(directory.FullName);
         await CheckSourceRaster(directory.FullName);
+        await CheckGdbSourceRaster(directory.FullName);
         Console.WriteLine("Map hover identify returns exact source-backed values for two retained Result profiles and leaves all source files byte-identical.");
     }
 
@@ -226,6 +229,139 @@ internal static class MapHoverIdentifyChecks
             !File.ReadAllBytes(visualizationPath).SequenceEqual(visualizationBefore) ||
             !File.ReadAllBytes(rasterPath).SequenceEqual(rasterBefore))
             throw new InvalidOperationException("Source raster hover or stale-capture rejection modified source files.");
+    }
+
+    private static async Task CheckGdbSourceRaster(string root)
+    {
+        if (!GDALSetup.IsInitialized) GDALSetup.InitializeMultiplatform();
+        string fixtureDirectory = Path.Combine(root, "official-gdb-raster");
+        Directory.CreateDirectory(fixtureDirectory);
+        string gdbPath = GdbRasterHoverFixture.Extract(fixtureDirectory);
+        GdbMapCatalogResponse catalog = GdbMapSourceService.Catalog(new(gdbPath));
+        GdbRasterSubdatasetDescriptor[] catalogSubdatasets = catalog.RasterSubdatasets ?? [];
+        if (catalog.Layers.Length != 0 || catalogSubdatasets.Length != 44 ||
+            catalogSubdatasets.Select(item => item.Name).Distinct(StringComparer.Ordinal).Count() != 44 ||
+            !MapHoverIdentifyService.SamePath(catalog.Source.SourcePath, gdbPath))
+            throw new InvalidDataException("The official raster-only FileGDB catalog did not return all 44 exact raster subdatasets with an empty vector list.");
+
+        (string LeafName, string DataType, string DisplayName)[] expectedRasterIdentities =
+        [
+            ("float32_lz77", "float32", "Raster float32_lz77 [20x20x1], 32 bits"),
+            ("float64_lz77", "float64", "Raster float64_lz77 [20x20x1], 64 bits")
+        ];
+        GdbRasterSubdatasetDescriptor[] expectedSubdatasets = expectedRasterIdentities.Select(expected =>
+            catalogSubdatasets.Single(item => item.ConnectionString.EndsWith(
+                $":{expected.LeafName}", StringComparison.Ordinal))).ToArray();
+        if (expectedSubdatasets.Length != expectedRasterIdentities.Length ||
+            expectedSubdatasets.Where((item, index) =>
+                item.Name != expectedRasterIdentities[index].DisplayName ||
+                item.DataType != expectedRasterIdentities[index].DataType ||
+                !item.CanRender || item.Status != "available" || item.Width != 20 || item.Height != 20 ||
+                item.BandCount != 1 || item.ProjectionWKT is null || item.Extent is null ||
+                item.NoDataValue is null).Any())
+            throw new InvalidDataException("The embedded GDAL FileGDB fixture did not expose its two exact renderable raster subdatasets.");
+
+        string projectPath = Path.Combine(fixtureDirectory, "gdb-hover.ras");
+        DisposeProject(Project.CreateNew(projectPath, ProjectionDefinition.FromEPSG(32611)));
+        string projectXml = File.ReadAllText(projectPath, Encoding.UTF8);
+        string projectXmlSHA = Hash(Encoding.UTF8.GetBytes(projectXml));
+        string projectRevision = Hash(File.ReadAllBytes(projectPath));
+        const string mapID = "92e92225-93a5-4ed3-9d40-99e46748625e";
+        MapDocumentMutationReceipt createdMap = MapTreeService.CreateMap(new MapDocumentRequest(
+            projectPath, projectXml, projectXmlSHA, null, "Project", Name: "GDB hover", MapID: mapID));
+        var importOwner = new MapDocumentRequest(projectPath, projectXml, projectXmlSHA,
+            createdMap.VisualizationRevision, "Project", MapID: mapID,
+            MapIndex: createdMap.MapIndex, MapName: createdMap.MapName, MapType: createdMap.MapType);
+        MapDocumentMutationReceipt imported = MapTreeService.ImportGdbVector(new(
+            importOwner, projectRevision, catalog.Source)).Receipt;
+        MapTreeRequest map = new(projectPath, projectXml, projectXmlSHA, mapID,
+            imported.MapIndex, imported.MapName, imported.MapType, imported.VisualizationRevision);
+        CatalogTreeNode[] tree = Flatten(MapTreeService.Load(map).Roots).ToArray();
+        GdbMapSourceIdentity source = catalog.Source;
+        MapResultSourcesResult resultSources = MapResultChartService.Sources(new(map, []));
+        byte[] projectBefore = File.ReadAllBytes(projectPath);
+        byte[] visualizationBefore = File.ReadAllBytes(Path.ChangeExtension(projectPath, ".vis"));
+
+        Projection sourceProjection = new WKTProjection(expectedSubdatasets[0].ProjectionWKT!);
+        Projection targetProjection = new EPSGProjection(32611);
+        Point ProjectPoint(double x, double y) => Projector.TransformPoint(sourceProjection,
+            targetProjection, new Point(x, y));
+
+        for (int rasterIndex = 0; rasterIndex < expectedRasterIdentities.Length; rasterIndex++)
+        {
+            (string name, string dataType, string displayName) = expectedRasterIdentities[rasterIndex];
+            GdbRasterSubdatasetDescriptor subdataset = expectedSubdatasets[rasterIndex];
+            CatalogTreeNode node = tree.Single(item => item.Locator is
+                { NodeType: "MapLayer", MapType: "SingleBandRasterMapLayer", Filename: var filename } &&
+                string.Equals(filename, subdataset.ConnectionString, StringComparison.Ordinal));
+            CatalogTreeNodeLocator locator = node.Locator
+                ?? throw new InvalidDataException("A GDAL FileGDB raster child omitted its exact saved locator.");
+            if (node.Name != displayName || locator.NodeName != displayName ||
+                !string.Equals(subdataset.DataType, dataType, StringComparison.Ordinal) ||
+                !string.Equals(locator.Filename, subdataset.ConnectionString, StringComparison.Ordinal))
+                throw new InvalidDataException("The saved raster node did not retain the exact GDAL subdataset connection string.");
+
+            var identity = new GdbRasterSymbologyIdentity(map, locator, source);
+            string[] nodePath = locator.NodePath?.Select(index => index.ToString(CultureInfo.InvariantCulture)).ToArray()
+                ?? throw new InvalidDataException("The saved raster node omitted its serialized tree path.");
+            var rasterSource = new RasterMapSourceIdentity(
+                $"vis-map-{map.MapIndex}-node-{string.Join('.', nodePath)}", map.ProjectPath,
+                Path.ChangeExtension(map.ProjectPath, ".vis"), map.ExpectedVisualizationRevision!,
+                map.MapIndex, map.MapName, map.MapType, locator.NodePath!, locator.NodeName,
+                "SingleBandRasterMapLayer", locator.Filename, locator.FilenameRelative,
+                source.SourcePath, map.MapID, source.Revision, identity);
+
+            async Task<MapHoverIdentifyResult> Identify(string id, Point point,
+                RasterMapSourceIdentity capturedSource) => await MapHoverIdentifyService.Identify(
+                new MapHoverIdentifyRequest(map, resultSources.ContextToken, [], id,
+                    new(point.X, point.Y), new(point.X + 0.00001, point.Y), 0.00001, [],
+                    [new MapHoverLayerCapture(locator, "raster", source.SourcePath, source.Revision,
+                        "SingleBandRasterMapLayer", RasterSource: capturedSource)]));
+
+            MapHoverIdentifyEntry value = (await Identify("hover-gdb-" + dataType,
+                ProjectPoint(440750, 3751290), rasterSource)).Entries.Single();
+            if (value.Kind != "raster" || value.ValueType != "number" || value.Value != "107" ||
+                value.MapType != "SingleBandRasterMapLayer" || value.SourcePath is null ||
+                !MapHoverIdentifyService.SamePath(value.SourcePath, source.SourcePath) ||
+                !value.SourceRevision!.Equals(source.Revision, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"GDB {dataType} hover did not return the expected true source value and full directory revision.");
+
+            MapHoverIdentifyEntry secondValue = (await Identify("hover-gdb-second-" + dataType,
+                ProjectPoint(440810, 3751290), rasterSource)).Entries.Single();
+            if (secondValue.Value != "123")
+                throw new InvalidOperationException($"GDB {dataType} hover sampled a value other than the official fixture's second known point.");
+
+            MapHoverIdentifyResult outside = await Identify("hover-gdb-outside-" + dataType,
+                ProjectPoint(440650, 3751290), rasterSource);
+            if (outside.Entries.Length != 0)
+                throw new InvalidOperationException($"GDB {dataType} hover fabricated a value beyond the raster extent.");
+
+            GdbRasterSymbologyIdentity staleIdentity = identity with
+            {
+                Source = source with { Revision = new string('0', 64) }
+            };
+            RasterMapSourceIdentity staleSource = rasterSource with
+            {
+                SourceRevision = staleIdentity.Source.Revision,
+                GdbSource = staleIdentity
+            };
+            await ExpectAsync<SourceFileChangedException>(() => Identify("hover-gdb-stale-" + dataType,
+                ProjectPoint(440750, 3751290), staleSource));
+        }
+
+        GdbMapSourceService.VerifySource(source);
+        if (!File.ReadAllBytes(projectPath).SequenceEqual(projectBefore) ||
+            !File.ReadAllBytes(Path.ChangeExtension(projectPath, ".vis")).SequenceEqual(visualizationBefore))
+            throw new InvalidOperationException("GDB raster hover changed the project or visualization bytes.");
+    }
+
+    private static void DisposeProject(Project project)
+    {
+        foreach (CoreLayerBase layer in project.Plans.Cast<CoreLayerBase>().Concat(project.Geometries)
+                     .Concat(project.Terrains).Concat(project.BoundaryConditions).Concat(project.NValues)
+                     .Concat(project.ClassificationLayers))
+            layer.Dispose();
+        foreach (Result result in project.Results) result.Dispose();
     }
 
     private static IEnumerable<CatalogTreeNode> Flatten(IEnumerable<CatalogTreeNode> roots)

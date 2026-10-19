@@ -32,16 +32,19 @@ public static class MapHoverIdentifyService
         ValidateRequest(request);
         RejectProtectedCapturePaths(request);
 
-        // Associated N-value and classification sampling validates its exact
-        // geometry/plan/result ownership through the retained association
-        // resolver. Run those reads before opening the result context below so
-        // the HDF source is never opened concurrently by two Project objects.
-        var associatedEntries = new Dictionary<int, MapHoverIdentifyEntry?>();
+        // Associated values and model-vector callbacks validate their own
+        // geometry/plan/result owners. Finish those reads before opening the
+        // result context below so two Project objects do not retain the same
+        // HDF source simultaneously. The outer visible tree is checked after.
+        var ownedSourceEntries = new Dictionary<int, MapHoverIdentifyEntry?>();
         for (int index = 0; index < request.Layers.Length; index++)
         {
             MapHoverLayerCapture capture = request.Layers[index];
             if (capture.Kind is "nvalue" or "classification")
-                associatedEntries[index] = SampleAssociatedValue(request, capture);
+                ownedSourceEntries[index] = SampleAssociatedValue(request, capture);
+            else if (capture.Kind == "modelVector")
+                ownedSourceEntries[index] = await ModelEditorAdapter.SampleMapHoverModelVectorAsync(
+                    request, capture);
         }
 
         using ResolvedMapResultContext context = MapResultChartService.ResolveContext(
@@ -97,7 +100,8 @@ public static class MapHoverIdentifyService
                     break;
                 case "nvalue":
                 case "classification":
-                    if (associatedEntries[index] is { } associated) entries.Add(associated);
+                case "modelVector":
+                    if (ownedSourceEntries[index] is { } owned) entries.Add(owned);
                     break;
                 case "mesh":
                     MapHoverIdentifyEntry? mesh = await ModelEditorAdapter.SampleMapHoverMeshAsync(
@@ -110,6 +114,20 @@ public static class MapHoverIdentifyService
         }
 
         context.EnsureUnchanged();
+        // These owners were read before the outer Project was opened. Recheck
+        // them after every later asynchronous sample as well, so a source
+        // replacement during another layer's read cannot publish an old label.
+        foreach (MapHoverLayerCapture capture in request.Layers)
+        {
+            if (capture.Kind == "modelVector" && capture.ModelVector is { } vector)
+                MapResultChartService.EnsureUnchanged(vector.SourcePath, vector.SourceRevision);
+            else if (capture.Kind is "nvalue" or "classification")
+            {
+                MapResultChartService.EnsureUnchanged(capture.SourcePath!, capture.SourceRevision!);
+                foreach (AssociatedMapLayerDependency dependency in capture.Associated!.Dependencies)
+                    MapResultChartService.EnsureUnchanged(dependency.Path, dependency.Revision);
+            }
+        }
         return new MapHoverIdentifyResult(request.RequestID, context.Sources.ProjectPath,
             context.Sources.ProjectRevision, context.Sources.ProjectXmlSHA,
             context.Sources.VisualizationRevision, context.Sources.MapID,
@@ -185,7 +203,7 @@ public static class MapHoverIdentifyService
                 if (capture.Node.NodeType != "MapLayer" || capture.RasterSource is null ||
                     capture.MapType != capture.RasterSource.MapLayerType)
                     throw new SourceFileChangedException();
-                ValidateRasterCapture(context, row, capture);
+                ValidateRasterCapture(context, request, row, capture);
                 break;
             case "nvalue":
             case "classification":
@@ -204,13 +222,19 @@ public static class MapHoverIdentifyService
                         capture.Node, capture.Mesh.Node))
                     throw new SourceFileChangedException();
                 break;
+            case "modelVector":
+                if (capture.ModelVector is null ||
+                    !MapResultRenderService.SameLocator(capture.Node, capture.ModelVector.Node) ||
+                    capture.Node.NodeType is not ("CulvertBarrelLayer" or "BoundaryCondition"))
+                    throw new SourceFileChangedException();
+                break;
             default:
                 throw new ArgumentException("The hover source kind is not supported.", nameof(capture.Kind));
         }
     }
 
     private static void ValidateRasterCapture(ResolvedMapResultContext context,
-        CatalogTreeNode row, MapHoverLayerCapture capture)
+        MapHoverIdentifyRequest request, CatalogTreeNode row, MapHoverLayerCapture capture)
     {
         RasterMapSourceIdentity source = capture.RasterSource!;
         if (source.SourceMapID is null || !Guid.TryParse(context.Sources.MapID, out Guid currentMapID) ||
@@ -229,8 +253,11 @@ public static class MapHoverIdentifyService
             !string.Equals(locator.FilenameRelative, source.FilenameRelative, StringComparison.Ordinal) ||
             !source.Id.Equals($"vis-map-{source.MapIndex}-node-{string.Join('.', source.NodePath)}", StringComparison.Ordinal))
             throw new SourceFileChangedException();
-        if (source.GdbSource is not null)
-            throw new NotSupportedException("Hover sampling for raster subdatasets in a file geodatabase is not available.");
+        if (source.GdbSource is { } gdbSource)
+        {
+            ValidateGdbRasterCapture(context, request, row, capture, source, gdbSource);
+            return;
+        }
 
         string resolved = ResolveRasterPath(context.ProjectPath, locator.FilenameRelative, locator.Filename);
         if (!SamePath(resolved, source.SourcePath) || string.IsNullOrWhiteSpace(source.SourceRevision) ||
@@ -245,6 +272,9 @@ public static class MapHoverIdentifyService
         MapHoverIdentifyRequest request, MapHoverLayerCapture capture, CatalogTreeNode row)
     {
         RasterMapSourceIdentity source = capture.RasterSource!;
+        if (source.GdbSource is { } gdbSource)
+            return SampleGdbRaster(request, capture, row, source, gdbSource);
+
         string path = ResolveRasterPath(context.ProjectPath, row.Locator!.FilenameRelative, row.Locator.Filename);
         if (!SamePath(path, source.SourcePath) ||
             !string.Equals(MapRasterLayerSourceManifest.CaptureRevision(path), source.SourceRevision,
@@ -300,6 +330,100 @@ public static class MapHoverIdentifyService
         return new(capture.Node, "raster", $"{row.Name}: {value}", value, valueType,
             source.SourcePath, source.SourceRevision, source.MapLayerType, null, null, null);
     }
+
+    private static void ValidateGdbRasterCapture(ResolvedMapResultContext context,
+        MapHoverIdentifyRequest request, CatalogTreeNode row, MapHoverLayerCapture capture,
+        RasterMapSourceIdentity source, GdbRasterSymbologyIdentity gdbSource)
+    {
+        MapTreeRequest map = gdbSource.Map;
+        CatalogTreeNodeLocator node = gdbSource.Node;
+        GdbMapSourceIdentity directory = gdbSource.Source;
+        CatalogTreeNodeLocator locator = row.Locator!;
+        int[]? nodePath = source.NodePath;
+        if (source.MapLayerType != MapRasterLayerRendering.SingleBandMapType ||
+            !string.Equals(capture.MapType, MapRasterLayerRendering.SingleBandMapType, StringComparison.Ordinal) ||
+            nodePath is null || node.NodePath is null || !nodePath.SequenceEqual(node.NodePath) ||
+            source.Id != $"vis-map-{source.MapIndex}-node-{string.Join('.', nodePath)}" ||
+            source.NodeName != node.NodeName || !MapResultRenderService.SameLocator(node, locator) ||
+            node.NodeType != "MapLayer" || node.MapType != MapRasterLayerRendering.SingleBandMapType ||
+            string.IsNullOrWhiteSpace(directory.SourcePath) || string.IsNullOrWhiteSpace(source.SourcePath) ||
+            string.IsNullOrWhiteSpace(capture.SourcePath) || string.IsNullOrWhiteSpace(node.AssetID) ||
+            !SamePath(source.SourcePath, directory.SourcePath) ||
+            !SamePath(capture.SourcePath, directory.SourcePath) ||
+            string.IsNullOrWhiteSpace(source.SourceRevision) ||
+            !IsSHA256(directory.Revision) ||
+            !source.SourceRevision.Equals(directory.Revision, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(capture.SourceRevision, directory.Revision, StringComparison.OrdinalIgnoreCase) ||
+            !SamePath(node.AssetID, directory.SourcePath) ||
+            !string.Equals(source.Filename, node.Filename, StringComparison.Ordinal) ||
+            !string.Equals(source.FilenameRelative, node.FilenameRelative, StringComparison.Ordinal) ||
+            !SamePath(map.ProjectPath, context.ProjectPath) ||
+            !string.Equals(map.ProjectXml, request.Map.ProjectXml, StringComparison.Ordinal) ||
+            !string.Equals(map.ProjectXmlSHA, context.ProjectXmlSHA, StringComparison.OrdinalIgnoreCase) ||
+            !SameMapID(map.MapID, context.Sources.MapID) ||
+            map.MapIndex != context.Sources.MapIndex || map.MapName != context.Sources.MapName ||
+            map.MapType != context.Sources.MapType ||
+            !string.Equals(map.ExpectedVisualizationRevision, context.VisualizationRevision,
+                StringComparison.OrdinalIgnoreCase) ||
+            !SameReadLease(map.ComputeReadLease, request.Map.ComputeReadLease) ||
+            !SameMapID(source.SourceMapID ?? string.Empty, context.Sources.MapID) ||
+            !SamePath(source.ProjectPath, context.ProjectPath) ||
+            !SamePath(source.VisualizationPath, context.VisualizationPath) ||
+            !string.Equals(source.VisualizationRevision, context.VisualizationRevision,
+                StringComparison.OrdinalIgnoreCase) ||
+            source.MapIndex != context.Sources.MapIndex || source.MapName != context.Sources.MapName ||
+            source.MapType != context.Sources.MapType ||
+            source.MapIndex != map.MapIndex || source.MapName != map.MapName || source.MapType != map.MapType ||
+            !string.Equals(source.VisualizationRevision, map.ExpectedVisualizationRevision,
+                StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(source.Filename, locator.Filename, StringComparison.Ordinal) ||
+            !string.Equals(source.FilenameRelative, locator.FilenameRelative, StringComparison.Ordinal))
+            throw new SourceFileChangedException();
+    }
+
+    private static MapHoverIdentifyEntry? SampleGdbRaster(MapHoverIdentifyRequest request,
+        MapHoverLayerCapture capture, CatalogTreeNode row, RasterMapSourceIdentity source,
+        GdbRasterSymbologyIdentity gdbSource)
+    {
+        return GdbRasterSourceService.WithOpenedRasterSource(
+            new GdbRasterSourceLoadRequest(gdbSource.Map, gdbSource.Node, gdbSource.Source), opened =>
+            {
+                IResample<float> raster = opened.Raster;
+                Projection? targetProjection = ProjectProjection(request.Map.ProjectXml);
+                Projection? sourceProjection = string.IsNullOrWhiteSpace(opened.ProjectionWKT)
+                    ? null : new WKTProjection(opened.ProjectionWKT);
+                if (targetProjection is not null && sourceProjection is not null &&
+                    !targetProjection.IsEqual(sourceProjection))
+                    raster = raster.WithTransformer(new ReprojectionTransformer(sourceProjection, targetProjection));
+
+                float sample = raster.SamplePoint(new Point(request.Point.X, request.Point.Y));
+                float? noData = opened.Raster.NoDataValue;
+                if (!float.IsFinite(sample) || sample == -9999f || noData.HasValue && sample == noData.Value)
+                    return null;
+
+                string value = sample.ToString("G7", CultureInfo.InvariantCulture);
+                return new MapHoverIdentifyEntry(capture.Node, "raster", $"{row.Name}: {value}", value,
+                    "number", opened.Capture.Source.SourcePath, opened.Capture.Source.Revision,
+                    source.MapLayerType, null, null, null);
+            });
+    }
+
+    private static bool SameReadLease(MapResultComputeReadLease? left, MapResultComputeReadLease? right)
+    {
+        if (left is null || right is null) return left is null && right is null;
+        if (left.ProtectedSourcePaths is null || right.ProtectedSourcePaths is null) return false;
+        return string.Equals(left.ProjectSessionID, right.ProjectSessionID, StringComparison.Ordinal) &&
+            string.Equals(left.RunID, right.RunID, StringComparison.Ordinal) &&
+            SamePath(left.ProjectPath, right.ProjectPath) &&
+            SameOptionalPath(left.CallbackResultPath, right.CallbackResultPath) &&
+            left.ProtectedSourcePaths.Length == right.ProtectedSourcePaths.Length &&
+            left.ProtectedSourcePaths.Select(SourceFilePaths.Canonical).OrderBy(path => path, PathComparer)
+                .SequenceEqual(right.ProtectedSourcePaths.Select(SourceFilePaths.Canonical)
+                    .OrderBy(path => path, PathComparer), PathComparer);
+    }
+
+    private static bool SameOptionalPath(string? left, string? right) =>
+        left is null ? right is null : right is not null && SamePath(left, right);
 
     private static MapHoverIdentifyEntry? SampleAssociatedValue(MapHoverIdentifyRequest request,
         MapHoverLayerCapture capture)
@@ -500,7 +624,9 @@ public static class MapHoverIdentifyService
             // the exact compute lease and never opens a protected writer path.
             if (capture.Kind == "result") continue;
             IEnumerable<string> paths = new[] { capture.SourcePath, capture.RasterSource?.SourcePath,
-                capture.Mesh?.SourcePath, capture.Mesh?.Model?.AssetPath }
+                capture.Mesh?.SourcePath, capture.Mesh?.Model?.AssetPath,
+                capture.ModelVector?.SourcePath, capture.ModelVector?.Model?.AssetPath,
+                capture.ModelVector?.ResultOwner?.SelectedResultPath }
                 .Where(path => !string.IsNullOrWhiteSpace(path)).Cast<string>()
                 .Concat(capture.Associated?.Dependencies?.Select(item => item.Path) ?? []);
             if (paths.Select(SourceFilePaths.Canonical).Any(path => protectedPaths.Contains(path, PathComparer)))

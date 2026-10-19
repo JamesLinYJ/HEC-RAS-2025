@@ -915,7 +915,21 @@ struct SourceField: View {
         case "color": OriginalColorPickerPropertyItem(field: field, session: session, store: store)
         case "toggle": OriginalMixedTogglePropertyItem(field: field, session: session)
         case "choice": OriginalChoicePropertyItem(field: field, choices: choices, session: session, store: store) { choice in
-            if field.forceSetCommand == "forceSetPatchType" {
+            if field.forceSetCommand.flatMap(GeometryArcForceSetCommand.init(rawValue:)) != nil,
+               field.hasMixedDraft(in: session) {
+                guard let identity = session.captureGeometryArcForceSetIdentity(field: field, value: choice.id) else {
+                    session.error = L10n.text("The selected Arc rows changed. Select them again before applying this value.")
+                    return
+                }
+                Task { @MainActor in _ = await session.forceSetGeometryArcChoice(identity) }
+            } else if field.forceSetCommand == "forceSetMode" || field.forceSetCommand == "forceSetModType",
+                      field.hasMixedDraft(in: session) {
+                guard let identity = session.captureLeveeForceSetIdentity(field: field, value: choice.id) else {
+                    session.error = L10n.text("The selected Levee property sets changed. Select them again before applying this value.")
+                    return
+                }
+                Task { @MainActor in _ = await session.forceSetLeveeProperty(identity) }
+            } else if field.forceSetCommand == "forceSetPatchType" {
                 session.forceSetGeometryRegionPatchType(field, value: choice.id)
             } else {
                 field.setDraftValue(choice.id, in: session)
@@ -983,6 +997,12 @@ struct SourceField: View {
     private func clearSourceField() {
         if geometryInputState != nil {
             session.resetGeometryRegionInput(field)
+        } else if field.clearCommand == GeometryArcClearCommand.resetBias.rawValue {
+            guard let identity = session.captureGeometryArcBiasResetIdentity(field: field) else {
+                session.error = L10n.text("The selected Arc rows changed. Select them again before applying this value.")
+                return
+            }
+            Task { @MainActor in _ = await session.resetGeometryArcBias(identity) }
         } else if field.clearCommand?.hasPrefix("forceReset") == true {
             // The original Levee setters parse an empty value to NaN. They
             // remain on the normal parent draft/save path.

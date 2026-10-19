@@ -136,7 +136,9 @@ public class H5Reader : IDisposable
 		}
 	}
 
-	protected long FileId;
+	protected long FileId = -1L;
+
+	private readonly object _handleLifecycleSync = new object();
 
 	private static readonly ILogger _logger = LogHelper.GetLogger("HDF5");
 
@@ -162,7 +164,7 @@ public class H5Reader : IDisposable
 
 	private readonly Dictionary<string, DatasetParameters> _parameters = new Dictionary<string, DatasetParameters>();
 
-	private bool _isDisposed;
+	private int _disposeState;
 
 	private static readonly bool _trackObjectLifecycle = false;
 
@@ -188,15 +190,15 @@ public class H5Reader : IDisposable
 
 	internal const string MessageLogDataLengthColumn = "Data Length";
 
-	public long H5FileID => FileId;
+	public long H5FileID => Interlocked.Read(ref FileId);
 
 	public static ILogger Logger => _logger;
 
 	public string Filename => _filename;
 
-	public bool IsDisposed => _isDisposed;
+	public bool IsDisposed => Volatile.Read(ref _disposeState) != 0;
 
-	public bool SuccessfullyOpened => FileId >= 0;
+	public bool SuccessfullyOpened => Interlocked.Read(ref FileId) >= 0;
 
 	public static bool IsCompiledWithThreadSafety()
 	{
@@ -299,29 +301,79 @@ public class H5Reader : IDisposable
 
 	~H5Reader()
 	{
-		if (!_isDisposed && !string.IsNullOrEmpty(_filename))
+		try
 		{
-			_logger.LogWarning("\"{File}\" was not properly disposed.", _filename);
-			Dispose();
+			Dispose(disposing: false);
+		}
+		catch (Exception exception)
+		{
+			// Exceptions must never escape a finalizer and terminate the process.
+			// The HDF5 call itself still reports native diagnostics; guard logging
+			// separately because a configured logger provider can also throw.
+			try
+			{
+				_logger.LogError(exception, "Failed to release HDF5 handle for {File} during finalization.", _filename);
+			}
+			catch
+			{
+				// Finalizers must not propagate failures from either native cleanup or logging.
+			}
 		}
 	}
 
 	public void Dispose()
 	{
-		int close = H5F.close(FileId);
+		try
+		{
+			Dispose(disposing: true);
+		}
+		finally
+		{
+			GC.SuppressFinalize(this);
+		}
+	}
+
+	private void Dispose(bool disposing)
+	{
+		long fileId;
+		lock (_handleLifecycleSync)
+		{
+			if (Interlocked.Exchange(ref _disposeState, 1) != 0)
+			{
+				return;
+			}
+			fileId = Interlocked.Exchange(ref FileId, -1L);
+		}
+
 		if (_trackObjectLifecycle)
 		{
 			lock (_h5ReadersOpened)
 			{
 				_h5ReadersOpened.Remove(this);
 			}
-			_logger.LogTrace("{File} closed with status {Code}. {StackTrace}", Filename, close, Environment.StackTrace);
+		}
+
+		if (fileId < 0)
+		{
+			_logger.LogTrace("No open HDF5 handle remained for {File}.", Filename);
+			return;
+		}
+
+		int close = H5F.close(fileId);
+		if (!disposing)
+		{
+			_logger.LogWarning("\"{File}\" was not properly disposed.", _filename);
+		}
+		if (close < 0)
+		{
+			_logger.LogError("HDF5 file close failed for {File} (ID {FileId}, status {Code}).",
+				Filename, fileId, close);
 		}
 		else
 		{
-			_logger.LogTrace("{File} closed with status {Code}.", Filename, close);
+			string? stackTrace = _trackObjectLifecycle ? Environment.StackTrace : null;
+			_logger.LogTrace("{File} closed with status {Code}. {StackTrace}", Filename, close, stackTrace);
 		}
-		_isDisposed = true;
 	}
 
 	public void SaveAs(string filename)
@@ -3319,17 +3371,27 @@ public class H5Reader : IDisposable
 
 	public bool DebugCheckHandles()
 	{
-		if (H5F.close(FileId) < 0)
+		lock (_handleLifecycleSync)
 		{
-			return false;
+			if (IsDisposed)
+			{
+				return false;
+			}
+
+			long fileId = Interlocked.Exchange(ref FileId, -1L);
+			if (fileId < 0 || H5F.close(fileId) < 0)
+			{
+				return false;
+			}
+			bool result = FileHelpers.IsFileWritable(Filename);
+			uint flags = 0u;
+			long reopenedFileId = H5F.open(Filename, flags, 0L);
+			Interlocked.Exchange(ref FileId, reopenedFileId);
+			if (reopenedFileId < 0)
+			{
+				return false;
+			}
+			return result;
 		}
-		bool result = FileHelpers.IsFileWritable(Filename);
-		uint flags = 0u;
-		FileId = H5F.open(Filename, flags, 0L);
-		if (FileId < 0)
-		{
-			return false;
-		}
-		return result;
 	}
 }

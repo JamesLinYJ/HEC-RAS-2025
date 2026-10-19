@@ -2348,6 +2348,9 @@
 "Subdataset" = "子数据集";
 "Importing Grids…" = "正在导入格网…";
 "Reading Raster Data…" = "正在读取栅格数据…";
+"Grid import" = "格网导入";
+"Reading selected DSS grid records..." = "正在读取所选 DSS 格网记录…";
+"Grid data and boundary edits were saved." = "格网数据和边界修改已保存。";
 "Sampled Range" = "预览采样范围";
 "Preview uses the source raster coordinate system." = "预览使用源栅格坐标系。";
 "Every selected raster band needs a valid timestep." = "每个所选栅格波段都需要有效时间。";
@@ -4422,6 +4425,8 @@
 "Data available" = "数据可用";
 "Choose raster files or drop them here." = "选择栅格文件，或将其拖放到此处。";
 "Drop more raster files here to add them." = "将更多栅格文件拖到此处以添加。";
+"A DSS import uses one source file." = "DSS 导入一次只能使用一个源文件。";
+"No valid frames" = "没有有效的时间帧";
 "File access was not granted." = "未获准访问文件。";
 "The model changed. Close and reopen the grid importer." = "模型已更改。请关闭并重新打开栅格导入器。";
 "Drop files, not folders." = "请拖放文件，不要拖放文件夹。";
@@ -7182,6 +7187,14 @@
 "Copy Cell" = "复制单元格";
 "Copy Cell Selection" = "复制单元格选区";
 "Paste Cells" = "粘贴单元格";
+"Select a current cell or range before pasting." = "粘贴前，请先选择当前单元格或范围。";
+"The clipboard does not contain valid table text." = "剪贴板中不包含有效的表格文本。";
+"The table selection changed. Select a current range and paste again." = "表格选择已变化。请重新选择当前范围后再粘贴。";
+"The pasted range exceeds the available table cells; no cells were changed." = "粘贴范围超出表格可用单元格，未更改单元格。";
+"Pasted %d cell edits." = "已粘贴 %d 项单元格修改。";
+"Skipped %d read-only cells." = "已跳过 %d 个只读单元格。";
+"Skipped %d invalid cells." = "已跳过 %d 个无效单元格。";
+"Kept %d invalid numeric entries as drafts; correct them before saving." = "已将 %d 个无效数值保留为草稿，请在保存前修正。";
 "Select All Cells" = "全选单元格";
 "Drag to resize column" = "拖动以调整列宽";
 "Delete Selected Features" = "删除选中要素";
@@ -7475,6 +7488,7 @@
 "The requested Levee validation property does not match its field." = "请求验证的堤防属性与字段不匹配。";
 "The requested source validation owner is unsupported." = "不支持所请求的源属性验证所有者。";
 "The selected Levee property set no longer exists." = "所选堤防属性集已不存在。";
+"The selected Levee property sets changed. Select them again before applying this value." = "选中的堤防属性集已变化，请重新选择后再应用该值。";
 "The source validation capture is incomplete." = "源属性验证快照不完整。";
 "The source validation capture is missing current table selections." = "源属性验证快照缺少当前表格选择。";
 "The source validation capture is missing current time-window events." = "源属性验证快照缺少当前时间窗口事件。";
@@ -8650,3 +8664,4 @@
 "Mesh Element Result Time Series" = "网格元素结果时间序列";
 "Mesh tools" = "网格工具";
 "No matching Result values are available." = "没有可用的匹配结果值。";
+"The selected file is not a readable HDF5 file." = "所选文件无法作为 HDF5 文件读取。";

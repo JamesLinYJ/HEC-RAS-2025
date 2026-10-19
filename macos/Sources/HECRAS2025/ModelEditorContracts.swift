@@ -182,6 +182,20 @@ private extension SourceEditorField {
                 result.errorValidationPropertyName = "RightGrade"
             default: break
             }
+        } else if scope.hasSuffix("ConceptualMeshArcEditor") {
+            switch id {
+            case "ViewModel_ConstrainStretching":
+                result.mixedBy = "ViewModel_ConstrainStretchingHasMismatch"
+                result.forceSetCommand = GeometryArcForceSetCommand.constrainStretching.rawValue
+            case "ViewModel_LaplaceBC":
+                result.mixedBy = "ViewModel_LaplaceBCHasMismatch"
+                result.forceSetCommand = GeometryArcForceSetCommand.laplaceBC.rawValue
+            case "ViewModel_BiasString":
+                result.mixedBy = "ViewModel_BiasHasMismatch"
+                result.showClearButton = true
+                result.clearCommand = GeometryArcClearCommand.resetBias.rawValue
+            default: break
+            }
         } else if scope.hasSuffix("ConceptualMeshControlPointEditor") {
             switch id {
             case "PatchType":
@@ -526,6 +540,113 @@ enum EditorAction: Sendable {
     case createBoundaryPayload(lineID: String, fields: [String: String])
     case removeBoundaryPayload(lineID: String, payloadID: String)
     case editSpatial(layerID: String, operation: String, itemID: String?)
+    case forceSetLeveeProperty(command: LeveePropertyForceSetCommand, value: String,
+                               rowIDs: Set<String>, identity: LeveeForceSetIdentity)
+}
+
+// These are source command identifiers from LeveeModPropertiesDetailEditor.
+// They intentionally remain protocol values and are never localized.
+enum LeveePropertyForceSetCommand: String, Equatable, Sendable {
+    case mode = "forceSetMode"
+    case modificationType = "forceSetModType"
+
+    var fieldID: String {
+        switch self {
+        case .mode: "Mode"
+        case .modificationType: "ModType"
+        }
+    }
+    var mismatchFieldID: String {
+        switch self {
+        case .mode: "ModeHasMismatch"
+        case .modificationType: "ModTypeHasMismatch"
+        }
+    }
+}
+
+// These are source command/field identities from ConceptualMeshArcEditor.
+// The display labels remain localized separately; the stable IDs are used to
+// route the original multi-selection commands into GeometryTopologySession.
+enum GeometryArcForceSetCommand: String, Equatable, Sendable {
+    case constrainStretching = "forceSetConstrainStretching"
+    case laplaceBC = "forceSetLaplaceBC"
+
+    var sourceFieldID: String {
+        switch self {
+        case .constrainStretching: "ViewModel_ConstrainStretching"
+        case .laplaceBC: "ViewModel_LaplaceBC"
+        }
+    }
+    var mismatchFieldID: String {
+        switch self {
+        case .constrainStretching: "ViewModel_ConstrainStretchingHasMismatch"
+        case .laplaceBC: "ViewModel_LaplaceBCHasMismatch"
+        }
+    }
+    var topologyFieldID: String {
+        switch self {
+        case .constrainStretching: "ConstrainStretching"
+        case .laplaceBC: "LaplaceBC"
+        }
+    }
+    var allowedValues: Set<String> {
+        switch self {
+        case .constrainStretching: ["Default", "Constrained", "Floating"]
+        case .laplaceBC: ["Default", "ZeroFlux", "Dirichlet"]
+        }
+    }
+}
+
+enum GeometryArcClearCommand: String, Sendable {
+    case resetBias = "forceResetBias"
+}
+
+// A ForceSet reply is a draft transformation for one exact selected-property
+// set. Keep the source, draft and selection generations together so an older
+// async response cannot replace a newer selection or session.
+struct LeveeForceSetIdentity: Equatable, Sendable {
+    let editorID: UUID
+    let assetID: String
+    let sourceInputID: String
+    let sourceRevision: String
+    let sourceStateFingerprint: String
+    let loadRevision: Int
+    let editRevision: Int
+    let selectionRevision: Int
+    let command: LeveePropertyForceSetCommand
+    let fieldID: String
+    let value: String
+    let rowIDs: [String]
+}
+
+struct GeometryArcForceSetIdentity: Equatable, Sendable {
+    let editorID: UUID
+    let assetID: String
+    let sourceRevision: String
+    let sourceStateFingerprint: String
+    let loadRevision: Int
+    let editRevision: Int
+    let selectionRevision: Int
+    let command: GeometryArcForceSetCommand
+    let fieldID: String
+    let mismatchFieldID: String
+    let value: String
+    let editorRowIDs: [String]
+    let topologyRowIDs: [String]
+}
+
+struct GeometryArcBiasResetIdentity: Equatable, Sendable {
+    let editorID: UUID
+    let assetID: String
+    let sourceRevision: String
+    let sourceStateFingerprint: String
+    let loadRevision: Int
+    let editRevision: Int
+    let selectionRevision: Int
+    let fieldID: String
+    let mismatchFieldID: String
+    let editorRowIDs: [String]
+    let topologyRowIDs: [String]
 }
 
 @MainActor
@@ -1214,6 +1335,304 @@ final class ModelEditorSession: ObservableObject {
         if asset?.section == .plans, definition?.id == "ViewModel_SelectedPlan_TimeWindowMode" {
             requestProjectContextRefresh()
         }
+    }
+
+    func captureLeveeForceSetIdentity(field: SourceEditorField, value: String) -> LeveeForceSetIdentity? {
+        guard let command = field.forceSetCommand.flatMap(LeveePropertyForceSetCommand.init(rawValue:)),
+              field.id == command.fieldID,
+              field.mixedBy == command.mismatchFieldID,
+              field.hasMixedDraft(in: self),
+              !field.readOnly, field.isReadOnly != true,
+              !readOnlyFieldIDs.contains(field.storageID),
+              let asset, asset.section == .terrains, canEdit, loaded,
+              !isBusy, !loadingSelection, !isSaving, !isPerforming, !isWriteLocked,
+              let sourceRevision,
+              let rowIDs = currentTableSelections[Self.leveePropertyTableID],
+              rowIDs.count > 1, Set(rowIDs).count == rowIDs.count,
+              let selection = tablePresentations[Self.leveePropertyTableID]?.selection,
+              selection.rowIDs == Set(rowIDs),
+              Set(rowIDs).isSubset(of: Set((rows[Self.leveePropertyTableID] ?? []).map(\.id))),
+              let inputID = fields[TerrainEditorContract.sourceField], !inputID.isEmpty,
+              sourceCollections[TerrainEditorContract.sourceField]?.itemDetails[inputID]?.terrainInfo?.type == "Levee"
+        else { return nil }
+
+        let sortedIDs = rowIDs.sorted()
+        let selectionScope = "TerrainSelection/" + sortedIDs.joined(separator: "+")
+        let expectedScope = selectionScope + "/LeveeModPropertiesDetailEditor"
+        let fieldID = expectedScope + "/" + command.fieldID
+        let mismatchID = expectedScope + "/" + command.mismatchFieldID
+        guard field.scope == expectedScope, field.storageID == fieldID,
+              fields[mismatchID]?.lowercased() == "true",
+              choiceOptions[fieldID]?.contains(where: { $0.id == value }) == true else { return nil }
+
+        return LeveeForceSetIdentity(editorID: id, assetID: asset.id, sourceInputID: inputID,
+            sourceRevision: sourceRevision,
+            sourceStateFingerprint: Self.forceSetDraftFingerprint(sourceState),
+            loadRevision: loadRevision, editRevision: editRevision,
+            selectionRevision: selectionRevision, command: command,
+            fieldID: fieldID, value: value, rowIDs: sortedIDs)
+    }
+
+    func isCurrentLeveeForceSetIdentity(_ identity: LeveeForceSetIdentity) -> Bool {
+        guard identity.editorID == id, identity.loadRevision == loadRevision,
+              identity.editRevision == editRevision, identity.selectionRevision == selectionRevision,
+              let asset, asset.id == identity.assetID, sourceRevision == identity.sourceRevision,
+              Self.forceSetDraftFingerprint(sourceState) == identity.sourceStateFingerprint,
+              currentTableSelections[Self.leveePropertyTableID] == identity.rowIDs,
+              fields[TerrainEditorContract.sourceField] == identity.sourceInputID,
+              sourceCollections[TerrainEditorContract.sourceField]?.itemDetails[identity.sourceInputID]?.terrainInfo?.type == "Levee"
+        else { return false }
+        let selectionScope = "TerrainSelection/" + identity.rowIDs.joined(separator: "+")
+        let expectedScope = selectionScope + "/LeveeModPropertiesDetailEditor"
+        return identity.fieldID == expectedScope + "/" + identity.command.fieldID
+            && fields[expectedScope + "/" + identity.command.mismatchFieldID]?.lowercased() == "true"
+            && choiceOptions[identity.fieldID]?.contains(where: { $0.id == identity.value }) == true
+    }
+
+    @discardableResult
+    func forceSetLeveeProperty(_ field: SourceEditorField, value: String) async -> Bool {
+        guard let identity = captureLeveeForceSetIdentity(field: field, value: value) else { return false }
+        return await forceSetLeveeProperty(identity)
+    }
+
+    @discardableResult
+    func forceSetLeveeProperty(_ identity: LeveeForceSetIdentity) async -> Bool {
+        // The UI captures this value synchronously in the selection callback.
+        // Recheck before entering the provider path so a queued Task cannot
+        // retarget a click to a newer selection or draft.
+        guard isCurrentLeveeForceSetIdentity(identity) else { return false }
+        return await perform(.forceSetLeveeProperty(command: identity.command, value: identity.value,
+            rowIDs: Set(identity.rowIDs), identity: identity))
+    }
+
+    func captureGeometryArcForceSetIdentity(field: SourceEditorField,
+                                            value: String) -> GeometryArcForceSetIdentity? {
+        guard let command = field.forceSetCommand.flatMap(GeometryArcForceSetCommand.init(rawValue:)),
+              field.id == command.sourceFieldID,
+              field.mixedBy == command.mismatchFieldID,
+              field.hasMixedDraft(in: self),
+              !field.readOnly, field.isReadOnly != true,
+              !readOnlyFieldIDs.contains(field.storageID),
+              let asset, asset.section == .geometries, canEdit, loaded,
+              !isBusy, !loadingSelection, !isSaving, !isPerforming, !isWriteLocked,
+              let sourceRevision,
+              let selectedRowIDs = currentTableSelections["Arcs"], !selectedRowIDs.isEmpty,
+              Set(selectedRowIDs).count == selectedRowIDs.count,
+              let selection = tablePresentations["Arcs"]?.selection,
+              selection.rowIDs == Set(selectedRowIDs),
+              let detail = selection.detail,
+              detail.schemaIDs.contains("ConceptualMeshArcEditor"),
+              field.scope == detail.scope + "/ConceptualMeshArcEditor",
+              command.allowedValues.contains(value),
+              (choiceOptions[field.storageID] ?? field.choices).contains(where: { $0.id == value }),
+              let topology = geometryTopology,
+              topology.snapshot?.revision == sourceRevision,
+              topology.canEdit, let topologyRows = geometryArcTopologyRowIDs(Set(selectedRowIDs), topology: topology)
+        else { return nil }
+
+        let sortedEditorIDs = selectedRowIDs.sorted()
+        let fieldID = detail.scope + "/ConceptualMeshArcEditor/" + command.sourceFieldID
+        let mismatchFieldID = detail.scope + "/ConceptualMeshArcEditor/" + command.mismatchFieldID
+        return GeometryArcForceSetIdentity(editorID: id, assetID: asset.id,
+            sourceRevision: sourceRevision,
+            sourceStateFingerprint: Self.forceSetDraftFingerprint(sourceState),
+            loadRevision: loadRevision, editRevision: editRevision,
+            selectionRevision: selectionRevision, command: command, fieldID: fieldID,
+            mismatchFieldID: mismatchFieldID, value: value,
+            editorRowIDs: sortedEditorIDs, topologyRowIDs: topologyRows)
+    }
+
+    func isCurrentGeometryArcForceSetIdentity(_ identity: GeometryArcForceSetIdentity,
+                                              childDraftEditAccepted: Bool = false) -> Bool {
+        let expectedEditRevision = identity.editRevision + (childDraftEditAccepted ? 1 : 0)
+        guard identity.editorID == id, identity.loadRevision == loadRevision,
+              editRevision == expectedEditRevision,
+              identity.selectionRevision == selectionRevision,
+              let asset, asset.id == identity.assetID,
+              sourceRevision == identity.sourceRevision,
+              Self.forceSetDraftFingerprint(sourceState) == identity.sourceStateFingerprint,
+              currentTableSelections["Arcs"] == identity.editorRowIDs,
+              tablePresentations["Arcs"]?.selection?.rowIDs == Set(identity.editorRowIDs),
+              let detail = tablePresentations["Arcs"]?.selection?.detail,
+              detail.schemaIDs.contains("ConceptualMeshArcEditor"),
+              identity.fieldID == detail.scope + "/ConceptualMeshArcEditor/" + identity.command.sourceFieldID,
+              identity.mismatchFieldID == detail.scope + "/ConceptualMeshArcEditor/" + identity.command.mismatchFieldID,
+              fields[identity.mismatchFieldID]?.lowercased() == "true",
+              (choiceOptions[identity.fieldID]
+                ?? SourceEditorLibrary.shared.field(storageID: identity.fieldID)?.choices
+                ?? []).contains(where: { $0.id == identity.value }),
+              let topology = geometryTopology,
+              topology.snapshot?.revision == identity.sourceRevision,
+              geometryArcTopologyRowIDs(Set(identity.editorRowIDs), topology: topology) == identity.topologyRowIDs
+        else { return false }
+        return true
+    }
+
+    @discardableResult
+    func forceSetGeometryArcChoice(_ field: SourceEditorField, value: String) async -> Bool {
+        guard let identity = captureGeometryArcForceSetIdentity(field: field, value: value),
+              geometryTopology != nil else {
+            error = L10n.text("The selected Arc rows changed. Select them again before applying this value.")
+            return false
+        }
+        return await forceSetGeometryArcChoice(identity)
+    }
+
+    @discardableResult
+    func forceSetGeometryArcChoice(_ identity: GeometryArcForceSetIdentity) async -> Bool {
+        // This first check is deliberately before any await or child selection
+        // mutation. A stale click must not issue a topology request.
+        guard isCurrentGeometryArcForceSetIdentity(identity),
+              let topology = geometryTopology else { return false }
+        let command = identity.command
+        isPerforming = true
+        error = nil
+        defer { isPerforming = false }
+        await ensureGeometryTopologyLoaded()
+        guard isCurrentGeometryArcForceSetIdentity(identity) else { return false }
+        topology.select(Set(identity.topologyRowIDs), featureKind: "arc")
+        let didApply = await topology.forceSetArcChoice(rowIDs: identity.topologyRowIDs,
+            fieldID: command.topologyFieldID, value: identity.value)
+        guard didApply else {
+            if isCurrentGeometryArcForceSetIdentity(identity) {
+                error = L10n.text(topology.error ?? "The selected Arc rows changed. Select them again before applying this value.")
+            }
+            return false
+        }
+        guard isCurrentGeometryArcForceSetIdentity(identity, childDraftEditAccepted: true) else { return false }
+        fields[identity.fieldID] = identity.value
+        fields[identity.mismatchFieldID] = "false"
+        updateArcRowDisplay(rowIDs: identity.editorRowIDs,
+            fieldID: command.topologyFieldID, value: identity.value)
+        modified = hasGeometryDraftChanges || hasOrdinaryDraftChanges
+        return true
+    }
+
+    func captureGeometryArcBiasResetIdentity(field: SourceEditorField) -> GeometryArcBiasResetIdentity? {
+        guard field.clearCommand == GeometryArcClearCommand.resetBias.rawValue,
+              field.id == "ViewModel_BiasString",
+              field.mixedBy == "ViewModel_BiasHasMismatch",
+              field.hasMixedDraft(in: self), field.showClearButton == true,
+              !field.readOnly, field.isReadOnly != true,
+              !readOnlyFieldIDs.contains(field.storageID),
+              let asset, asset.section == .geometries, canEdit, loaded,
+              !isBusy, !loadingSelection, !isSaving, !isPerforming, !isWriteLocked,
+              let sourceRevision,
+              let selectedRowIDs = currentTableSelections["Arcs"], !selectedRowIDs.isEmpty,
+              Set(selectedRowIDs).count == selectedRowIDs.count,
+              let selection = tablePresentations["Arcs"]?.selection,
+              selection.rowIDs == Set(selectedRowIDs),
+              let detail = selection.detail,
+              detail.schemaIDs.contains("ConceptualMeshArcEditor"),
+              field.scope == detail.scope + "/ConceptualMeshArcEditor",
+              let topology = geometryTopology,
+              topology.snapshot?.revision == sourceRevision,
+              topology.canEdit, let topologyRows = geometryArcTopologyRowIDs(Set(selectedRowIDs), topology: topology)
+        else { return nil }
+
+        let sortedEditorIDs = selectedRowIDs.sorted()
+        return GeometryArcBiasResetIdentity(editorID: id, assetID: asset.id,
+            sourceRevision: sourceRevision,
+            sourceStateFingerprint: Self.forceSetDraftFingerprint(sourceState),
+            loadRevision: loadRevision, editRevision: editRevision,
+            selectionRevision: selectionRevision,
+            fieldID: detail.scope + "/ConceptualMeshArcEditor/ViewModel_BiasString",
+            mismatchFieldID: detail.scope + "/ConceptualMeshArcEditor/ViewModel_BiasHasMismatch",
+            editorRowIDs: sortedEditorIDs, topologyRowIDs: topologyRows)
+    }
+
+    func isCurrentGeometryArcBiasResetIdentity(_ identity: GeometryArcBiasResetIdentity,
+                                                childDraftEditAccepted: Bool = false) -> Bool {
+        let expectedEditRevision = identity.editRevision + (childDraftEditAccepted ? 1 : 0)
+        guard identity.editorID == id, identity.loadRevision == loadRevision,
+              editRevision == expectedEditRevision,
+              identity.selectionRevision == selectionRevision,
+              let asset, asset.id == identity.assetID,
+              sourceRevision == identity.sourceRevision,
+              Self.forceSetDraftFingerprint(sourceState) == identity.sourceStateFingerprint,
+              currentTableSelections["Arcs"] == identity.editorRowIDs,
+              tablePresentations["Arcs"]?.selection?.rowIDs == Set(identity.editorRowIDs),
+              let detail = tablePresentations["Arcs"]?.selection?.detail,
+              detail.schemaIDs.contains("ConceptualMeshArcEditor"),
+              identity.fieldID == detail.scope + "/ConceptualMeshArcEditor/ViewModel_BiasString",
+              fields[identity.mismatchFieldID]?.lowercased() == "true",
+              let topology = geometryTopology,
+              topology.snapshot?.revision == identity.sourceRevision,
+              geometryArcTopologyRowIDs(Set(identity.editorRowIDs), topology: topology) == identity.topologyRowIDs
+        else { return false }
+        return true
+    }
+
+    @discardableResult
+    func resetGeometryArcBias(_ field: SourceEditorField) async -> Bool {
+        guard let identity = captureGeometryArcBiasResetIdentity(field: field),
+              geometryTopology != nil else {
+            error = L10n.text("The selected Arc rows changed. Select them again before applying this value.")
+            return false
+        }
+        return await resetGeometryArcBias(identity)
+    }
+
+    @discardableResult
+    func resetGeometryArcBias(_ identity: GeometryArcBiasResetIdentity) async -> Bool {
+        // Reject before awaiting or touching the child draft if selection or
+        // parent edits changed after the clear click captured its owner.
+        guard isCurrentGeometryArcBiasResetIdentity(identity),
+              let topology = geometryTopology else { return false }
+        isPerforming = true
+        error = nil
+        defer { isPerforming = false }
+        await ensureGeometryTopologyLoaded()
+        guard isCurrentGeometryArcBiasResetIdentity(identity) else { return false }
+        topology.select(Set(identity.topologyRowIDs), featureKind: "arc")
+        let didReset = await topology.forceResetArcBias(rowIDs: identity.topologyRowIDs)
+        guard didReset else {
+            if isCurrentGeometryArcBiasResetIdentity(identity) {
+                error = L10n.text(topology.error ?? "The selected Arc rows changed. Select them again before applying this value.")
+            }
+            return false
+        }
+        guard isCurrentGeometryArcBiasResetIdentity(identity, childDraftEditAccepted: true) else { return false }
+        // ArcEditorVM.ForceResetBias assigns float.NaN; BiasString then
+        // presents the uniform selection as an empty string.
+        fields[identity.fieldID] = ""
+        fields[identity.mismatchFieldID] = "false"
+        updateArcRowDisplay(rowIDs: identity.editorRowIDs, fieldID: "Bias", value: "NaN")
+        modified = hasGeometryDraftChanges || hasOrdinaryDraftChanges
+        return true
+    }
+
+    private func geometryArcTopologyRowIDs(_ editorRowIDs: Set<String>,
+                                           topology: GeometryTopologySession) -> [String]? {
+        guard !editorRowIDs.isEmpty else { return nil }
+        let selectedRows = (rows["Arcs"] ?? []).filter { editorRowIDs.contains($0.id) }
+        guard selectedRows.count == editorRowIDs.count else { return nil }
+        let fids = selectedRows.compactMap { row -> Int? in
+            guard let raw = row.values["FID"] else { return nil }
+            return Int(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        guard fids.count == editorRowIDs.count, Set(fids).count == fids.count else { return nil }
+        let selectedFIDs = Set(fids)
+        let mapped = topology.table(for: "arc").rows.filter { selectedFIDs.contains($0.fid) }
+        guard mapped.count == fids.count, Set(mapped.map(\.fid)) == selectedFIDs,
+              mapped.allSatisfy({ $0.id == "arc:\($0.fid)" }) else { return nil }
+        return mapped.map(\.id)
+    }
+
+    private func updateArcRowDisplay(rowIDs: [String], fieldID: String, value: String) {
+        guard var tableRows = rows["Arcs"] else { return }
+        let selected = Set(rowIDs)
+        for index in tableRows.indices where selected.contains(tableRows[index].id)
+            && tableRows[index].values[fieldID] != nil {
+            tableRows[index].values[fieldID] = value
+        }
+        rows["Arcs"] = tableRows
+    }
+
+    private static let leveePropertyTableID = "LeveeModPropertiesEditor/PropertySets"
+    private static func forceSetDraftFingerprint(_ sourceState: String?) -> String {
+        guard let sourceState else { return "missing" }
+        return SHA256.hash(data: Data(sourceState.utf8)).map { String(format: "%02X", $0) }.joined()
     }
 
     private func sourcePropertyValidationRequest(for field: SourceEditorField,
@@ -1929,6 +2348,7 @@ final class ModelEditorSession: ObservableObject {
         }
         switch action {
         case .addTerrainInput: return await editBoundary(action)
+        case .forceSetLeveeProperty: return await editBoundary(action)
         case .addRow, .copyRows, .removeRows:
             if asset?.section == .terrains { return await editBoundary(action) }
         case .editClassificationGeometry: return await editBoundary(action)
@@ -1994,6 +2414,12 @@ final class ModelEditorSession: ObservableObject {
                   ids.isSubset(of: Set((rows[table] ?? []).map(\.id))) else { return false }
         case .addTerrainInput:
             guard asset.section == .terrains, sourceCollections[TerrainEditorContract.sourceField] != nil else { return false }
+        case .forceSetLeveeProperty(let command, let value, let rowIDs, let identity):
+            guard asset.section == .terrains, canEdit,
+                  !rowIDs.isEmpty, Set(rowIDs).count == rowIDs.count,
+                  Set(rowIDs) == Set(currentTableSelections[Self.leveePropertyTableID] ?? []),
+                  identity.command == command, identity.value == value,
+                  Set(identity.rowIDs) == Set(rowIDs), isCurrentLeveeForceSetIdentity(identity) else { return false }
         case .editClassificationGeometry(let mutation):
             guard let tools = sourceCollections[ClassificationEditorContract.sourceField]?.classificationTools else { return false }
             if mutation.operation == "undo", !tools.canUndo { return false }
@@ -2034,6 +2460,8 @@ final class ModelEditorSession: ObservableObject {
             switch action {
             case .addRow, .copyRows, .removeRows:
                 snapshot = try await provider.editTerrain(asset, action: action, edits: edits)
+            case .forceSetLeveeProperty:
+                snapshot = try await provider.editTerrain(asset, action: action, edits: edits)
             case .addTerrainInput: snapshot = try await provider.editTerrain(asset, action: action, edits: edits)
             case .selectSource(let field, _) where isTerrainSource(field):
                 snapshot = try await provider.editTerrain(asset, action: action, edits: edits)
@@ -2047,6 +2475,8 @@ final class ModelEditorSession: ObservableObject {
             default: snapshot = try await provider.editBoundary(asset, action: action, edits: edits)
             }
             guard loadedRevision == loadRevision, asset == self.asset, revision == editRevision else { return false }
+            if case .forceSetLeveeProperty(_, _, _, let identity) = action,
+               !isCurrentLeveeForceSetIdentity(identity) { return false }
             try Task.checkCancellation()
             try snapshot.validatePresentation()
             guard snapshot.sourceRevision == edits.sourceRevision else { throw ProjectFileError.invalid("The source revision changed during a draft operation.") }

@@ -5,6 +5,31 @@ import Testing
 
 struct MapHoverIdentifyVectorTests {
     @Test @MainActor
+    func sharedActiveLayerAndTreeFocusRemainFirstAndTreeFocusWorksWithoutActivePayload() {
+        let mapID = UUID()
+        let path = URL(fileURLWithPath: "/tmp/overlapping-hover.geojson")
+        let layerA = makeLayer(id: "focused-instance", path: path,
+            mapID: mapID, revision: "A", fid: 7)
+        let layerB = makeLayer(id: "other-instance", path: path,
+            mapID: mapID, revision: "B", fid: 22)
+        let rowA = makeRow(mapID: mapID, ordinal: 0, layer: layerA, nodeName: "Focused")
+        let rowB = makeRow(mapID: mapID, ordinal: 1, layer: layerB, nodeName: "Other")
+        let transform = MapTransform(points: [layerA, layerB].flatMap(\.points),
+            size: CGSize(width: 240, height: 180), scale: 1, offset: .zero)
+        for activeLayerID in [layerA.id, nil] as [String?] {
+            let entries = MapHoverIdentifyVector.entries(
+                at: transform.screen(MapPoint(x: 2, y: 3)), transform: transform,
+                mapID: mapID, records: [rowA, rowB], candidates: [layerA, layerB],
+                selectedLayerID: activeLayerID, selectedContextIdentity: rowA.contextIdentity,
+                vectorStyles: [:])
+            #expect(entries.map(\.value) == ["7", "22"])
+            #expect(MapRenderComposition.hoverPreferredNodeIdentities([rowA, rowB],
+                selectedLayerID: activeLayerID, selectedContextIdentity: rowA.contextIdentity)
+                == [rowA.locator.sourceIdentity])
+        }
+    }
+
+    @Test @MainActor
     func overlappingVisibleRowsReturnEachRendererFIDWithActiveLayerFirst() {
         let mapID = UUID(uuidString: "00000000-0000-0000-0000-000000000041")!
         let sharedPath = URL(fileURLWithPath: "/tmp/shared-source.geojson")

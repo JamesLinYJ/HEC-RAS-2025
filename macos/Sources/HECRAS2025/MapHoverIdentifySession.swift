@@ -26,7 +26,7 @@ final class MapHoverIdentifySession: ObservableObject {
         activeTask?.cancel()
         response = nil
         screenPoint = CGPoint(x: flight.screenX, y: flight.screenY)
-        entries = flight.localEntries
+        entries = Self.orderedEntries(flight.localEntries, flight: flight)
 
         guard currentSourceIdentity() == flight.sourceIdentity else {
             entries = []
@@ -54,11 +54,12 @@ final class MapHoverIdentifySession: ObservableObject {
                 }
                 guard Self.response(result, matches: flight.request) else { return }
                 response = result
-                entries = flight.localEntries + result.entries
+                entries = Self.orderedEntries(flight.localEntries + result.entries, flight: flight)
             } catch {
                 guard generation == requestGeneration else { return }
                 response = nil
-                entries = currentSourceIdentity() == flight.sourceIdentity ? flight.localEntries : []
+                entries = currentSourceIdentity() == flight.sourceIdentity
+                    ? Self.orderedEntries(flight.localEntries, flight: flight) : []
             }
         }
     }
@@ -70,6 +71,16 @@ final class MapHoverIdentifySession: ObservableObject {
         response = nil
         screenPoint = nil
         entries = []
+    }
+
+    private static func orderedEntries(_ entries: [MapHoverIdentifyEntry],
+                                       flight: MapHoverIdentifyFlight) -> [MapHoverIdentifyEntry] {
+        let preferred = flight.preferredNodeIdentities
+        return entries.enumerated().sorted { lhs, rhs in
+            let left = preferred.firstIndex(of: lhs.element.node.sourceIdentity) ?? preferred.count
+            let right = preferred.firstIndex(of: rhs.element.node.sourceIdentity) ?? preferred.count
+            return left == right ? lhs.offset < rhs.offset : left < right
+        }.map(\.element)
     }
 
     private static func response(_ result: MapHoverIdentifyResult,
@@ -107,6 +118,16 @@ final class MapHoverIdentifySession: ObservableObject {
                             && mesh.sourceRevision.caseInsensitiveCompare(entry.sourceRevision ?? "") == .orderedSame
                             && (mesh.resultOwner == nil || mesh.resultOwner?.selectedResultRevision
                                 .caseInsensitiveCompare(entry.sourceRevision ?? "") == .orderedSame)
+                    } == true
+                case "modelVector":
+                    return capture.modelVector.map { source in
+                        source.node == capture.node
+                            && samePath(source.sourcePath, entry.sourcePath ?? "")
+                            && source.sourceRevision.caseInsensitiveCompare(entry.sourceRevision ?? "") == .orderedSame
+                            && entry.elementIndex.map { $0 >= 0 && entry.value == String($0) } == true
+                            && entry.valueType == source.rendererKind.rawValue
+                            && entry.mapType == nil
+                            && entry.profileIndex == nil && entry.meshIndex == nil
                     } == true
                 default:
                     return false

@@ -1533,7 +1533,28 @@
       "source": "visible MapSourceRenderRecord / source resamplers / mesh renderer",
       "target": "MapHoverIdentifySession / MapHoverIdentifyService",
       "cardinality": "project-map-workflow-visible-node-source-revision-draft-profile-selection-pointer-generation",
-      "semantics": "Exact visible vector instances yield their source FID locally; source Result, Terrain, NValue, Classification, continuous or discrete raster and Geometry/Result mesh reads supply real values. NoData remains missing and zero remains valid. Local and backend entries share captured owners; stale responses cannot replace a new pointer or source. The native glass tooltip never receives input."
+      "semantics": "Exact visible vector instances yield their source FID locally; source Result, Terrain, NValue, Classification, continuous or discrete raster and Geometry/Result mesh reads supply real values. NoData remains missing and zero remains valid. Local and backend entries share captured owners; stale responses cannot replace a new pointer or source. The native glass tooltip never receives input. GDB raster captures include the shared directory manifest and exact persisted subdataset connection; source projection conversion and raw sampling occur within the dataset lifetime. Model-vector captures bind their original renderer callback and source feature index to saved Geometry, exact parent draft or accepted Result slot 0; culvert draft SHA and serialized boundary state belong to that capture."
+    },
+    {
+      "id": "source-multiselect-force-set",
+      "source": "SourceField choice / Terrain Levee PropertySets / ConceptualMesh Arc selection",
+      "target": "ModelEditorSession / GeometryTopologySession / exact source ForceSet command",
+      "cardinality": "editor-source-revision-parent-draft-exact-selected-row-and-feature-IDs-edit-selection-generation",
+      "semantics": "An explicit mixed-value choice applies to every captured selected source object even when it equals the first row. Levee Mode/ModType mutate the Terrain parent draft; Arc ConstrainStretching/LaplaceBC mutate the Geometry topology child draft. Resolve table row IDs against the current source; reject changed selections and stale replies. HDF persistence remains in the original parent save transaction. A mixed Arc enum displays Default; explicitly selecting Default must still write every selected Arc. ForceResetBias sets the source float.NaN sentinel for each selected Arc, preserving child undo/redo rather than substituting zero or empty text."
+    },
+    {
+      "id": "culvert-parent-draft-map-presentation",
+      "source": "one ready Geometry editor / GeometryCulvertSession snapshot",
+      "target": "ProjectGeometryMapCanvas / MapHoverModelVectorCapture / shared map reference points",
+      "cardinality": "project-session-map-workflow-exact-source-capture-parent-editor-model-request-source-SHA-child-draft",
+      "semantics": "Draw, highlight, hit-test and hover the same validated parent-draft barrel rows. Prepare an unloaded child through the unique ready parent without saving; ambiguous or stale owners cannot fall back to another source. Result captures retain their saved embedded Geometry. Draft extents belong to ProjectGeometryMapSession.visiblePoints so every overlay and pointer conversion shares MapState.transformPoints. Keep established camera references until an explicit refit, and clear retired source/editor overrides."
+    },
+    {
+      "id": "series-table-clipboard",
+      "source": "native text clipboard / current source-backed time-series table selection",
+      "target": "SeriesTableClipboard planner / ModelEditorSession cell and numeric-input drafts",
+      "cardinality": "project-editor-asset-source-revision-boundary-payload-table-dataset-stable-row-column-order-unit-selection",
+      "semantics": "Use the shared TSV decoder. A scalar fills the selection; multiple cells use relative positions and ragged rows preserve unspecified tails. Reject an out-of-bounds plan before writes, count read-only and invalid choices, and keep invalid numeric text in the existing blocking unit-input draft. Revalidate the captured source and selection before synchronous application; only the parent model save persists HDF changes."
     }
   ],
   "stateScopes": [
@@ -2199,8 +2220,23 @@
     },
     {
       "id": "map-hover-identify",
-      "identity": "map-workflow/source-locators-and-SHAs/result-selections-and-profile/mesh-draft/pointer-generation",
-      "rule": "Cancel or retire old reads on pointer, tool, project, map or source changes. Validate response entries against their exact source captures before merging with local vector hits; preserve explicit no-clear raster sampling semantics."
+      "identity": "map-workflow/source-locators-and-SHAs/GDB-manifest-and-subdataset/result-selections-and-profile/model-and-mesh-draft/pointer-generation",
+      "rule": "Cancel or retire old reads on pointer, tool, project, map or source changes. Validate response entries against their exact source captures before merging with local vector hits; preserve explicit no-clear raster sampling semantics. Model labels and numeric entries must match the same outer node and source revision; nonnegative original model feature indices are distinct from paged display positions."
+    },
+    {
+      "id": "source-multiselect-force-set",
+      "identity": "editor-load/source-SHA/draft/input-revision/selection-revision/exact-row-and-feature-IDs",
+      "rule": "Keep mixed-value placeholder distinct from a concrete first-row value. Explicit force-set carries the complete captured selection and original command identifier. Never install a late result after the editor, source, draft or selected set changes."
+    },
+    {
+      "id": "culvert-parent-draft-map-presentation",
+      "identity": "exact-map-capture/project-session/source-SHA/unique-parent-editor/model-request/child-draft",
+      "rule": "A map task may prepare the one current child, but cannot save it or substitute another owner. Publish draft bounds only into the shared map source session; preserve established camera references and clear retired overrides."
+    },
+    {
+      "id": "series-table-clipboard",
+      "identity": "project-session/editor/asset/source-revision/payload/page/table/dataset/stable-rows-columns/units/selection",
+      "rule": "Clipboard text remains separate until a full plan is validated. Apply synchronously into the same parent draft; invalid numeric input stays visible and blocks saving. A changed source, visible ordering, permission, unit or selection retires the plan."
     }
   ],
   "invariants": [
@@ -2221,7 +2257,10 @@
     "Do not describe sequential save-all or check-then-replace as a global multi-process transaction.",
     "Enable actions from actual provider capabilities; unsupported operations must not report success.",
     "Source extraction, component tests, compilation and real UI/solver acceptance are different evidence.",
-    "Keep platform UI/system services and current process transport outside business entity definitions."
+    "Keep platform UI/system services and current process transport outside business entity definitions.",
+    "Map source rendering and hover captures share the selection-aware workflow identity, including Result context and slot selection; a base map identity cannot substitute for it.",
+    "Context-menu paste retains a range only when the clicked address is an actual selected member; otherwise the clicked cell is the paste anchor.",
+    "HDF handles start and end invalid; only an acquired valid handle may be closed, exactly once across repeated or concurrent disposal. Import metadata requires a successful open."
   ],
   "flows": [
     {

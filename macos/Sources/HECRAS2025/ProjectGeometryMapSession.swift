@@ -32,6 +32,21 @@ struct ProjectGeometryMapFlowAreaGenerationPresentation: Sendable {
     let map: GeometryMeshMapData?
 }
 
+/// A runtime-only Geometry culvert draft extent used by the shared MapState
+/// transform. It is scoped to the exact source capture and HDF revision; it
+/// does not alter the persisted map or move an already established camera.
+struct ProjectGeometryMapCulvertDraftPresentation: Sendable {
+    let identity: String
+    let captureIdentity: String
+    let projectSessionID: UUID
+    let mapID: UUID
+    let mapWorkflowIdentity: String
+    let geometryCanonicalPath: String
+    let geometryRevision: String
+    let extent: GeometryTopologyExtent?
+    let featureCount: Int
+}
+
 struct ProjectGeometryMapSourceState: Identifiable, Sendable {
     let capture: ProjectGeometryMapCapture
     var snapshot: MapGeometrySnapshot?
@@ -48,6 +63,7 @@ struct ProjectGeometryMapSourceState: Identifiable, Sendable {
     var culvertsProgress = ProjectGeometryMapPageProgress()
     var viewportIdentity: String?
     var flowAreaGenerationPresentation: ProjectGeometryMapFlowAreaGenerationPresentation?
+    var culvertDraftPresentation: ProjectGeometryMapCulvertDraftPresentation?
     /// The source FlowAreaLayer tree node that received the terminal
     /// Generate Mesh visibility state. This is a map-local presentation
     /// override; it never changes the saved map tree or its .vis revision.
@@ -100,7 +116,7 @@ struct ProjectGeometryMapSourceState: Identifiable, Sendable {
             count += presentedFlowAreaCells.count
         }
         if snapshot.culvertsState.effectiveVisible && snapshot.culvertsState.status.hasSourceData {
-            count += culvertFeatures.count
+            count += culvertDraftPresentation?.featureCount ?? culvertFeatures.count
         }
         return count
     }
@@ -115,7 +131,11 @@ struct ProjectGeometryMapSourceState: Identifiable, Sendable {
             appendExtent(presentedFlowAreaExtent, to: &result)
         }
         if snapshot.culvertsState.effectiveVisible && snapshot.culvertsState.status.hasSourceData {
-            appendExtent(culvertsExtent, to: &result)
+            if let culvertDraftPresentation {
+                appendExtent(culvertDraftPresentation.extent, to: &result)
+            } else {
+                appendExtent(culvertsExtent, to: &result)
+            }
         }
         return result.filter { $0.x.isFinite && $0.y.isFinite }
     }
@@ -369,6 +389,43 @@ final class ProjectGeometryMapSession: ObservableObject {
         if previousCameraBounds != cameraBoundsIdentity { cameraExtentRevision &+= 1 }
     }
 
+    /// Installs the exact loaded Geometry child draft as a map-local extent.
+    /// Unlike a source extent change, an editor draft must not reset an
+    /// established camera; MapState uses this range after explicit full-fit or
+    /// before it has established reference points.
+    func setCulvertDraftPresentation(
+        _ presentation: ProjectGeometryMapCulvertDraftPresentation?,
+        captureIdentity: String
+    ) {
+        guard let index = sources.firstIndex(where: { $0.capture.identity == captureIdentity }) else { return }
+        var source = sources[index]
+        if let presentation {
+            guard source.capture.resultOwner == nil,
+                  presentation.captureIdentity == source.capture.identity,
+                  presentation.projectSessionID == source.capture.projectSessionID,
+                  presentation.mapID == source.capture.mapID,
+                  presentation.mapWorkflowIdentity == source.capture.mapWorkflowIdentity,
+                  presentation.geometryCanonicalPath == source.capture.geometryCanonicalPath,
+                  source.snapshot?.geometryRevision.caseInsensitiveCompare(presentation.geometryRevision) == .orderedSame,
+                  source.snapshot?.geometryEffectiveVisible == true,
+                  source.snapshot?.culvertsState.effectiveVisible == true,
+                  source.snapshot?.culvertsState.status.hasSourceData == true,
+                  presentation.featureCount >= 0,
+                  presentation.extent.map({ extent in
+                      extent.minX.isFinite && extent.minY.isFinite && extent.maxX.isFinite && extent.maxY.isFinite
+                          && extent.minX <= extent.maxX && extent.minY <= extent.maxY
+                  }) ?? true else { return }
+        }
+        guard source.culvertDraftPresentation?.identity != presentation?.identity else { return }
+        source.culvertDraftPresentation = presentation
+        sources[index] = source
+        if presentation == nil,
+           selection?.id.hasPrefix(captureIdentity + "|culvert|parent-draft|") == true {
+            selection = nil
+        }
+        renderRevision &+= 1
+    }
+
     /// Mirrors the retained source job's terminal IsChecked=true state for
     /// this exact map/Geometry/FlowArea row. It remains local until the user
     /// changes that node or the map workflow/Geometry owner is retired.
@@ -587,6 +644,7 @@ final class ProjectGeometryMapSession: ObservableObject {
             sources[index].topologyExtent = nil
             sources[index].flowAreasExtent = nil
             sources[index].culvertsExtent = nil
+            sources[index].culvertDraftPresentation = nil
         } else {
             sources[index].snapshot = oldSnapshot
         }
@@ -691,6 +749,12 @@ final class ProjectGeometryMapSession: ObservableObject {
         source.viewportIdentity = viewportID
         source.error = nil
         source.snapshot = response
+        if let culvertDraftPresentation = source.culvertDraftPresentation,
+           (response.geometryRevision.caseInsensitiveCompare(culvertDraftPresentation.geometryRevision) != .orderedSame
+            || !response.geometryEffectiveVisible || !response.culvertsState.effectiveVisible
+            || !response.culvertsState.status.hasSourceData) {
+            source.culvertDraftPresentation = nil
+        }
         if let page = response.topology {
             source.topologyExtent = page.sourceExtent
             appendUnique(page.features, to: &source.topologyFeatures, identity: \.id)

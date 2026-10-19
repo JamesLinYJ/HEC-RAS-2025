@@ -4,6 +4,44 @@ import RASWorkspaceCore
 /// each row's already-validated renderer payload. Source captures remain in
 /// owner-session order; this value is only a view of their render order.
 enum MapRenderComposition {
+    /// Promote the focused context before the active payload so a row that
+    /// owns both cannot accidentally demote the active layer to second place.
+    /// Unfocused records retain the caller's renderer traversal order.
+    static func hoverPriorityRecords(_ records: [MapSourceRenderRecord],
+                                     selectedLayerID: String?,
+                                     selectedContextIdentity: String?) -> [MapSourceRenderRecord] {
+        var rows = records
+        if let selectedContextIdentity,
+           let index = rows.firstIndex(where: { $0.contextIdentity == selectedContextIdentity }) {
+            let row = rows.remove(at: index)
+            rows.insert(row, at: 0)
+        }
+        if let selectedLayerID,
+           let index = rows.firstIndex(where: { $0.payloadLayerIDs.contains(selectedLayerID) }) {
+            let row = rows.remove(at: index)
+            rows.insert(row, at: 0)
+        }
+        return rows
+    }
+
+    /// The tooltip merges local vector hits with asynchronous backend values.
+    /// Carry focus across that boundary rather than prioritizing only one half.
+    static func hoverPreferredNodeIdentities(_ records: [MapSourceRenderRecord],
+                                            selectedLayerID: String?,
+                                            selectedContextIdentity: String?) -> [String] {
+        var identities: [String] = []
+        if let selectedLayerID,
+           let row = records.first(where: { $0.payloadLayerIDs.contains(selectedLayerID) }) {
+            identities.append(row.locator.sourceIdentity)
+        }
+        if let selectedContextIdentity,
+           let row = records.first(where: { $0.contextIdentity == selectedContextIdentity }),
+           !identities.contains(row.locator.sourceIdentity) {
+            identities.append(row.locator.sourceIdentity)
+        }
+        return identities
+    }
+
     static func orderedRecords(_ records: [MapSourceRenderRecord]) -> [MapSourceRenderRecord] {
         records.enumerated()
             .filter { $0.element.isActiveAndVisible }

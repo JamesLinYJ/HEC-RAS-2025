@@ -59,6 +59,7 @@ struct TimeSeriesPage: View {
     @State private var selectedCellAnchor: SeriesTableCellAddress?
     @State private var selectedCellExtent: SeriesTableCellAddress?
     @State private var selectedAdditionalCells: Set<SeriesTableCellAddress> = []
+    @State private var tableClipboardNotice: String?
     @StateObject private var tableFilter = TableExpressionFilterSession()
     private var presentation: SeriesEditorPresentation { session.seriesPresentations[page.id] ?? .init() }
     private var displayUnit: DisplayUnitChoice? { presentation.valueUnits.flatMap(session.displayUnit) }
@@ -230,6 +231,7 @@ struct TimeSeriesPage: View {
             selectedCellAnchor = nil
             selectedCellExtent = nil
             selectedAdditionalCells = []
+            tableClipboardNotice = nil
         }
         .onChange(of: chartMode) { _, mode in
             if mode != "Table" { selectedCellAnchor = nil; selectedCellExtent = nil; selectedAdditionalCells = [] }
@@ -350,9 +352,17 @@ struct TimeSeriesPage: View {
                     Spacer(minLength: 0)
                     Button("Copy Selection") { copySelectedTableCells() }
                         .disabled(selectedCopyBounds == nil)
+                    Button("Paste Cells") { pasteTableCells() }
+                        .disabled(selectedCopyBounds == nil || !editable)
                 }
                 Text("Click a cell to select it. Shift-click extends a range; Command-click adds cells.")
                     .font(.caption).foregroundStyle(.secondary)
+                if let tableClipboardNotice {
+                    Text(verbatim: tableClipboardNotice)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
                 if showsTableFilter, hasFilterableTableColumns {
                     TableExpressionFilterBar(session: tableFilter, capture: tableFilterCapture)
                 }
@@ -399,6 +409,8 @@ struct TimeSeriesPage: View {
                     }
                     if sourceTableID != nil {
                         Divider()
+                        Button("Paste Cells") { pasteTableCells() }
+                            .disabled(selectedCopyBounds == nil || !editable)
                         Button("Copy All Values") { copyAllTableValues() }
                     }
                     Divider()
@@ -417,7 +429,7 @@ struct TimeSeriesPage: View {
                     TableColumn(column.localizedTitle) { (row: EditorRow) in
                         if chartOnly { Text(displayValue(row.values[column.id] ?? "", column: column)).textSelection(.enabled) }
                         else {
-                            TableCell(column: column, rowID: row.id, tableID: tableID, session: session, store: store, units: numericUnits(column))
+                            TableCell(column: column, rowID: row.id, tableID: tableID, session: session, store: store, units: numericInputUnits(column))
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 2)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -435,10 +447,18 @@ struct TimeSeriesPage: View {
                                 })
                                 .contextMenu {
                                     Button("Copy Values") { copyTableCell(rowID: row.id, columnID: column.id) }
+                                    if !chartOnly {
+                                        Button("Paste Cells") { pasteTableCells(rowID: row.id, columnID: column.id) }
+                                            .disabled(!editable)
+                                    }
                                 }
                         }
                     }.width(min: 60, ideal: column.width ?? 130)
                 }
+            }
+            .onPasteCommand(of: [.plainText]) { _ in
+                guard !chartOnly, sourceTableID != nil else { return }
+                pasteTableCells()
             }
         } else {
             Table(samples.map { SeriesSampleDisplayRow(sample: $0) }) {
@@ -524,6 +544,103 @@ struct TimeSeriesPage: View {
         }.joined(separator: "\n")
         store.system.copy(text)
     }
+    private func tablePasteTarget(rowID: String? = nil, columnID: String? = nil) -> SeriesTablePasteTarget? {
+        guard let tableID = sourceTableID else { return nil }
+        let rows = visibleSourceTableRows
+        let columns = sourceTableColumns
+        guard !rows.isEmpty, !columns.isEmpty else { return nil }
+        guard (rowID == nil) == (columnID == nil) else { return nil }
+
+        let selectionIdentity = SeriesTablePasteSelectionIdentity(
+            anchor: selectedCellAnchor.flatMap {
+                $0.scope == tableSelectionScope ? NativeDataGridAddress(rowID: $0.rowID, columnID: $0.columnID) : nil
+            },
+            extent: selectedCellExtent.flatMap {
+                $0.scope == tableSelectionScope ? NativeDataGridAddress(rowID: $0.rowID, columnID: $0.columnID) : nil
+            },
+            additionalCells: selectedAdditionalCells
+                .filter { $0.scope == tableSelectionScope }
+                .map { NativeDataGridAddress(rowID: $0.rowID, columnID: $0.columnID) }
+                .sorted {
+                    $0.rowID == $1.rowID ? $0.columnID < $1.columnID : $0.rowID < $1.rowID
+                }
+        )
+        let allColumns = session.tablePresentations[tableID]?.columns ?? []
+        let columnIdentity = allColumns.map { column in
+            SeriesTablePasteColumnIdentity(id: column.id, sourceType: column.sourceType,
+                isReadOnly: column.readOnly == true,
+                choiceIDs: column.choices?.filter { store.isDebugMode || $0.debugOnly != true }.map(\.id) ?? [])
+        }
+        let unitIdentity = columns.compactMap { column -> SeriesTablePasteUnitIdentity? in
+            guard let units = numericInputUnits(column), let selected = session.displayUnit(units) else { return nil }
+            return .init(columnID: column.id, selectionID: units.selectionId, sourceID: units.sourceId,
+                selectedUnitID: selected.id,
+                choices: units.choices.map { .init(id: $0.id, scale: $0.scale, offset: $0.offset) })
+        }
+        let identity = SeriesTablePasteIdentity(
+            scope: tableSelectionScope, projectSessionID: store.projectSessionID,
+            editorSessionID: session.id, modelAssetID: session.modelAssetID,
+            sourceFileRevision: session.sourceFileRevision, payloadIdentity: selectedPayloadIdentity,
+            pageID: page.id, pageScope: page.scopePrefix, tableID: tableID, datasetID: dataset,
+            rowIDs: rows.map(\.id), columnIDs: columns.map(\.id), columns: columnIdentity,
+            units: unitIdentity, selection: selectionIdentity
+        )
+        let contextAddress = rowID.flatMap { rowID in
+            columnID.map { NativeDataGridAddress(rowID: rowID, columnID: $0) }
+        }
+        return SeriesTablePasteTargetResolver.resolve(identity: identity, contextAddress: contextAddress)
+    }
+    private func pasteTableCells(rowID: String? = nil, columnID: String? = nil) {
+        let target = tablePasteTarget(rowID: rowID, columnID: columnID)
+        guard editable, let tableID = sourceTableID, let target else {
+            tableClipboardNotice = L10n.text("Select a current cell or range before pasting.")
+            return
+        }
+        let textType = NSPasteboard.PasteboardType.string.rawValue
+        let clipboard = store.system.readClipboard(types: [textType]).compactMap { item -> String? in
+            guard let data = item.representations[textType] else { return nil }
+            return String(data: data, encoding: .utf8)
+        }.first
+        guard let clipboard else {
+            tableClipboardNotice = L10n.text("The clipboard does not contain valid table text.")
+            return
+        }
+        do {
+            let readOnlyIdentity = target.identity
+            let plan = try SeriesTableClipboardPlanner.plan(text: clipboard, target: target,
+                currentIdentity: readOnlyIdentity)
+            let currentIdentity = tablePasteTarget(rowID: rowID, columnID: columnID)?.identity
+            guard let currentIdentity else { throw SeriesTablePasteError.staleSelection }
+            let unitsByColumn = Dictionary(uniqueKeysWithValues: sourceTableColumns.compactMap { column in
+                numericInputUnits(column).map { (column.id, $0) }
+            })
+            let result = try SeriesTablePasteApplier.apply(plan, currentIdentity: currentIdentity,
+                session: session, columns: session.tablePresentations[tableID]?.columns ?? [],
+                unitsByColumn: unitsByColumn, isDebugMode: store.isDebugMode)
+            var messages = [L10n.format("Pasted %d cell edits.", result.appliedCellCount)]
+            if result.skippedReadOnlyCellCount > 0 {
+                messages.append(L10n.format("Skipped %d read-only cells.", result.skippedReadOnlyCellCount))
+            }
+            if result.failedCellCount > 0 {
+                messages.append(L10n.format("Skipped %d invalid cells.", result.failedCellCount))
+            }
+            if result.invalidNumericDraftCount > 0 {
+                messages.append(L10n.format("Kept %d invalid numeric entries as drafts; correct them before saving.", result.invalidNumericDraftCount))
+            }
+            tableClipboardNotice = messages.joined(separator: " ")
+        } catch let error as SeriesTablePasteError {
+            switch error {
+            case .staleSelection:
+                tableClipboardNotice = L10n.text("The table selection changed. Select a current range and paste again.")
+            case .invalidClipboard:
+                tableClipboardNotice = L10n.text("The clipboard does not contain valid table text.")
+            case .outOfBounds:
+                tableClipboardNotice = L10n.text("The pasted range exceeds the available table cells; no cells were changed.")
+            }
+        } catch {
+            tableClipboardNotice = L10n.text("The table selection changed. Select a current range and paste again.")
+        }
+    }
     private func copyTableCell(rowID: String, columnID: String) {
         guard let row = visibleSourceTableRows.first(where: { $0.id == rowID }),
               let column = sourceTableColumns.first(where: { $0.id == columnID }) else { return }
@@ -579,7 +696,11 @@ struct TimeSeriesPage: View {
         return lhs.localizedStandardCompare(rhs)
     }
     private func numericUnits(_ column: SourceTableColumn) -> DisplayUnitData? {
-        ["double", "float"].contains(column.sourceType) ? presentation.valueUnits : nil
+        ["double", "float"].contains(column.sourceType.lowercased()) ? presentation.valueUnits : nil
+    }
+    private func numericInputUnits(_ column: SourceTableColumn) -> DisplayUnitData? {
+        guard ["double", "float"].contains(column.sourceType.lowercased()), let tableID = sourceTableID else { return nil }
+        return numericUnits(column) ?? SeriesTableClipboardPlanner.identityUnits(tableID: tableID, columnID: column.id)
     }
     private func numericUnit(_ column: SourceTableColumn) -> DisplayUnitChoice? { numericUnits(column).flatMap(session.displayUnit) }
     private func displayValue(_ value: String, column: SourceTableColumn) -> String { numericUnit(column)?.string(value) ?? value }

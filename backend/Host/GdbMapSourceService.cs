@@ -76,8 +76,15 @@ public static class GdbMapSourceService
             !string.Equals(source.Revision, expected, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
 
-        GdbMapLayerDescriptor[] layers = ReadCatalog(source.SourcePath);
         GdbRasterCatalogResult rasters = GdbRasterSourceService.CatalogSubdatasets(source.SourcePath, source);
+        // A valid raster-only OpenFileGDB can expose SUBDATASETS to GDAL while
+        // OGR has no vector handle for its root. Confirm the raster catalog first
+        // so only that explicit case is allowed to have an empty vector catalog.
+        bool hasRasterDataset = rasters.Subdatasets.Any(raster =>
+            (raster.Status is "available" or "unsupported") && raster.Width > 0 && raster.Height > 0 &&
+            !string.IsNullOrWhiteSpace(raster.ConnectionString));
+        GdbMapLayerDescriptor[] layers = ReadCatalog(source.SourcePath,
+            allowMissingVectorHandle: hasRasterDataset);
         VerifySource(source);
         return new(source, layers, rasters.Subdatasets);
     }
@@ -296,27 +303,42 @@ public static class GdbMapSourceService
             pair.First.Length == pair.Second.Length &&
             string.Equals(pair.First.Revision, pair.Second.Revision, StringComparison.OrdinalIgnoreCase));
 
-    private static GdbMapLayerDescriptor[] ReadCatalog(string sourcePath)
+    private static GdbMapLayerDescriptor[] ReadCatalog(string sourcePath, bool allowMissingVectorHandle = false)
     {
-        using var dataset = new VectorDataset(sourcePath);
-        int count = dataset.LayerCount();
+        DataSource? openedDataset = Ogr.OpenShared(sourcePath, 0);
+        if (openedDataset is null)
+        {
+            if (allowMissingVectorHandle) return [];
+            throw new InvalidDataException("OGR could not open the file geodatabase as a vector dataset.");
+        }
+
+        using var dataset = openedDataset;
+        using Driver? driver = dataset.GetDriver();
+        if (driver is null)
+            throw new InvalidDataException("OGR opened the GDB vector source without a dataset driver.");
+        int count = dataset.GetLayerCount();
         if (count is < 0 or > 100_000) throw new InvalidDataException("The GDB dataset returned an invalid layer count.");
         var layers = new List<GdbMapLayerDescriptor>(count);
         var names = new HashSet<string>(StringComparer.Ordinal);
         for (int index = 0; index < count; index++)
         {
-            using VectorLayer layer = dataset.GetLayer(index);
+            using Layer? layer = dataset.GetLayerByIndex(index);
             if (layer is null) throw new InvalidDataException("The GDB dataset returned a missing vector layer.");
             string name = layer.GetName();
             if (string.IsNullOrWhiteSpace(name) || !names.Add(name))
                 throw new InvalidDataException("The GDB dataset returned an empty or duplicate vector layer name.");
-            Geospatial.GDALAssist.VectorType vectorType = layer.GetGeometryType();
+            OSGeo.OGR.wkbGeometryType rawType = layer.GetGeomType();
+            Geospatial.GDALAssist.VectorType vectorType = VectorTypeHelpers.Parse(rawType);
             if (vectorType is Geospatial.GDALAssist.VectorType.None or Geospatial.GDALAssist.VectorType.Unknown)
                 continue;
-            OSGeo.OGR.wkbGeometryType rawType = layer.OgrLayer.GetGeomType();
-            long featureCount = layer.GetFeatureCount();
+            long featureCount = layer.GetFeatureCount(1);
             if (featureCount < 0) throw new InvalidDataException("The GDB layer returned an invalid feature count.");
-            string? projectionWkt = layer.GetProjection()?.GetWKT();
+            using OSGeo.OSR.SpatialReference? projection = layer.GetSpatialRef();
+            string? projectionWkt = projection is null
+                ? null
+                : projection.ExportToWkt(out string projectionText, []) == 0
+                    ? projectionText
+                    : throw new InvalidDataException("The GDB layer projection could not be read.");
             layers.Add(new(name, rawType.ToString(), (int)rawType, vectorType.ToString(), featureCount,
                 string.IsNullOrWhiteSpace(projectionWkt) ? null : projectionWkt));
         }

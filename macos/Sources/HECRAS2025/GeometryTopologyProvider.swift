@@ -123,6 +123,50 @@ struct GeometryTopologyMutation: Codable, Sendable {
     }
 }
 
+enum GeometryTopologyArcChoice: Hashable, Sendable {
+    enum ConstrainStretching: String, Hashable, Sendable {
+        case `default` = "Default"
+        case constrained = "Constrained"
+        case floating = "Floating"
+    }
+
+    enum LaplaceBoundary: String, Hashable, Sendable {
+        case `default` = "Default"
+        case zeroFlux = "ZeroFlux"
+        case dirichlet = "Dirichlet"
+    }
+
+    case constrainStretching(ConstrainStretching)
+    case laplaceBC(LaplaceBoundary)
+
+    var fieldID: String {
+        switch self {
+        case .constrainStretching: "ConstrainStretching"
+        case .laplaceBC: "LaplaceBC"
+        }
+    }
+
+    var value: String {
+        switch self {
+        case .constrainStretching(let value): value.rawValue
+        case .laplaceBC(let value): value.rawValue
+        }
+    }
+
+    init?(fieldID: String, value: String) {
+        switch fieldID {
+        case "ConstrainStretching":
+            guard let choice = ConstrainStretching(rawValue: value) else { return nil }
+            self = .constrainStretching(choice)
+        case "LaplaceBC":
+            guard let choice = LaplaceBoundary(rawValue: value) else { return nil }
+            self = .laplaceBC(choice)
+        default:
+            return nil
+        }
+    }
+}
+
 struct GeometryTopologyField: Codable, Identifiable, Sendable {
     let id: String
     let title: String
@@ -306,9 +350,35 @@ protocol GeometryTopologyProvider {
     func filter(_ request: GeometryTopologyFilterRequest) async throws -> GeometryTopologyFilterSnapshot
     func inspectVectorImport(_ request: GeometryVectorImportInspectRequest) async throws -> GeometryVectorImportInspection
     func applyVectorImport(_ request: GeometryVectorImportApplyRequest) async throws -> GeometryTopologySnapshot
+    func forceSetArcChoice(_ model: GeometryTopologyModelRequest, revision: String, draftState: String,
+                           selectedArcFIDs: [Int], choice: GeometryTopologyArcChoice) async throws -> GeometryTopologySnapshot
+    func forceResetArcBias(_ model: GeometryTopologyModelRequest, revision: String, draftState: String,
+                           selectedArcFIDs: [Int]) async throws -> GeometryTopologySnapshot
 }
 
 extension GeometryTopologyProvider {
+    func forceSetArcChoice(_ model: GeometryTopologyModelRequest, revision: String, draftState: String,
+                           selectedArcFIDs: [Int], choice: GeometryTopologyArcChoice) async throws -> GeometryTopologySnapshot {
+        guard !selectedArcFIDs.isEmpty, Set(selectedArcFIDs).count == selectedArcFIDs.count,
+              selectedArcFIDs.allSatisfy({ $0 >= 0 }) else {
+            throw GeometryTopologyProviderError.invalidArcChoiceRequest
+        }
+        return try await edit(model, revision: revision, draftState: draftState,
+            mutation: GeometryTopologyMutation(operation: "forceSetArcChoice", featureKind: "arc",
+                featureIDs: selectedArcFIDs, fieldID: choice.fieldID, value: choice.value))
+    }
+
+    func forceResetArcBias(_ model: GeometryTopologyModelRequest, revision: String, draftState: String,
+                           selectedArcFIDs: [Int]) async throws -> GeometryTopologySnapshot {
+        guard !selectedArcFIDs.isEmpty, Set(selectedArcFIDs).count == selectedArcFIDs.count,
+              selectedArcFIDs.allSatisfy({ $0 >= 0 }) else {
+            throw GeometryTopologyProviderError.invalidArcChoiceRequest
+        }
+        return try await edit(model, revision: revision, draftState: draftState,
+            mutation: GeometryTopologyMutation(operation: "forceResetArcBias", featureKind: "arc",
+                featureIDs: selectedArcFIDs, fieldID: "Bias"))
+    }
+
     func arcPoints(_ model: GeometryTopologyModelRequest, revision: String, draftState: String,
                    arcFID: Int) async throws -> GeometryTopologyArcPointsSnapshot {
         throw GeometryTopologyProviderError.toolUnavailable
@@ -334,6 +404,7 @@ extension GeometryTopologyProvider {
 
 enum GeometryTopologyProviderError: Error {
     case toolUnavailable
+    case invalidArcChoiceRequest
 }
 
 @MainActor

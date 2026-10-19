@@ -84,8 +84,8 @@ struct DssGridSeriesInfo: Decodable, Identifiable, Equatable, Sendable {
     let sourceUndefinedValue: Float
     let gridIdentity: String
 
-    var timeSummary: String {
-        guard let first = times.first, let last = times.last else { return "No valid frames" }
+    @MainActor var timeSummary: String {
+        guard let first = times.first, let last = times.last else { return L10n.text("No valid frames") }
         return "\(times.count) · \(first) – \(last)"
     }
 }
@@ -188,6 +188,28 @@ struct SpatialGridDatasetView: View {
             if !session.isBusy, presentation.selectedTimeStepID == nil, let step = presentation.timeSteps.first {
                 _ = await session.perform(.selectSpatialTime(layerID: layer.id, stepID: step.id))
             }
+        }
+    }
+}
+
+enum SpatialGridProgressLocalization {
+    @MainActor
+    static func taskName(_ source: String?) -> String {
+        guard let source else { return L10n.text("Importing Grids…") }
+        switch source {
+        case "Grid import": return L10n.text(source)
+        default: return source
+        }
+    }
+
+    @MainActor
+    static func message(_ source: String) -> String {
+        switch source {
+        case "Reading selected DSS grid records...",
+             "Grid data and boundary edits were saved.",
+             "The grid data and boundary model were saved, but the editor could not refresh its snapshot. Reload the boundary model before continuing.":
+            return L10n.text(source)
+        default: return source
         }
     }
 }
@@ -395,7 +417,9 @@ struct SpatialGridImportSheet: View {
                                 Label("Choose raster files or drop them here.", systemImage: "square.and.arrow.down")
                                     .font(.caption).foregroundStyle(.secondary)
                             } else {
-                                Text(dssSources == nil ? "Drop more raster files here to add them." : "A DSS import uses one source file.")
+                                Text(dssSources == nil
+                                    ? L10n.text("Drop more raster files here to add them.")
+                                    : L10n.text("A DSS import uses one source file."))
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Button {
@@ -523,12 +547,17 @@ struct SpatialGridImportSheet: View {
                     if preparing || session.isSaving {
                         VStack(spacing: 5) {
                             if session.isSaving, let fraction = gridProgress?.fraction {
-                                ProgressView(value: fraction) { Text(gridProgress?.taskName ?? "Importing Grids…") }
+                                ProgressView(value: fraction) {
+                                    Text(SpatialGridProgressLocalization.taskName(gridProgress?.taskName))
+                                }
                             } else {
-                                ProgressView(session.isSaving ? (gridProgress?.taskName ?? "Importing Grids…") : "Reading Raster Data…")
+                                ProgressView(session.isSaving
+                                    ? SpatialGridProgressLocalization.taskName(gridProgress?.taskName)
+                                    : L10n.text("Reading Raster Data…"))
                             }
                             if session.isSaving, let message = gridProgress?.message {
-                                Text(message).font(.caption).foregroundStyle(.secondary)
+                                Text(SpatialGridProgressLocalization.message(message))
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
                         }.padding()
                     }

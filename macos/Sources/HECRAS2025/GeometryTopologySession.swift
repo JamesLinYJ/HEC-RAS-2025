@@ -818,6 +818,131 @@ final class GeometryTopologySession: ObservableObject {
             value: patchType, controlPointFeatureIDs: orderedFIDs))
     }
 
+    /// Applies the original Arc choice ForceSet command to the exact current
+    /// Arc selection. The edit is retained in this child draft and reaches the
+    /// source HDF only through the normal parent Geometry save.
+    @discardableResult
+    func forceSetArcChoice(rowIDs: [String], fieldID: String, value: String) async -> Bool {
+        guard let choice = GeometryTopologyArcChoice(fieldID: fieldID, value: value), canMutateTopology,
+              !rowIDs.isEmpty, Set(rowIDs).count == rowIDs.count,
+              Set(rowIDs) == selectedFeatureIDs["arc", default: []],
+              let orderedFIDs = sourceOrderedFeatureIDs(rowIDs, featureKind: "arc"),
+              !orderedFIDs.isEmpty,
+              let capture = toolRequestCapture(),
+              expectedSourceRevision == capture.sourceRevision,
+              toolCaptureIsCurrent(capture) else { return false }
+
+        let selectedRowIDs = Set(rowIDs)
+        let capturedArcRows = table(for: "arc").rows
+        isEditing = true
+        if let snapshot { self.snapshot = replacingCompletion(in: snapshot, with: nil) }
+        clearDiagnosticFocus()
+        error = nil
+        defer {
+            if capture.loadGeneration == loadGeneration && capture.modelGeneration == modelGeneration {
+                isEditing = false
+            }
+        }
+
+        do {
+            let updated = try await provider.forceSetArcChoice(capture.model, revision: capture.sourceRevision,
+                draftState: capture.draftState, selectedArcFIDs: orderedFIDs, choice: choice)
+
+            guard toolCaptureIsCurrent(capture), expectedSourceRevision == capture.sourceRevision,
+                  selectedFeatureIDs["arc", default: []] == selectedRowIDs,
+                  !Task.isCancelled else { return false }
+
+            guard Set(updated.arcs.rows.map(\.id)).count == updated.arcs.rows.count,
+                  Set(updated.arcs.rows.map(\.fid)).count == updated.arcs.rows.count,
+                  updated.arcs.featureKind == "arc",
+                  updated.arcs.rows.count == capturedArcRows.count,
+                  updated.revision == capture.sourceRevision,
+                  zip(capturedArcRows, updated.arcs.rows).allSatisfy({ oldRow, newRow in
+                      var expectedValues = oldRow.values
+                      if selectedRowIDs.contains(oldRow.id) { expectedValues[fieldID] = value }
+                      return oldRow.id == newRow.id && oldRow.fid == newRow.fid
+                          && expectedValues == newRow.values
+                  }),
+                  updated.draftState == capture.draftState
+                    || (updated.isDirty && updated.canUndo) else {
+                error = "The Arc Force Set response does not match the captured selection and draft."
+                return false
+            }
+
+            accept(updated)
+            if updated.draftState != capture.draftState { invalidateToolQueriesAfterDraftChange() }
+            onParentDraftChange(updated.isDirty)
+            return true
+        } catch {
+            guard toolCaptureIsCurrent(capture), selectedFeatureIDs["arc", default: []] == selectedRowIDs,
+                  !Task.isCancelled else { return false }
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Mirrors the original Arc Bias Clear command, which assigns NaN to every
+    /// selected Bias field. It is an ordinary undoable child-draft mutation;
+    /// parent Geometry save remains the only source HDF write boundary.
+    @discardableResult
+    func forceResetArcBias(rowIDs: [String]) async -> Bool {
+        guard canMutateTopology, !rowIDs.isEmpty, Set(rowIDs).count == rowIDs.count,
+              Set(rowIDs) == selectedFeatureIDs["arc", default: []],
+              let orderedFIDs = sourceOrderedFeatureIDs(rowIDs, featureKind: "arc"),
+              !orderedFIDs.isEmpty,
+              let capture = toolRequestCapture(),
+              expectedSourceRevision == capture.sourceRevision,
+              toolCaptureIsCurrent(capture) else { return false }
+
+        let selectedRowIDs = Set(rowIDs)
+        let capturedArcRows = table(for: "arc").rows
+        isEditing = true
+        if let snapshot { self.snapshot = replacingCompletion(in: snapshot, with: nil) }
+        clearDiagnosticFocus()
+        error = nil
+        defer {
+            if capture.loadGeneration == loadGeneration && capture.modelGeneration == modelGeneration {
+                isEditing = false
+            }
+        }
+
+        do {
+            let updated = try await provider.forceResetArcBias(capture.model, revision: capture.sourceRevision,
+                draftState: capture.draftState, selectedArcFIDs: orderedFIDs)
+
+            guard toolCaptureIsCurrent(capture), expectedSourceRevision == capture.sourceRevision,
+                  selectedFeatureIDs["arc", default: []] == selectedRowIDs,
+                  !Task.isCancelled else { return false }
+
+            guard Set(updated.arcs.rows.map(\.id)).count == updated.arcs.rows.count,
+                  Set(updated.arcs.rows.map(\.fid)).count == updated.arcs.rows.count,
+                  updated.arcs.featureKind == "arc",
+                  updated.arcs.rows.count == capturedArcRows.count,
+                  updated.revision == capture.sourceRevision,
+                  zip(capturedArcRows, updated.arcs.rows).allSatisfy({ oldRow, newRow in
+                      var expectedValues = oldRow.values
+                      if selectedRowIDs.contains(oldRow.id) { expectedValues["Bias"] = "NaN" }
+                      return oldRow.id == newRow.id && oldRow.fid == newRow.fid
+                          && expectedValues == newRow.values
+                  }),
+                  updated.draftState == capture.draftState
+                    || (updated.isDirty && updated.canUndo) else {
+                error = "The Arc Bias clear response does not match the captured selection and draft."
+                return false
+            }
+
+            accept(updated)
+            if updated.draftState != capture.draftState { invalidateToolQueriesAfterDraftChange() }
+            onParentDraftChange(updated.isDirty)
+            return true
+        } catch {
+            guard toolCaptureIsCurrent(capture), selectedFeatureIDs["arc", default: []] == selectedRowIDs,
+                  !Task.isCancelled else { return false }
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
     /// SourceField clear-command adapter for the six conceptual-mesh inputs.
     /// Stable row identities are resolved in the current source-table order;
     /// empty, duplicate, stale, and single-row selections cannot issue a

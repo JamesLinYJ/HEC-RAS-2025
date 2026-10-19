@@ -6,7 +6,15 @@ public sealed record GeometryTopologyLoadRequest(GeometryTopologyModelRequest Mo
 public sealed record GeometryTopologyEditRequest(GeometryTopologyModelRequest Model, string Revision, string DraftState, GeometryTopologyMutation Mutation);
 public sealed record GeometryTopologySaveRequest(GeometryTopologyModelRequest Model, string Revision, string DraftState);
 
-/// <summary>A validated source mutation retained as part of an unsaved topology draft.</summary>
+/// <summary>
+/// A validated source mutation retained as part of an unsaved topology draft.
+/// Arc choice Force Set uses operation <c>forceSetArcChoice</c>, feature kind
+/// <c>arc</c>, exact selected source FIDs in <see cref="FeatureIDs"/>, and
+/// <see cref="FieldID"/>/<see cref="Value"/> for either ConstrainStretching
+/// or LaplaceBC. Arc Bias Clear uses <c>forceResetArcBias</c> with exact FIDs
+/// and field <c>Bias</c>; its source value is NaN, matching the retained UI.
+/// Both operations remain draft mutations until the parent geometry save.
+/// </summary>
 public sealed record GeometryTopologyMutation(string Operation, string FeatureKind, int[] FeatureIDs,
     string? FieldID = null, string? Value = null, string? TagName = null, string? TagType = null, string? TagValue = null)
 {

@@ -17,4 +17,8 @@
     <ProjectReference Include="../Source/Geospatial.Rendering/Geospatial.Rendering.csproj" />
     <ProjectReference Include="../Source/Visual.Observables/Visual.Observables.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Fixtures/FileGDB/gdal_test_data.gdb.zip"
+                      LogicalName="Ras.Backend.Tests.Fixtures.GdalFileGDB.gdal_test_data.gdb.zip" />
+  </ItemGroup>
 </Project>

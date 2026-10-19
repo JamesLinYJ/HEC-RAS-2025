@@ -10,6 +10,76 @@ private final class HoverIdentifySourceIdentity {
 
 struct MapHoverIdentifySessionTests {
     @Test @MainActor
+    func modelVectorReplyAcceptsItsOriginalRendererAndRejectsAnotherModelKind() async {
+        for invalid in [false, true] {
+            let provider = DeferredMapHoverIdentifyProvider()
+            let session = MapHoverIdentifySession(provider: provider, debounceNanoseconds: 0)
+            let base = makeFlight(requestID: "model-\(invalid)", sourceIdentity: "model-owner",
+                worldX: 1, screenX: 10, localFID: "14")
+            let node = CatalogTreeNodeLocator(rootName: "Geometries", nodeType: "CulvertBarrelLayer",
+                nodeName: "Culverts", nodePath: [0, 2])
+            let source = MapHoverModelVectorCapture(node: node, rendererKind: .culvertBarrel,
+                sourcePath: "/tmp/hover-geometry.hdf", sourceRevision: String(repeating: "C", count: 64),
+                ownerMode: .savedSource, geometryNode: nil, geometryContextToken: "geometry-context",
+                planNodes: [], resultOwner: nil, model: nil, culvertDraftState: nil,
+                culvertDraftSHA256: nil, boundarySourceState: nil, boundaryContextToken: nil,
+                boundaryLines: nil)
+            let old = base.request
+            let request = MapHoverIdentifyRequest(map: old.map, contextToken: old.contextToken,
+                selectionOverrides: old.selectionOverrides, requestID: old.requestID,
+                point: old.point, probePoint: old.probePoint,
+                worldUnitsPerScreenPoint: old.worldUnitsPerScreenPoint,
+                profileSelections: [], layers: [MapHoverLayerCapture(node: node,
+                    kind: "modelVector", modelVector: source)])
+            let flight = MapHoverIdentifyFlight(request: request, sourceIdentity: base.sourceIdentity,
+                screenX: base.screenX, screenY: base.screenY, localEntries: [])
+            session.update(flight) { "model-owner" }
+            await waitForRequest(request.requestID, from: provider)
+            let reply = MapHoverIdentifyResult(requestID: request.requestID,
+                projectPath: request.map.projectPath, projectRevision: "project-revision",
+                projectXmlSHA: request.map.projectXmlSHA,
+                visualizationRevision: request.map.expectedVisualizationRevision,
+                mapID: request.map.mapID, mapIndex: request.map.mapIndex,
+                mapName: request.map.mapName, mapType: request.map.mapType,
+                contextToken: request.contextToken, point: request.point,
+                entries: [MapHoverIdentifyEntry(node: node, kind: "modelVector", label: "Culvert A",
+                    value: "7", valueType: invalid ? "boundaryConditionLine" : "culvertBarrel",
+                    sourcePath: source.sourcePath, sourceRevision: source.sourceRevision,
+                    mapType: nil, profileIndex: nil, meshIndex: nil, elementIndex: 7)])
+            provider.complete(request.requestID, with: reply)
+            for _ in 0..<100 where !provider.hasReturned(request.requestID) {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+            await Task.yield()
+            #expect(provider.hasReturned(request.requestID))
+            #expect((session.response != nil) == !invalid)
+            #expect(session.entries.count == (invalid ? 0 : 1))
+            session.cancel()
+        }
+    }
+
+    @Test @MainActor
+    func activeBackendRasterRemainsBeforeLocalVectorHitsAfterAsyncMerge() async {
+        let provider = DeferredMapHoverIdentifyProvider()
+        let session = MapHoverIdentifySession(provider: provider, debounceNanoseconds: 0)
+        var flight = makeFlight(requestID: "active-raster", sourceIdentity: "same-owner",
+            worldX: 1, screenX: 10, localFID: "14")
+        flight.preferredNodeIdentities = [flight.request.layers[0].node.sourceIdentity]
+        session.update(flight) { "same-owner" }
+        await waitForRequest("active-raster", from: provider)
+        #expect(session.entries.map(\.value) == ["14"])
+
+        provider.complete("active-raster", with: makeResponse(for: flight.request, value: "107"))
+        for _ in 0..<100 where session.response == nil {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        #expect(session.response?.requestID == "active-raster")
+        #expect(session.entries.map(\.value) == ["107", "14"])
+        #expect(session.entries.first?.kind == "raster")
+        session.cancel()
+    }
+
+    @Test @MainActor
     func lateSourceReplyCannotReplaceTheCurrentCursorIdentify() async {
         let provider = DeferredMapHoverIdentifyProvider()
         let session = MapHoverIdentifySession(provider: provider, debounceNanoseconds: 0)
@@ -98,14 +168,18 @@ struct MapHoverIdentifySessionTests {
 @MainActor
 private final class DeferredMapHoverIdentifyProvider: MapHoverIdentifyProviding {
     private var continuations: [String: CheckedContinuation<MapHoverIdentifyResult, Error>] = [:]
+    private var returned: Set<String> = []
 
     func identify(_ request: MapHoverIdentifyRequest) async throws -> MapHoverIdentifyResult {
-        try await withCheckedThrowingContinuation { continuation in
+        let result: MapHoverIdentifyResult = try await withCheckedThrowingContinuation { continuation in
             continuations[request.requestID] = continuation
         }
+        returned.insert(request.requestID)
+        return result
     }
 
     func hasRequest(_ id: String) -> Bool { continuations[id] != nil }
+    func hasReturned(_ id: String) -> Bool { returned.contains(id) }
 
     func complete(_ id: String, with response: MapHoverIdentifyResult) {
         continuations.removeValue(forKey: id)?.resume(returning: response)

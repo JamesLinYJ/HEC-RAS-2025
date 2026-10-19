@@ -227,6 +227,89 @@ internal static class TerrainEditorTableChecks
         await Reject(() => ModelEditorAdapter.TransformTerrainAsync(new(Request(snapshot, asset, projectPath, Fields(leveeID), nonFiniteRows,
             new() { [LeveeFeatures] = [leveeFeatureID] }, new() { [LeveeProfile()] = [new(station.Id, "Elevation")] }), "reorder", From: 0, To: 0)));
 
+        ModelRow firstSelectedProperty = TerrainRows(snapshot)[LeveeProperties].Single();
+        string firstSelectedPropertyName = firstSelectedProperty.Values["Name"];
+        string firstSelectedPropertyID = firstSelectedProperty.Id;
+        snapshot = await ModelEditorAdapter.TransformTerrainAsync(new(Request(snapshot, asset, projectPath, Fields(leveeID)),
+            "addRow", TableId: LeveeProperties));
+        string secondSelectedPropertyID = TerrainRows(snapshot)[LeveeProperties]
+            .Single(row => row.Id != firstSelectedPropertyID).Id;
+        string secondSelectedScope = Scope([secondSelectedPropertyID], "LeveeModPropertiesDetailEditor");
+        snapshot = await ModelEditorAdapter.TransformTerrainAsync(new(Request(snapshot, asset, projectPath,
+            new(StringComparer.Ordinal)
+            {
+                [Source] = leveeID,
+                [secondSelectedScope + "/Name"] = "ForceSet peer",
+                [secondSelectedScope + "/Mode"] = "SimpleCut",
+                [secondSelectedScope + "/ModType"] = "TakeHigher"
+            }, tableSelections: new() { [LeveeProperties] = [secondSelectedPropertyID] }),
+            "reorder", From: 0, To: 0));
+        // Earlier checks intentionally left the surviving property at
+        // SimpleCut. Set it back to SimpleFill so this fixture proves that
+        // choosing the first selected row's current value still ForceSets
+        // every selected property.
+        string currentFirstPropertyID = TerrainRows(snapshot)[LeveeProperties]
+            .Single(row => row.Values["Name"] == firstSelectedPropertyName).Id;
+        string currentFirstPropertyScope = Scope([currentFirstPropertyID], "LeveeModPropertiesDetailEditor");
+        snapshot = await ModelEditorAdapter.TransformTerrainAsync(new(Request(snapshot, asset, projectPath,
+            new(StringComparer.Ordinal)
+            {
+                [Source] = leveeID,
+                [currentFirstPropertyScope + "/Mode"] = "SimpleFill"
+            }, tableSelections: new() { [LeveeProperties] = [currentFirstPropertyID] }),
+            "reorder", From: 0, To: 0));
+        // Property row IDs are content identities and include the property
+        // and mutable fields. Recompute both exact IDs after rename/Mode edit.
+        string[] forceSetPropertyIDs =
+        [
+            TerrainRows(snapshot)[LeveeProperties].Single(row => row.Values["Name"] == firstSelectedPropertyName).Id,
+            TerrainRows(snapshot)[LeveeProperties].Single(row => row.Values["Name"] == "ForceSet peer").Id
+        ];
+        snapshot = await Select(snapshot, asset, projectPath, leveeID, LeveeProperties, forceSetPropertyIDs);
+        ModelRow[] mixedForceSetRows = TerrainRows(snapshot)[LeveeProperties];
+        string currentFirstMode = mixedForceSetRows.Single(row => row.Values["Name"] == firstSelectedPropertyName).Values["Mode"];
+        string currentPeerMode = mixedForceSetRows.Single(row => row.Values["Name"] == "ForceSet peer").Values["Mode"];
+        string aggregateModeField = Scope(forceSetPropertyIDs, "LeveeModPropertiesDetailEditor/Mode");
+        string aggregateMismatchField = Scope(forceSetPropertyIDs, "LeveeModPropertiesDetailEditor/ModeHasMismatch");
+        string aggregateMode = snapshot.Fields.TryGetValue(aggregateModeField, out var modeValue) ? modeValue : "<missing>";
+        string aggregateMismatch = snapshot.Fields.TryGetValue(aggregateMismatchField, out var mismatchValue) ? mismatchValue : "<missing>";
+        Check(currentFirstMode == "SimpleFill"
+            && currentPeerMode == "SimpleCut"
+            && aggregateMode == ""
+            && aggregateMismatch == "true",
+            $"The mixed Mode fixture must capture two distinct values before ForceSet; actual first='{currentFirstMode}', peer='{currentPeerMode}', aggregate='{aggregateMode}', mismatch='{aggregateMismatch}'.");
+        byte[] sourceBeforeLeveeForceSet = File.ReadAllBytes(asset);
+        snapshot = await ModelEditorAdapter.TransformTerrainAsync(new(Request(snapshot, asset, projectPath, Fields(leveeID),
+            tableSelections: new() { [LeveeProperties] = forceSetPropertyIDs }), "forceSetLeveeProperty",
+            TableId: LeveeProperties,
+            LeveeForceSet: new("forceSetMode", "SimpleFill", forceSetPropertyIDs)));
+        forceSetPropertyIDs =
+        [
+            TerrainRows(snapshot)[LeveeProperties].Single(row => row.Values["Name"] == firstSelectedPropertyName).Id,
+            TerrainRows(snapshot)[LeveeProperties].Single(row => row.Values["Name"] == "ForceSet peer").Id
+        ];
+        Check(TerrainRows(snapshot)[LeveeProperties].All(row => row.Values["Mode"] == "SimpleFill")
+            && snapshot.Fields[Scope(forceSetPropertyIDs, "LeveeModPropertiesDetailEditor/ModeHasMismatch")] == "false",
+            "forceSetMode applies to every exact selected property set even when the chosen value equals the first row.");
+        Check(File.ReadAllBytes(asset).SequenceEqual(sourceBeforeLeveeForceSet),
+            "Levee ForceSet updates only the parent source draft and does not write the source HDF.");
+        snapshot = await ModelEditorAdapter.TransformTerrainAsync(new(Request(snapshot, asset, projectPath, Fields(leveeID),
+            tableSelections: new() { [LeveeProperties] = forceSetPropertyIDs }), "forceSetLeveeProperty",
+            TableId: LeveeProperties,
+            LeveeForceSet: new("forceSetModType", "SetValue", forceSetPropertyIDs)));
+        forceSetPropertyIDs =
+        [
+            TerrainRows(snapshot)[LeveeProperties].Single(row => row.Values["Name"] == firstSelectedPropertyName).Id,
+            TerrainRows(snapshot)[LeveeProperties].Single(row => row.Values["Name"] == "ForceSet peer").Id
+        ];
+        Check(TerrainRows(snapshot)[LeveeProperties].All(row => row.Values["Mode"] == "SimpleFill")
+            && snapshot.Fields[Scope(forceSetPropertyIDs, "LeveeModPropertiesDetailEditor/ModTypeHasMismatch")] == "false",
+            "forceSetModType applies to every exact selected property set and clears its derived mixed state.");
+        await Reject(() => ModelEditorAdapter.TransformTerrainAsync(new(Request(snapshot, asset, projectPath, Fields(leveeID),
+            tableSelections: new() { [LeveeProperties] = forceSetPropertyIDs }), "forceSetLeveeProperty",
+            TableId: LeveeProperties,
+            LeveeForceSet: new("forceSetMode", "SimpleCut", [forceSetPropertyIDs[0]]))));
+
         snapshot = await ModelEditorAdapter.SaveAsync(Request(snapshot, asset, projectPath, Fields(leveeID)));
         using (Terrain reopened = new(asset))
         {
@@ -238,9 +321,13 @@ internal static class TerrainEditorTableChecks
                 && double.IsNaN(savedChannel.Features.Single().Line.GetZBufferUnsafe().Span[0])
                 && double.IsNaN(savedChannel.Features.Single().Line.GetMBufferUnsafe().Span[1]),
                 "Channel feature/name/profile and line Z/M dimensions persist through structural RPCs and HDF save.");
-            LeveeModProperties savedProperties = savedLevee.PropertiesTable.Features.Single();
-            Check(savedProperties.Name == "Mixed detail" && savedProperties.TopWidth == 45
-                && double.IsNaN(savedProperties.RightWidth) && double.IsNaN(savedProperties.RightGrade)
+            LeveeModProperties[] savedProperties = savedLevee.PropertiesTable.Features.ToArray();
+            LeveeModProperties originalProperty = savedProperties.Single(property => property.Name == "Mixed detail");
+            Check(savedProperties.Length == 2 && originalProperty.Mode == LeveeMode.SimpleFill
+                && originalProperty.TopWidth == 45 && double.IsNaN(originalProperty.RightWidth)
+                && double.IsNaN(originalProperty.RightGrade)
+                && savedProperties.Single(property => property.Name == "ForceSet peer").Mode == LeveeMode.SimpleFill
+                && savedProperties.All(property => property.ModType == Geospatial.Rasters.RasterModType.SetValue)
                 && double.IsNaN(savedLevee.Features.Single().Profile.Elevations[1])
                 && savedLevee.Features.Single().Name == "Feature via table"
                 && savedLevee.Features.Single().Profile.Stations[0] == 1.5

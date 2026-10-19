@@ -163,6 +163,16 @@ struct ProjectGeometryMapCanvas: View {
         }
     }
 
+    private struct CulvertMapPresentation {
+        let features: [GeometryCulvertFeatureRow]
+        let identity: String
+        let draftExtent: GeometryTopologyExtent?
+        /// Selection belongs either to the saved feature set or to the active
+        /// parent draft. Keeping that scope in the selection ID prevents a
+        /// stale saved/result selection from highlighting an editor draft.
+        let selectionOwner: String
+    }
+
     /// Resolve only the exact parent Geometry row. Captures and page state
     /// remain in source order; the lookup controls canvas paint order only.
     private var sourcesInPaintOrder: [ProjectGeometryMapSourceState] {
@@ -207,6 +217,79 @@ struct ProjectGeometryMapCanvas: View {
         return staleSources.isEmpty ? nil : staleSources.joined(separator: "\n")
     }
 
+    private func culvertMapLayerIsVisible(for source: ProjectGeometryMapSourceState) -> Bool {
+        guard let snapshot = source.snapshot else { return false }
+        return snapshot.geometryEffectiveVisible
+            && snapshot.culvertsState.effectiveVisible
+            && snapshot.culvertsState.status.hasSourceData
+    }
+
+    private func culvertMapModel(for source: ProjectGeometryMapSourceState) -> GeometryCulvertModelRequest? {
+        guard source.capture.resultOwner == nil else { return nil }
+        return GeometryCulvertModelRequest(assetPath: source.capture.geometryCanonicalPath,
+            kind: "Geometry", projectPath: source.capture.map.projectPath,
+            projectXml: source.capture.map.projectXml,
+            coreLayerContext: source.capture.map.coreLayerContext)
+    }
+
+    /// Owner and child readiness form the retry key for the map's one-shot
+    /// child preparation. Body evaluation itself remains free of I/O.
+    private var culvertMapPreparationIdentity: String {
+        session.sources.compactMap { source -> String? in
+            guard culvertMapLayerIsVisible(for: source),
+                  let model = culvertMapModel(for: source),
+                  let revision = source.geometryRevision else { return nil }
+            return store.geometryCulvertMapHoverPreparationIdentity(
+                assetID: source.capture.geometryCanonicalPath,
+                projectSessionID: source.capture.projectSessionID,
+                expectedRevision: revision, model: model)
+        }.joined(separator: "\n")
+    }
+
+    private var culvertDraftPresentationUpdateIdentity: String {
+        session.sources.map { source in
+            source.capture.identity + "=" + (culvertMapPresentation(for: source).flatMap {
+                $0.selectionOwner == "parent-draft" ? $0.identity : nil
+            } ?? "no-parent-draft")
+        }.joined(separator: "\n")
+    }
+
+    private func culvertDraftExtent(_ features: [GeometryCulvertFeatureRow]) -> GeometryTopologyExtent? {
+        let points = features.flatMap(\.polyline).filter { $0.x.isFinite && $0.y.isFinite }
+        guard let minX = points.map(\.x).min(), let minY = points.map(\.y).min(),
+              let maxX = points.map(\.x).max(), let maxY = points.map(\.y).max() else { return nil }
+        return GeometryTopologyExtent(minX: minX, minY: minY, maxX: maxX, maxY: maxY)
+    }
+
+    private func installCulvertDraftPresentations() {
+        for source in session.sources {
+            let draft = culvertMapPresentation(for: source).flatMap { presentation -> ProjectGeometryMapCulvertDraftPresentation? in
+                guard presentation.selectionOwner == "parent-draft",
+                      let sourceRevision = source.geometryRevision else { return nil }
+                return ProjectGeometryMapCulvertDraftPresentation(
+                    identity: presentation.identity, captureIdentity: source.capture.identity,
+                    projectSessionID: source.capture.projectSessionID, mapID: source.capture.mapID,
+                    mapWorkflowIdentity: source.capture.mapWorkflowIdentity,
+                    geometryCanonicalPath: source.capture.geometryCanonicalPath,
+                    geometryRevision: sourceRevision, extent: presentation.draftExtent,
+                    featureCount: presentation.features.count)
+            }
+            session.setCulvertDraftPresentation(draft, captureIdentity: source.capture.identity)
+        }
+    }
+
+    private func prepareVisibleCulvertMaps() async {
+        for source in session.sources {
+            guard !Task.isCancelled, culvertMapLayerIsVisible(for: source),
+                  let model = culvertMapModel(for: source),
+                  let revision = source.geometryRevision else { continue }
+            _ = await store.prepareGeometryCulvertMapHoverSnapshot(
+                assetID: source.capture.geometryCanonicalPath,
+                projectSessionID: source.capture.projectSessionID,
+                expectedRevision: revision, model: model)
+        }
+    }
+
     private func flowAreaGenerationPresentation(for source: ProjectGeometryMapSourceState)
         -> ProjectGeometryMapFlowAreaGenerationPresentation? {
         guard let snapshot = source.snapshot,
@@ -215,6 +298,7 @@ struct ProjectGeometryMapCanvas: View {
               let currentRevision = mesh.geometryMapOverlaySourceRevision(for: source.capture.geometryCanonicalPath) else {
             return nil
         }
+
         let captureID = source.capture.identity
         if mesh.isGeneratingMesh,
            mesh.meshGenerationSourceRevision == snapshot.geometryRevision,
@@ -253,6 +337,54 @@ struct ProjectGeometryMapCanvas: View {
                 + "|" + meshSnapshot.draftState
                 + "|" + rowIdentity + "|" + extentIdentity + "|" + mapIdentity,
             phase: .childDraft, map: meshSnapshot.map)
+    }
+
+    /// Uses the one exact Geometry editor's dirty culvert child for every map
+    /// interaction. An ambiguous or not-yet-ready editor hides this layer
+    /// rather than quietly painting saved geometry under a draft owner. Result
+    /// maps always retain their embedded, saved geometry.
+    private func culvertMapPresentation(for source: ProjectGeometryMapSourceState)
+        -> CulvertMapPresentation? {
+        guard culvertMapLayerIsVisible(for: source) else { return nil }
+        if source.capture.resultOwner != nil {
+            return CulvertMapPresentation(features: source.culvertFeatures,
+                identity: source.capture.identity + "|saved|result",
+                draftExtent: nil, selectionOwner: "saved")
+        }
+
+        let assetID = source.capture.geometryCanonicalPath
+        let editorCount = store.geometryMeshEditorCount(for: assetID)
+        guard editorCount <= 1 else { return nil }
+        guard editorCount == 1 else {
+            return CulvertMapPresentation(features: source.culvertFeatures,
+                identity: source.capture.identity + "|saved|source",
+                draftExtent: nil, selectionOwner: "saved")
+        }
+        guard let revision = source.geometryRevision else { return nil }
+        guard let model = culvertMapModel(for: source) else { return nil }
+        guard let snapshot = store.geometryCulvertMapHoverSnapshot(
+            assetID: assetID, projectSessionID: source.capture.projectSessionID,
+            expectedRevision: revision, model: model) else { return nil }
+        guard snapshot.isDirty else {
+            return CulvertMapPresentation(features: source.culvertFeatures,
+                identity: source.capture.identity + "|saved|clean-child|" + snapshot.revision,
+                draftExtent: nil, selectionOwner: "saved")
+        }
+        let draftFeatures = snapshot.barrels.rows
+        let draftExtent = culvertDraftExtent(draftFeatures)
+        let ownerIdentity = store.geometryCulvertMapHoverPreparationIdentity(
+            assetID: assetID, projectSessionID: source.capture.projectSessionID,
+            expectedRevision: revision, model: model)
+        let extentIdentity = draftExtent.map { extent in
+            [extent.minX, extent.minY, extent.maxX, extent.maxY]
+                .map { String($0.bitPattern, radix: 16) }.joined(separator: ":")
+        } ?? "empty"
+        return CulvertMapPresentation(
+            features: draftFeatures,
+            identity: source.capture.identity + "|parent-draft|" + ownerIdentity
+                + "|" + snapshot.draftState + "|count:" + String(draftFeatures.count)
+                + "|" + extentIdentity,
+            draftExtent: draftExtent, selectionOwner: "parent-draft")
     }
 
     private func installFlowAreaGenerationPresentations() {
@@ -471,6 +603,12 @@ struct ProjectGeometryMapCanvas: View {
             .task(id: flowAreaGenerationPresentationUpdateIdentity) {
                 installFlowAreaGenerationPresentations()
             }
+            .task(id: culvertMapPreparationIdentity) {
+                await prepareVisibleCulvertMaps()
+            }
+            .task(id: culvertDraftPresentationUpdateIdentity) {
+                installCulvertDraftPresentations()
+            }
             .task(id: savedMeshMapRefreshIdentity) {
                 guard savedMeshMapRefreshIdentity != nil, session.canRefreshSources else { return }
                 await session.refresh()
@@ -534,8 +672,9 @@ struct ProjectGeometryMapCanvas: View {
                       snapshot.culvertsState.status.hasSourceData,
                       let styles = resolvedStyles(for: source, state: snapshot.culvertsState,
                           nodeType: "CulvertBarrelLayer",
-                          ids: ["Culvert_Barrel_Symbology", "Culvert_Barrel_Vertex_Symbology"]) else { continue }
-                drawCulverts(source.culvertFeatures,
+                          ids: ["Culvert_Barrel_Symbology", "Culvert_Barrel_Vertex_Symbology"]),
+                      let presentation = culvertMapPresentation(for: source) else { continue }
+                drawCulverts(presentation.features,
                     lineStyle: styles["Culvert_Barrel_Symbology"] ?? .init(),
                     vertexStyle: styles["Culvert_Barrel_Vertex_Symbology"] ?? .init(),
                     context: &context, transform: transform, renderScale: renderScale)
@@ -588,8 +727,10 @@ struct ProjectGeometryMapCanvas: View {
             context.stroke(path, with: .color(.accentColor),
                            lineWidth: WorkspaceRenderScaling.metric(3, factor: renderScale))
         }
-        for feature in source.culvertFeatures
-        where selection.id == culvertSelectionID(source: source, feature: feature) {
+        guard let presentation = culvertMapPresentation(for: source) else { return }
+        for feature in presentation.features
+        where selection.id == Self.culvertSelectionID(source: source,
+            owner: presentation.selectionOwner, feature: feature) {
             let path = linePath(feature.polyline, transform: transform)
             context.stroke(path, with: .color(.accentColor),
                            style: StrokeStyle(lineWidth: WorkspaceRenderScaling.metric(4, factor: renderScale),
@@ -645,12 +786,14 @@ struct ProjectGeometryMapCanvas: View {
                 }
                 case .culverts:
                     guard snapshot.culvertsState.effectiveVisible && snapshot.culvertsState.status.hasSourceData else { continue }
-                for feature in source.culvertFeatures {
+                guard let presentation = culvertMapPresentation(for: source) else { continue }
+                for feature in presentation.features {
                     let points = feature.polyline.map { GeometryTopologyCoordinate(x: $0.x, y: $0.y) }
                     let distance = polylineDistance(location, points: points, close: false, transform: transform)
                     let label = feature.values["Name"] ?? String(feature.fid)
                     consider(ProjectGeometryMapSelection(
-                        id: Self.culvertSelectionID(source: source, feature: feature),
+                        id: Self.culvertSelectionID(source: source,
+                            owner: presentation.selectionOwner, feature: feature),
                         geometryName: source.capture.geometryName, layerTitle: "Culverts",
                         featureLabel: label), distance: distance, tolerance: hitTolerance, nearest: &nearest)
                 }
@@ -719,8 +862,9 @@ struct ProjectGeometryMapCanvas: View {
     }
 
     private static func culvertSelectionID(source: ProjectGeometryMapSourceState,
+                                           owner: String,
                                            feature: GeometryCulvertFeatureRow) -> String {
-        source.capture.identity + "|culvert|" + feature.id
+        source.capture.identity + "|culvert|" + owner + "|" + feature.id
     }
 
     private func topologySelectionID(source: ProjectGeometryMapSourceState,
@@ -731,11 +875,6 @@ struct ProjectGeometryMapCanvas: View {
     private func cellSelectionID(source: ProjectGeometryMapSourceState,
                                  cell: GeometryMeshMapCell) -> String {
         Self.cellSelectionID(source: source, cell: cell)
-    }
-
-    private func culvertSelectionID(source: ProjectGeometryMapSourceState,
-                                    feature: GeometryCulvertFeatureRow) -> String {
-        Self.culvertSelectionID(source: source, feature: feature)
     }
 
     private func resolvedStyles(for source: ProjectGeometryMapSourceState,

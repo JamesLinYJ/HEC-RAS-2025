@@ -32,6 +32,7 @@ struct MapHoverLayerCapture: Encodable, Sendable {
     var mesh: MapHoverMeshCapture? = nil
     var associated: MapHoverAssociatedCapture? = nil
     var resultSelections: [MapHoverResultSelectionCapture]? = nil
+    var modelVector: MapHoverModelVectorCapture? = nil
 }
 
 struct MapHoverResultSelectionCapture: Encodable, Sendable {
@@ -112,4 +113,5 @@ struct MapHoverIdentifyFlight: Sendable {
     let screenX: Double
     let screenY: Double
     let localEntries: [MapHoverIdentifyEntry]
+    var preferredNodeIdentities: [String] = []
 }

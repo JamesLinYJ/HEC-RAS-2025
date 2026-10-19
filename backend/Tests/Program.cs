@@ -143,6 +143,7 @@ await finalSourceChecks.Run(nameof(GeometryMeshElementToolsChecks), GeometryMesh
 await finalSourceChecks.Run(nameof(GeometryMeshElementChartChecks), GeometryMeshElementChartChecks.Run);
 await finalSourceChecks.Run(nameof(MapResultMeshTimeSeriesChecks), MapResultMeshTimeSeriesChecks.Run);
 await finalSourceChecks.Run(nameof(MapHoverIdentifyChecks), MapHoverIdentifyChecks.RunAsync);
+await finalSourceChecks.Run(nameof(MapHoverModelVectorChecks), MapHoverModelVectorChecks.RunAsync);
 await finalSourceChecks.Run(nameof(StructureLoggingChecks), StructureLoggingChecks.Run);
 await finalSourceChecks.Run(nameof(GeometryMeshGenerationDuplexChecks), GeometryMeshGenerationDuplexChecks.Run);
 await finalSourceChecks.Run(nameof(TerrainUSGSImportChecks), TerrainUSGSImportChecks.Run);

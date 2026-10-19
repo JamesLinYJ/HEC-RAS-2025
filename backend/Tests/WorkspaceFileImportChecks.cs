@@ -129,8 +129,10 @@ internal static class WorkspaceFileImportChecks
         File.WriteAllBytes(sourcePath, [0, 1, 2, 3, 4, 5]);
         string destination = Path.Combine(directory.FullName, "imports");
         Directory.CreateDirectory(destination);
-        Expect<Exception>(() => WorkspaceFileImportService.PrepareCoreHdf(new(
+        InvalidDataException error = Expect<InvalidDataException>(() => WorkspaceFileImportService.PrepareCoreHdf(new(
             sourcePath, destination, Revision(sourcePath))));
+        Check(error.Message.Contains("readable HDF5", StringComparison.Ordinal),
+            "A failed HDF open is rejected before the importer reads HDF metadata.");
         Check(!Directory.EnumerateFileSystemEntries(destination).Any(),
             "An unrecognized HDF file does not create a scratch project.");
         Check(File.ReadAllBytes(sourcePath).SequenceEqual(new byte[] { 0, 1, 2, 3, 4, 5 }),
@@ -162,10 +164,10 @@ internal static class WorkspaceFileImportChecks
         if (!condition) throw new InvalidOperationException(message);
     }
 
-    private static void Expect<T>(Action action) where T : Exception
+    private static T Expect<T>(Action action) where T : Exception
     {
         try { action(); }
-        catch (T) { return; }
+        catch (T error) { return error; }
         throw new InvalidOperationException($"Expected {typeof(T).Name}.");
     }
 }

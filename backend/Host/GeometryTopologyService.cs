@@ -385,6 +385,16 @@ public static partial class ModelEditorAdapter
             var (points, patchType) = PatchTypeTargets(topology, mutation);
             return points.All(point => point.PatchType == patchType);
         }
+        if (mutation.Operation == "forceSetArcChoice")
+        {
+            var (arcs, fieldID, value) = ArcChoiceTargets(topology, mutation);
+            return arcs.All(arc => string.Equals(ArcChoiceValue(arc, fieldID), value, StringComparison.Ordinal));
+        }
+        if (mutation.Operation == "forceResetArcBias")
+        {
+            ObservableConceptualMeshArc[] arcs = ArcBiasResetTargets(topology, mutation);
+            return arcs.All(arc => float.IsNaN(arc.Bias));
+        }
         if (mutation.Operation == "setRegionInput")
         {
             var (points, property) = RegionEditorInputTargets(topology, mutation);
@@ -1072,6 +1082,20 @@ public static partial class ModelEditorAdapter
                     point.PatchType = patchType;
                 return points.Length > 0;
             }
+            case "forceSetArcChoice":
+            {
+                var (arcs, fieldID, value) = ArcChoiceTargets(topology, mutation);
+                foreach (ObservableConceptualMeshArc arc in arcs)
+                    SetArcField(arc, fieldID, value);
+                return arcs.Length > 0;
+            }
+            case "forceResetArcBias":
+            {
+                ObservableConceptualMeshArc[] arcs = ArcBiasResetTargets(topology, mutation);
+                foreach (ObservableConceptualMeshArc arc in arcs)
+                    arc.Bias = float.NaN;
+                return arcs.Length > 0;
+            }
             case "halfSize":
             case "doubleSize":
                 if (mutation.FeatureIDs.Length != 1) throw new ArgumentException("A quick size edit requires exactly one selected feature.");
@@ -1347,6 +1371,76 @@ public static partial class ModelEditorAdapter
             throw new ArgumentException("The selected patch type is invalid.");
         ObservableConceptualMeshControlPoint[] points = fids.Select(fid => FindRegion(topology, fid)).ToArray();
         return (points, patchType);
+    }
+
+    /// <summary>
+    /// Mirrors ConceptualMeshArcEditor.ForceSetCommand for Constrain Stretching
+    /// and Laplace BC. It deliberately assigns the chosen value to every exact
+    /// selected source arc, including arcs already equal to the displayed
+    /// aggregate value. The edit remains in the parent geometry draft and is
+    /// undoable; only the parent model save writes the HDF.
+    /// </summary>
+    private static (ObservableConceptualMeshArc[] Arcs, string FieldID, string Value) ArcChoiceTargets(
+        ObservableConceptualMeshTopology topology, GeometryTopologyMutation mutation)
+    {
+        if (!string.Equals(mutation.Operation, "forceSetArcChoice", StringComparison.Ordinal)
+            || !string.Equals(mutation.FeatureKind, "arc", StringComparison.Ordinal)
+            || mutation.FeatureIDs is null || mutation.FeatureIDs.Length == 0
+            || mutation.FieldID is not ("ConstrainStretching" or "LaplaceBC") || mutation.Value is null
+            || mutation.TagName is not null || mutation.TagType is not null || mutation.TagValue is not null
+            || mutation.ApplyToSelectedOnly || mutation.FactorText is not null
+            || mutation.ArcFeatureIDs is null || mutation.ArcFeatureIDs.Length != 0
+            || mutation.ControlPointFeatureIDs is null || mutation.ControlPointFeatureIDs.Length != 0
+            || mutation.NodeFeatureIDs is null || mutation.NodeFeatureIDs.Length != 0
+            || mutation.RecipeText is not null || mutation.ForceSet
+            || mutation.PointKind is not null || mutation.InternalPointIndex is not null
+            || mutation.EndpointNodeIndex is not null || mutation.Axis is not null || mutation.RawValue is not null
+            || mutation.ImportPayload is not null)
+            throw new ArgumentException("An Arc choice Force Set command has an invalid shape.");
+
+        string[] allowedValues = mutation.FieldID == "ConstrainStretching"
+            ? ["Default", "Constrained", "Floating"]
+            : ["Default", "ZeroFlux", "Dirichlet"];
+        if (!allowedValues.Contains(mutation.Value, StringComparer.Ordinal))
+            throw new ArgumentException("The selected Arc choice is invalid.");
+
+        int[] fids = UniqueFeatureIDs(mutation.FeatureIDs, "arc");
+        ObservableConceptualMeshArc[] arcs = fids.Select(fid => FindArc(topology, fid)).ToArray();
+        return (arcs, mutation.FieldID, mutation.Value);
+    }
+
+    private static string ArcChoiceValue(ObservableConceptualMeshArc arc, string fieldID) => fieldID switch
+    {
+        "ConstrainStretching" => arc.ConstrainStretching.ToString(),
+        "LaplaceBC" => arc.LaplaceBC.ToString(),
+        _ => throw new ArgumentException("Unsupported Arc choice field.")
+    };
+
+    /// <summary>
+    /// Mirrors ConceptualMeshArcEditor.ForceResetBias: Clear assigns NaN to
+    /// every selected arc. This deliberately bypasses the ordinary finite
+    /// numeric property validation and remains an undoable draft edit.
+    /// </summary>
+    private static ObservableConceptualMeshArc[] ArcBiasResetTargets(
+        ObservableConceptualMeshTopology topology, GeometryTopologyMutation mutation)
+    {
+        if (!string.Equals(mutation.Operation, "forceResetArcBias", StringComparison.Ordinal)
+            || !string.Equals(mutation.FeatureKind, "arc", StringComparison.Ordinal)
+            || mutation.FeatureIDs is null || mutation.FeatureIDs.Length == 0
+            || !string.Equals(mutation.FieldID, "Bias", StringComparison.Ordinal) || mutation.Value is not null
+            || mutation.TagName is not null || mutation.TagType is not null || mutation.TagValue is not null
+            || mutation.ApplyToSelectedOnly || mutation.FactorText is not null
+            || mutation.ArcFeatureIDs is null || mutation.ArcFeatureIDs.Length != 0
+            || mutation.ControlPointFeatureIDs is null || mutation.ControlPointFeatureIDs.Length != 0
+            || mutation.NodeFeatureIDs is null || mutation.NodeFeatureIDs.Length != 0
+            || mutation.RecipeText is not null || mutation.ForceSet
+            || mutation.PointKind is not null || mutation.InternalPointIndex is not null
+            || mutation.EndpointNodeIndex is not null || mutation.Axis is not null || mutation.RawValue is not null
+            || mutation.ImportPayload is not null)
+            throw new ArgumentException("An Arc Bias reset command has an invalid shape.");
+
+        int[] fids = UniqueFeatureIDs(mutation.FeatureIDs, "arc");
+        return fids.Select(fid => FindArc(topology, fid)).ToArray();
     }
 
     private static (ObservableConceptualMeshControlPoint[] Points, PropertyInfo Property) RegionResetTargets(

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Geospatial.GDALAssist;
 using Geospatial.IO.Vectors;
@@ -85,12 +86,108 @@ internal static class RuntimeChecks
             reader.ReadDataset("/检查/高程", out double[] actual);
             Check(actual.SequenceEqual(elevations), "HEC HDF wrapper writes and reads a Unicode path with native HDF5");
         }
+        CheckHdfReaderLifecycle(hdf, directory.FullName);
         var mesh = new Mesh { Faces = new Face[2] };
         float[] stations = [1.5f, 7.25f];
         mesh.SetFaceCentroidStations(stations);
         stations[0] = 999;
         Check(mesh.FaceCentroidDistance(0) == 1.5f && mesh.FaceCentroidDistance(1) == 7.25f, "Mesh centroid data retains its own HDF input snapshot");
         Console.WriteLine("Native GDAL, CLI, projection, binary I/O, HDF and object lifecycle checks passed on " + RuntimeInformation.RuntimeIdentifier + ".");
+    }
+
+    private static void CheckHdfReaderLifecycle(string writablePath, string directory)
+    {
+        double[] expected = [2.5, -8.25, 16.125];
+        using (var writer = new H5Writer(writablePath))
+            writer.WriteDataset("/lifecycle/values", expected);
+        byte[] sourceBytes = File.ReadAllBytes(writablePath);
+
+        long openFilesBefore = CountOpenHdfFiles();
+        var reader = new H5Reader(writablePath);
+        Check(reader.SuccessfullyOpened && CountOpenHdfFiles() == openFilesBefore + 1,
+            "Opening a valid HDF reader acquires exactly one tracked file handle.");
+        reader.ReadDataset("/lifecycle/values", out double[] readValues);
+        Check(readValues.SequenceEqual(expected), "A reopened HDF reader reads the writer's persisted values.");
+
+        Parallel.For(0, 12, _ => reader.Dispose());
+        reader.Dispose();
+        Check(reader.IsDisposed && !reader.SuccessfullyOpened && reader.H5FileID < 0,
+            "Concurrent and repeated disposal leaves the reader closed with an invalid file ID.");
+        Check(CountOpenHdfFiles() == openFilesBefore,
+            "Concurrent and repeated disposal releases the valid HDF file handle exactly once.");
+        Check(File.ReadAllBytes(writablePath).SequenceEqual(sourceBytes),
+            "Disposing a read-only HDF reader does not change source bytes.");
+
+        using (var reopened = new H5Reader(writablePath))
+        {
+            reopened.ReadDataset("/lifecycle/values", out double[] reopenedValues);
+            Check(reopenedValues.SequenceEqual(expected), "A disposed HDF file can be reopened and read again.");
+        }
+
+        using (var memoryWriter = H5Writer.CreateInMemory())
+        {
+            memoryWriter.WriteDataset("/memory/values", expected);
+            memoryWriter.ReadDataset("/memory/values", out double[] memoryValues);
+            Check(memoryValues.SequenceEqual(expected), "The inherited HDF writer keeps its in-memory file semantics.");
+        }
+
+        openFilesBefore = CountOpenHdfFiles();
+        WeakReference finalizableReader = CreateFinalizableHdfReader(writablePath);
+        Check(CountOpenHdfFiles() == openFilesBefore + 1,
+            "A reader left for finalization retains one valid HDF file handle.");
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        Check(!finalizableReader.IsAlive && CountOpenHdfFiles() == openFilesBefore,
+            "Finalization releases an undisposed valid reader without leaving an HDF handle open.");
+
+        string invalidPath = Path.Combine(directory, "invalid-reader.h5");
+        File.WriteAllBytes(invalidPath, [0, 1, 2, 3, 4, 5]);
+        openFilesBefore = CountOpenHdfFiles();
+        var failedReader = new H5Reader(invalidPath);
+        Check(!failedReader.SuccessfullyOpened && failedReader.H5FileID < 0,
+            "A failed HDF open leaves an invalid file ID.");
+        Parallel.For(0, 12, _ => failedReader.Dispose());
+        failedReader.Dispose();
+        Check(failedReader.IsDisposed && failedReader.H5FileID < 0
+              && CountOpenHdfFiles() == openFilesBefore,
+            "Disposing a failed HDF reader does not close a negative ID or affect open files.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference CreateFinalizableHdfReader(string path) =>
+        new(new H5Reader(path));
+
+    private static long CountOpenHdfFiles()
+    {
+        Type h5FileApi = Type.GetType("HDF.PInvoke.H5F, H5.Bindings", throwOnError: true)!;
+        MethodInfo countMethod = h5FileApi.GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(method => method.Name == "get_obj_count" && method.GetParameters().Length == 2);
+        ParameterInfo[] parameters = countMethod.GetParameters();
+        object allFilesValue = h5FileApi.GetField("OBJ_ALL", BindingFlags.Public | BindingFlags.Static)?.GetValue(null)
+            ?? throw new InvalidOperationException("The HDF binding does not expose its all-files identifier.");
+        object fileType = h5FileApi.GetField("OBJ_FILE", BindingFlags.Public | BindingFlags.Static)?.GetValue(null)
+            ?? throw new InvalidOperationException("The HDF binding does not expose its file-object mask.");
+        object allFiles = ConvertParameter(allFilesValue, parameters[0].ParameterType);
+        object fileMask = ConvertParameter(fileType, parameters[1].ParameterType);
+        object? result = countMethod.Invoke(null, [allFiles, fileMask]);
+        long count = result switch
+        {
+            IntPtr nativeCount => nativeCount.ToInt64(),
+            UIntPtr unsignedNativeCount => checked((long)unsignedNativeCount.ToUInt64()),
+            _ => Convert.ToInt64(result)
+        };
+        if (count < 0)
+            throw new InvalidOperationException($"HDF5 could not count open file handles (returned {count}).");
+        return count;
+    }
+
+    private static object ConvertParameter(object value, Type parameterType)
+    {
+        if (parameterType.IsInstanceOfType(value)) return value;
+        if (parameterType.IsEnum) return Enum.ToObject(parameterType, value);
+        return Convert.ChangeType(value, parameterType)
+            ?? throw new InvalidOperationException($"Cannot convert an HDF argument to {parameterType}.");
     }
 
     private static void CheckRenderTile()

@@ -81,17 +81,9 @@ enum MapHoverIdentifyVector {
                                        candidates: [MapVectorLayer],
                                        selectedLayerID: String?,
                                        selectedContextIdentity: String?) -> [ResolvedMapHoverVector] {
-        var rows = MapRenderComposition.orderedRecords(records).filter { $0.mapID == mapID }
-        if let selectedLayerID,
-           let index = rows.firstIndex(where: { $0.payloadLayerIDs.contains(selectedLayerID) }) {
-            let row = rows.remove(at: index)
-            rows.insert(row, at: 0)
-        }
-        if let selectedContextIdentity,
-           let index = rows.firstIndex(where: { $0.contextIdentity == selectedContextIdentity }) {
-            let row = rows.remove(at: index)
-            rows.insert(row, at: min(1, rows.count))
-        }
+        let rows = MapRenderComposition.hoverPriorityRecords(
+            MapRenderComposition.orderedRecords(records).filter { $0.mapID == mapID },
+            selectedLayerID: selectedLayerID, selectedContextIdentity: selectedContextIdentity)
 
         return rows.compactMap { row in
             guard row.payloadKind == "MapLayer" || row.payloadKind == "GdbVectorLayer",

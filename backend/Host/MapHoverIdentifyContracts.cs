@@ -34,7 +34,8 @@ public sealed record MapHoverLayerCapture(
     RasterMapSourceIdentity? RasterSource = null,
     MapHoverMeshCapture? Mesh = null,
     MapHoverAssociatedCapture? Associated = null,
-    MapHoverResultSelectionCapture[]? ResultSelections = null);
+    MapHoverResultSelectionCapture[]? ResultSelections = null,
+    MapHoverModelVectorCapture? ModelVector = null);
 
 public sealed record MapHoverResultSelectionCapture(int SelectionIndex, string ResultPath,
     string ResultRevision);

@@ -54,7 +54,7 @@ internal static class GdbRasterSourceChecks
         File.Delete(addedFile);
         GdbMapSourceService.VerifySource(source);
 
-        Console.WriteLine("GDB raster catalog rejects stale directory identities and non-raster map rows; positive raster-subdataset opening still requires a retained real raster GDB fixture.");
+        Console.WriteLine("GDB raster catalog rejects stale directory identities and non-raster map rows; real raster-subdataset values are checked separately by MapHoverIdentifyChecks.");
     }
 
     private static void CreateVectorOnlyGdb(string path)
