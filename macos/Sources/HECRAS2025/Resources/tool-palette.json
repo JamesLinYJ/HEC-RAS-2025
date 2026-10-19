@@ -1,0 +1,1002 @@
+{
+  "options": [
+    {
+      "id": "DeepConnect.SnapTolerancePixels",
+      "label": "Snap Tolerance (px)",
+      "description": "Maximum screen-pixel distance from the cursor to a target line for the snap to engage.",
+      "kind": "double",
+      "defaultValue": "12.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/DeepConnectOptions.cs",
+      "sourceLine": 7
+    },
+    {
+      "id": "Graph.SelectionScope",
+      "label": "Selection Scope",
+      "description": "Restrict selection to arcs, nodes, or allow all primitives.",
+      "kind": "enum",
+      "defaultValue": "All",
+      "choices": [
+        {
+          "id": "All",
+          "title": "All",
+          "debugOnly": false
+        },
+        {
+          "id": "Arcs",
+          "title": "Arcs",
+          "debugOnly": false
+        },
+        {
+          "id": "Nodes",
+          "title": "Nodes",
+          "debugOnly": false
+        }
+      ],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/GraphSelectionOptions.cs",
+      "sourceLine": 8
+    },
+    {
+      "id": "Lasso.HitMode",
+      "label": "Hit Mode",
+      "description": "Whether selection takes any feature it touches, or only features fully inside.",
+      "kind": "enum",
+      "defaultValue": "Intersects",
+      "choices": [
+        {
+          "id": "Intersects",
+          "title": "Intersects",
+          "debugOnly": false
+        },
+        {
+          "id": "Contained",
+          "title": "Contained",
+          "debugOnly": false
+        }
+      ],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/LassoSelectionHandler.cs",
+      "sourceLine": 12
+    },
+    {
+      "id": "Marquee.SelectionShape",
+      "label": "Selection Shape",
+      "description": "Whether selection uses a rubber-band rectangle or a freeform lasso.",
+      "kind": "enum",
+      "defaultValue": "Extent",
+      "choices": [
+        {
+          "id": "Extent",
+          "title": "Extent",
+          "debugOnly": false
+        },
+        {
+          "id": "Path",
+          "title": "Path",
+          "debugOnly": false
+        },
+        {
+          "id": "Lasso",
+          "title": "Lasso",
+          "debugOnly": false
+        }
+      ],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/MarqueeSelectionHandler.cs",
+      "sourceLine": 19
+    },
+    {
+      "id": "Polyline.SmartAdd.Algorithm",
+      "label": "Algorithm",
+      "description": "Path-finder used for smart append. HessianRidgeness is polarity-agnostic; HighGround biases toward ridges only.",
+      "kind": "enum",
+      "defaultValue": "HessianRidgeness",
+      "choices": [
+        {
+          "id": "HessianRidgeness",
+          "title": "Hessian Ridgeness",
+          "debugOnly": false
+        },
+        {
+          "id": "HighGround",
+          "title": "High Ground",
+          "debugOnly": false
+        }
+      ],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 13
+    },
+    {
+      "id": "Polyline.SmartAdd.DpTolerancePixels",
+      "label": "Simplify Tolerance (px)",
+      "description": "Douglas–Peucker tolerance applied to the walker output, in screen pixels.",
+      "kind": "double",
+      "defaultValue": "1.5",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 15
+    },
+    {
+      "id": "Polyline.SmartAdd.MaxSegmentPixels",
+      "label": "Max Segment Length (px)",
+      "description": "Maximum straight-line A→B distance in screen pixels before the handler bails to vanilla append.",
+      "kind": "double",
+      "defaultValue": "1500.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 17
+    },
+    {
+      "id": "Polyline.SmartAdd.PreviewThrottlePixels",
+      "label": "Preview Throttle (px)",
+      "description": "Skip A* recompute when the cursor has moved less than this many pixels since the last frame.",
+      "kind": "double",
+      "defaultValue": "1.5",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 19
+    },
+    {
+      "id": "Polyline.SmartAdd.HighGround.Alpha",
+      "label": "HighGround α",
+      "description": "Ridge preference weight. 0 = straight-line; higher values track ridges harder.",
+      "kind": "double",
+      "defaultValue": "3.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 21
+    },
+    {
+      "id": "Polyline.SmartAdd.HighGround.BailRatio",
+      "label": "HighGround Bail Ratio",
+      "description": "Multiplier on straight-line distance used to gate runaway A* search.",
+      "kind": "double",
+      "defaultValue": "5.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 23
+    },
+    {
+      "id": "Polyline.SmartAdd.HighGround.SnapRadiusCells",
+      "label": "HighGround Snap Radius (cells)",
+      "description": "Radius in grid cells used to snap the cursor target to the highest nearby cell.",
+      "kind": "int",
+      "defaultValue": "15",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 25
+    },
+    {
+      "id": "Polyline.SmartAdd.Hessian.FrangiBeta",
+      "label": "Hessian Frangi β",
+      "description": "Frangi anisotropy weight. Standard value is 0.5; lower values penalize plate-like responses harder.",
+      "kind": "double",
+      "defaultValue": "0.5",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 27
+    },
+    {
+      "id": "Polyline.SmartAdd.Hessian.FeaturePenaltyKappa",
+      "label": "Hessian Feature Penalty κ",
+      "description": "A* edge-cost multiplier for off-feature cells (cost = step·(1 + κ·(1 − V̂))). Default 3.0.",
+      "kind": "double",
+      "defaultValue": "3.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 29
+    },
+    {
+      "id": "Polyline.SmartAdd.Hessian.OffFeatureBailMultiplier",
+      "label": "Hessian Off-Feature Bail",
+      "description": "Multiplier on Euclidean distance used to gate off-feature meander before A* gives up. Default 100.0.",
+      "kind": "double",
+      "defaultValue": "100.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 31
+    },
+    {
+      "id": "Polyline.SmartAdd.Hessian.MinExpansionsBudget",
+      "label": "Hessian Min Expansions Budget",
+      "description": "Floor on the A* expansion budget regardless of Euclidean distance. Default 250 000.",
+      "kind": "int",
+      "defaultValue": "250000",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 33
+    },
+    {
+      "id": "Polyline.SmartAdd.Hessian.ExpansionsPerEuclidPx",
+      "label": "Hessian Expansions / px",
+      "description": "Per-pixel scale on the A* expansion budget above the floor. Default 500.",
+      "kind": "int",
+      "defaultValue": "500",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 35
+    },
+    {
+      "id": "Polyline.SmartAdd.Hessian.MaxEuclidCells",
+      "label": "Hessian Max Distance (cells)",
+      "description": "Hard cap on Euclidean distance (in cells) before the Hessian walker bails without building its feature surface.",
+      "kind": "int",
+      "defaultValue": "1500",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SmartAppendLineFeaturePointHandler.cs",
+      "sourceLine": 37
+    },
+    {
+      "id": "SplitArc.Mode",
+      "label": "Split Mode",
+      "description": "Where the split occurs on an arc. Alt swaps to the non-default mode.",
+      "kind": "enum",
+      "defaultValue": "Anywhere",
+      "choices": [
+        {
+          "id": "Anywhere",
+          "title": "Anywhere",
+          "debugOnly": false
+        },
+        {
+          "id": "AtVertex",
+          "title": "At Vertex",
+          "debugOnly": false
+        }
+      ],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing/SplitArcHandler.cs",
+      "sourceLine": 13
+    },
+    {
+      "id": "LineFeature.Filter.Epsilon",
+      "label": "Tolerance (map units)",
+      "description": "Douglas-Peucker tolerance; larger = more aggressive simplification.",
+      "kind": "double",
+      "defaultValue": "1.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/FilterPolylineHandler.cs",
+      "sourceLine": 11
+    },
+    {
+      "id": "Polyline.Merge.ToleranceWorld",
+      "label": "Merge Tolerance (world units)",
+      "description": "Endpoint match tolerance, in map units.",
+      "kind": "double",
+      "defaultValue": "5.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/MergePolylineByLassoHandler.cs",
+      "sourceLine": 14
+    },
+    {
+      "id": "Polyline.Offset.Distance",
+      "label": "Offset Distance",
+      "description": "Distance between the input polyline and each offset, in map units.",
+      "kind": "double",
+      "defaultValue": "10.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/OffsetPolylineByClickHandler.cs",
+      "sourceLine": 14
+    },
+    {
+      "id": "Polyline.Offset.Sides",
+      "label": "Banks",
+      "description": "Which bank(s) to emit, relative to the direction the input line is drawn in.",
+      "kind": "enum",
+      "defaultValue": "Both",
+      "choices": [
+        {
+          "id": "Both",
+          "title": "Both",
+          "debugOnly": false
+        },
+        {
+          "id": "Left",
+          "title": "Left",
+          "debugOnly": false
+        },
+        {
+          "id": "Right",
+          "title": "Right",
+          "debugOnly": false
+        }
+      ],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/OffsetPolylineByClickHandler.cs",
+      "sourceLine": 16
+    },
+    {
+      "id": "Polyline.Offset.IncludeEndpoints",
+      "label": "Include Endpoints",
+      "description": "Also emit a line across each end, connecting the offsets.",
+      "kind": "bool",
+      "defaultValue": "false",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/OffsetPolylineByClickHandler.cs",
+      "sourceLine": 18
+    },
+    {
+      "id": "Polyline.Offset.KeepOriginal",
+      "label": "Keep Original",
+      "description": "Leave the clicked polyline in place instead of replacing it with its offsets.",
+      "kind": "bool",
+      "defaultValue": "false",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/OffsetPolylineByClickHandler.cs",
+      "sourceLine": 20
+    },
+    {
+      "id": "LineFeature.Smooth.WindowSize",
+      "label": "Window Size",
+      "description": "Number of neighboring points averaged together. Larger values produce smoother results.",
+      "kind": "int",
+      "defaultValue": "3",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/SmoothPolylineHandler.cs",
+      "sourceLine": 11
+    },
+    {
+      "id": "LineFeature.Smooth.Iterations",
+      "label": "Passes",
+      "description": "How many times to repeat the moving average.",
+      "kind": "int",
+      "defaultValue": "2",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/SmoothPolylineHandler.cs",
+      "sourceLine": 13
+    },
+    {
+      "id": "Polyline.Snap.SampleSpacing",
+      "label": "Sample Spacing",
+      "description": "Distance between sample points (in map units). Smaller = more precise but slower.",
+      "kind": "double",
+      "defaultValue": "3.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/SnapPolylineByClickHandler.cs",
+      "sourceLine": 13
+    },
+    {
+      "id": "Polyline.Snap.SearchMode",
+      "label": "Search Mode",
+      "description": "Perpendicular: search across the line direction. Radial: search in all directions.",
+      "kind": "enum",
+      "defaultValue": "Perpendicular",
+      "choices": [
+        {
+          "id": "Perpendicular",
+          "title": "Perpendicular",
+          "debugOnly": false
+        },
+        {
+          "id": "Radial",
+          "title": "Radial",
+          "debugOnly": false
+        }
+      ],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/SnapPolylineByClickHandler.cs",
+      "sourceLine": 15
+    },
+    {
+      "id": "Polyline.Snap.ElevationMode",
+      "label": "Elevation Mode",
+      "description": "Snap to the highest or lowest sampled elevation.",
+      "kind": "enum",
+      "defaultValue": "Highest",
+      "choices": [
+        {
+          "id": "Highest",
+          "title": "Highest",
+          "debugOnly": false
+        },
+        {
+          "id": "Lowest",
+          "title": "Lowest",
+          "debugOnly": false
+        }
+      ],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/SnapPolylineByClickHandler.cs",
+      "sourceLine": 17
+    },
+    {
+      "id": "Polyline.Snap.PointsPerRing",
+      "label": "Points Per Ring",
+      "description": "Sample points per ring in radial search. Only used when Search Mode = Radial.",
+      "kind": "int",
+      "defaultValue": "16",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/SnapPolylineByClickHandler.cs",
+      "sourceLine": 19
+    },
+    {
+      "id": "Polyline.Snap.Iterations",
+      "label": "Iterations",
+      "description": "Number of times to run the snap pass for progressive refinement.",
+      "kind": "int",
+      "defaultValue": "1",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/SnapPolylineByClickHandler.cs",
+      "sourceLine": 21
+    },
+    {
+      "id": "Polyline.Split.Mode",
+      "label": "Split Mode",
+      "description": "Where the split occurs on a polyline. Alt swaps to the non-default mode.",
+      "kind": "enum",
+      "defaultValue": "Anywhere",
+      "choices": [
+        {
+          "id": "Anywhere",
+          "title": "Anywhere",
+          "debugOnly": false
+        },
+        {
+          "id": "AtVertex",
+          "title": "At Vertex",
+          "debugOnly": false
+        }
+      ],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers/SplitPolylineHandler.cs",
+      "sourceLine": 12
+    },
+    {
+      "id": "Arc.Filter.Epsilon",
+      "label": "Tolerance (map units)",
+      "description": "Douglas-Peucker tolerance applied to arc internal points; larger = more aggressive simplification.",
+      "kind": "double",
+      "defaultValue": "1.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers.Topology/FilterArcHandler.cs",
+      "sourceLine": 11
+    },
+    {
+      "id": "Arc.Smooth.WindowSize",
+      "label": "Window Size",
+      "description": "Number of neighboring points averaged together. Larger values produce smoother results.",
+      "kind": "int",
+      "defaultValue": "3",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers.Topology/SmoothArcHandler.cs",
+      "sourceLine": 11
+    },
+    {
+      "id": "Arc.Smooth.Iterations",
+      "label": "Passes",
+      "description": "How many times to repeat the moving average over the arc's internal points.",
+      "kind": "int",
+      "defaultValue": "2",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers.Topology/SmoothArcHandler.cs",
+      "sourceLine": 13
+    },
+    {
+      "id": "Topology.SelectionScope",
+      "label": "Selection Scope",
+      "description": "Restrict selection to arcs, nodes, regions, or allow all primitives.",
+      "kind": "enum",
+      "defaultValue": "All",
+      "choices": [
+        {
+          "id": "All",
+          "title": "All",
+          "debugOnly": false
+        },
+        {
+          "id": "Arcs",
+          "title": "Arcs",
+          "debugOnly": false
+        },
+        {
+          "id": "Nodes",
+          "title": "Nodes",
+          "debugOnly": false
+        },
+        {
+          "id": "Regions",
+          "title": "Regions",
+          "debugOnly": false
+        }
+      ],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Handlers.Topology/TopologySelectionOptions.cs",
+      "sourceLine": 7
+    },
+    {
+      "id": "Experimental.Snap.SearchRadiusPixels",
+      "label": "Search Radius (px)",
+      "description": "Pixel snap radius. Combined with world-units radius via Max().",
+      "kind": "double",
+      "defaultValue": "8.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Options/SnapTolerance.cs",
+      "sourceLine": 7
+    },
+    {
+      "id": "Experimental.Snap.SearchRadiusWorld",
+      "label": "Search Radius (world units)",
+      "description": "World-space snap radius (map units). Combined with pixel radius via Max(). 0 = pixel-only.",
+      "kind": "double",
+      "defaultValue": "50.0",
+      "choices": [],
+      "source": "Geospatial.Rendering.dll/Geospatial.Rendering.Editing.Options/SnapTolerance.cs",
+      "sourceLine": 9
+    }
+  ],
+  "tools": [
+    {
+      "id": "Graph.Sketch",
+      "name": "Edit",
+      "iconKey": "Pencil",
+      "description": "All-in-one graph editing: add arcs, move nodes, split, and edit vertices.",
+      "optionIDs": [
+        "Graph.SelectionScope",
+        "Marquee.SelectionShape",
+        "Lasso.HitMode",
+        "SplitArc.Mode"
+      ],
+      "source": "Ras.Visual.WinUI.dll/Ras.Visual.WinUI.Contexts/GraphVisualContext.cs"
+    },
+    {
+      "id": "Graph.Add",
+      "name": "Add",
+      "iconKey": "Plus",
+      "description": "Double-click empty space to start a new arc; double-click again on a node or arc to finish it.",
+      "optionIDs": [
+        "SplitArc.Mode"
+      ],
+      "source": "Ras.Visual.WinUI.dll/Ras.Visual.WinUI.Contexts/GraphVisualContext.cs"
+    },
+    {
+      "id": "Graph.Edit",
+      "name": "Move",
+      "iconKey": "Pencil",
+      "description": "Select, move, and delete nodes and arcs; double-click an arc to edit its vertices.",
+      "optionIDs": [
+        "Graph.SelectionScope",
+        "Marquee.SelectionShape",
+        "Lasso.HitMode"
+      ],
+      "source": "Ras.Visual.WinUI.dll/Ras.Visual.WinUI.Contexts/GraphVisualContext.cs"
+    },
+    {
+      "id": "Graph.Split",
+      "name": "Split",
+      "iconKey": "Split",
+      "description": "Click an arc to split it; Alt+click swaps to the non-default split mode.",
+      "optionIDs": [
+        "SplitArc.Mode"
+      ],
+      "source": "Ras.Visual.WinUI.dll/Ras.Visual.WinUI.Contexts/GraphVisualContext.cs"
+    },
+    {
+      "id": "Topology.Sketch",
+      "name": "Edit",
+      "iconKey": "Pencil",
+      "description": "All-in-one topology editing: add arcs, move nodes, split, and merge.",
+      "optionIDs": [
+        "Topology.SelectionScope",
+        "Marquee.SelectionShape",
+        "Lasso.HitMode",
+        "SplitArc.Mode"
+      ],
+      "source": "Ras.Visual.WinUI.dll/Ras.Visual.WinUI.Contexts/TopologyVisualContext.cs"
+    },
+    {
+      "id": "Topology.Add",
+      "name": "Add",
+      "iconKey": "Plus",
+      "description": "Click to start drawing a new arc. Double-click an existing arc to split and continue from there.",
+      "optionIDs": [
+        "SplitArc.Mode"
+      ],
+      "source": "Ras.Visual.WinUI.dll/Ras.Visual.WinUI.Contexts/TopologyVisualContext.cs"
+    },
+    {
+      "id": "Topology.Edit",
+      "name": "Move",
+      "iconKey": "Pencil",
+      "description": "Move existing arc points and delete arcs.",
+      "optionIDs": [
+        "Topology.SelectionScope",
+        "Marquee.SelectionShape",
+        "Lasso.HitMode"
+      ],
+      "source": "Ras.Visual.WinUI.dll/Ras.Visual.WinUI.Contexts/TopologyVisualContext.cs"
+    },
+    {
+      "id": "Topology.Split",
+      "name": "Split",
+      "iconKey": "Split",
+      "description": "Click an arc to split it; Alt+click swaps to the non-default split mode.",
+      "optionIDs": [
+        "SplitArc.Mode"
+      ],
+      "source": "Ras.Visual.WinUI.dll/Ras.Visual.WinUI.Contexts/TopologyVisualContext.cs"
+    },
+    {
+      "id": "Map.MeasureArea",
+      "name": "Area",
+      "iconKey": "Area",
+      "description": "Measure the area of a polygon you draw on the map.",
+      "optionIDs": [],
+      "source": "Visual.Mapping.Observables.dll/Visual.Mapping.Observables/DefaultMapToolDescriptors.cs"
+    },
+    {
+      "id": "Map.Pan",
+      "name": "Pan",
+      "iconKey": "Hand",
+      "description": "Pan around the map by clicking and dragging.",
+      "optionIDs": [],
+      "source": "Visual.Mapping.Observables.dll/Visual.Mapping.Observables/DefaultMapToolDescriptors.cs"
+    },
+    {
+      "id": "Map.SelectExtent",
+      "name": "Extent",
+      "iconKey": "Selection",
+      "description": "Drag a rectangle to select features.",
+      "optionIDs": [
+        "Lasso.HitMode"
+      ],
+      "source": "Visual.Mapping.Observables.dll/Visual.Mapping.Observables/DefaultMapToolDescriptors.cs"
+    },
+    {
+      "id": "Map.SelectPath",
+      "name": "Path",
+      "iconKey": "PolyLine",
+      "description": "Draw a freeform path; features the path crosses are selected.",
+      "optionIDs": [],
+      "source": "Visual.Mapping.Observables.dll/Visual.Mapping.Observables/DefaultMapToolDescriptors.cs"
+    },
+    {
+      "id": "Map.SelectLasso",
+      "name": "Lasso",
+      "iconKey": "Lasso",
+      "description": "Draw a freeform closed shape; features inside are selected.",
+      "optionIDs": [
+        "Lasso.HitMode"
+      ],
+      "source": "Visual.Mapping.Observables.dll/Visual.Mapping.Observables/DefaultMapToolDescriptors.cs"
+    },
+    {
+      "id": "Map.MeasureLength",
+      "name": "Length",
+      "iconKey": "Ruler",
+      "description": "Measure the length of a polyline you draw on the map.",
+      "optionIDs": [],
+      "source": "Visual.Mapping.Observables.dll/Visual.Mapping.Observables/DefaultMapToolDescriptors.cs"
+    }
+  ],
+  "contextOptionIDs": {
+    "GraphVisualContext": [
+      "Graph.SelectionScope",
+      "Marquee.SelectionShape",
+      "Lasso.HitMode",
+      "SplitArc.Mode"
+    ],
+    "TopologyVisualContext": [
+      "Topology.SelectionScope",
+      "Marquee.SelectionShape",
+      "Lasso.HitMode",
+      "SplitArc.Mode"
+    ]
+  },
+  "templates": [
+    {
+      "factory": "PolylineFocusedEditTools",
+      "defaultPrefix": "Polyline",
+      "groupName": "Edit",
+      "experimental": false,
+      "tools": [
+        {
+          "suffix": ".Sketch",
+          "name": "Edit",
+          "iconKey": "Pencil",
+          "description": "All-in-one polyline editing: add, move, split, and merge.",
+          "optionIDs": [
+            "Marquee.SelectionShape",
+            "Lasso.HitMode",
+            "Polyline.Merge.ToleranceWorld",
+            "Polyline.Split.Mode"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "sketch"
+        },
+        {
+          "suffix": ".Add",
+          "name": "Add",
+          "iconKey": "Plus",
+          "description": "Click to start drawing a new polyline. Double-click an existing polyline to split and continue from there.",
+          "optionIDs": [
+            "Polyline.Split.Mode"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor"
+        },
+        {
+          "suffix": ".Edit",
+          "name": "Move",
+          "iconKey": "Pencil",
+          "description": "Move existing polyline vertices and delete features.",
+          "optionIDs": [
+            "Marquee.SelectionShape",
+            "Lasso.HitMode"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor2"
+        },
+        {
+          "suffix": ".Split",
+          "name": "Split",
+          "iconKey": "Split",
+          "description": "Click a polyline to split it; Alt+click swaps to the non-default split mode.",
+          "optionIDs": [
+            "Polyline.Split.Mode"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor3"
+        }
+      ],
+      "source": "Visual.Mapping.Observables.dll/Visual.Mapping.Observables/StandardToolFactories.cs"
+    },
+    {
+      "factory": "PolygonFocusedEditTools",
+      "defaultPrefix": "Polygon",
+      "groupName": "Edit",
+      "experimental": false,
+      "tools": [
+        {
+          "suffix": ".Sketch",
+          "name": "Edit",
+          "iconKey": "Pencil",
+          "description": "All-in-one polygon editing: add features, move/insert/delete vertices.",
+          "optionIDs": [
+            "Marquee.SelectionShape",
+            "Lasso.HitMode"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "sketch"
+        },
+        {
+          "suffix": ".Add",
+          "name": "Add",
+          "iconKey": "Plus",
+          "description": "Click to start drawing a new polygon.",
+          "optionIDs": [],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor"
+        },
+        {
+          "suffix": ".Edit",
+          "name": "Move",
+          "iconKey": "Pencil",
+          "description": "Move existing polygon vertices and delete features.",
+          "optionIDs": [
+            "Marquee.SelectionShape",
+            "Lasso.HitMode"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor2"
+        }
+      ],
+      "source": "Visual.Mapping.Observables.dll/Visual.Mapping.Observables/StandardToolFactories.cs"
+    },
+    {
+      "factory": "PolylineGeoprocessingTools",
+      "defaultPrefix": "Polyline",
+      "groupName": "Geoprocessing",
+      "experimental": true,
+      "tools": [
+        {
+          "suffix": ".GP.Reverse",
+          "name": "Reverse",
+          "iconKey": "Refresh",
+          "description": "Click a polyline to reverse its direction.",
+          "optionIDs": [],
+          "availabilityExpression": null,
+          "sourceVariable": "face"
+        },
+        {
+          "suffix": ".GP.Split",
+          "name": "Split",
+          "iconKey": "Split",
+          "description": "Click a polyline to split it; Alt+click swaps to the non-default split mode.",
+          "optionIDs": [
+            "Polyline.Split.Mode"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor"
+        },
+        {
+          "suffix": ".GP.Merge",
+          "name": "Merge",
+          "iconKey": "Merge",
+          "description": "Click two polylines in sequence to merge them, or drag a closed lasso to merge contained polylines.",
+          "optionIDs": [
+            "Polyline.Merge.ToleranceWorld"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor2"
+        },
+        {
+          "suffix": ".GP.Snap",
+          "name": "Snap",
+          "iconKey": "Pin",
+          "description": "Click a polyline (or drag a closed lasso) to snap vertices to nearby high or low ground.",
+          "optionIDs": [
+            "Experimental.Snap.SearchRadiusPixels",
+            "Experimental.Snap.SearchRadiusWorld",
+            "Polyline.Snap.SampleSpacing",
+            "Polyline.Snap.SearchMode",
+            "Polyline.Snap.ElevationMode",
+            "Polyline.Snap.PointsPerRing",
+            "Polyline.Snap.Iterations"
+          ],
+          "availabilityExpression": "() => terrainSource?.Invoke() != null",
+          "sourceVariable": "toolDescriptor3"
+        },
+        {
+          "suffix": ".GP.Offset",
+          "name": "Offset",
+          "iconKey": "Offset",
+          "description": "Click a polyline to replace it with its offset polylines.",
+          "optionIDs": [
+            "Polyline.Offset.Distance",
+            "Polyline.Offset.Sides",
+            "Polyline.Offset.IncludeEndpoints",
+            "Polyline.Offset.KeepOriginal"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor4"
+        },
+        {
+          "suffix": ".GP.Filter",
+          "name": "Filter",
+          "iconKey": "Filter",
+          "description": "Click a polyline to Douglas-Peucker simplify it. Hover to preview.",
+          "optionIDs": [
+            "LineFeature.Filter.Epsilon"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor5"
+        },
+        {
+          "suffix": ".GP.Smooth",
+          "name": "Smooth",
+          "iconKey": "Smooth",
+          "description": "Click a polyline to smooth it (moving average). Hover to preview.",
+          "optionIDs": [
+            "LineFeature.Smooth.WindowSize",
+            "LineFeature.Smooth.Iterations"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor6"
+        },
+        {
+          "suffix": ".GP.SmartAdd",
+          "name": "Ridge",
+          "iconKey": "AI",
+          "description": "Click to start drawing a polyline whose segments follow ridges/valleys between clicks (requires terrain).",
+          "optionIDs": [
+            "Polyline.SmartAdd.Algorithm",
+            "Polyline.SmartAdd.DpTolerancePixels",
+            "Polyline.SmartAdd.MaxSegmentPixels",
+            "Polyline.SmartAdd.PreviewThrottlePixels",
+            "Polyline.SmartAdd.HighGround.Alpha",
+            "Polyline.SmartAdd.HighGround.BailRatio",
+            "Polyline.SmartAdd.HighGround.SnapRadiusCells",
+            "Polyline.SmartAdd.Hessian.FrangiBeta",
+            "Polyline.SmartAdd.Hessian.FeaturePenaltyKappa",
+            "Polyline.SmartAdd.Hessian.OffFeatureBailMultiplier",
+            "Polyline.SmartAdd.Hessian.MinExpansionsBudget",
+            "Polyline.SmartAdd.Hessian.ExpansionsPerEuclidPx",
+            "Polyline.SmartAdd.Hessian.MaxEuclidCells"
+          ],
+          "availabilityExpression": "() => batchSample != null",
+          "sourceVariable": "toolDescriptor7"
+        },
+        {
+          "suffix": ".GP.DeepConnect",
+          "name": "Connect",
+          "iconKey": "Link",
+          "description": "Click to draw a polyline whose vertices snap to the nearest visible polyline, polygon ring, or topology arc.",
+          "optionIDs": [
+            "DeepConnect.SnapTolerancePixels"
+          ],
+          "availabilityExpression": "() => deepConnectSupplier != null",
+          "sourceVariable": "toolDescriptor8"
+        }
+      ],
+      "source": "Visual.Mapping.Observables.dll/Visual.Mapping.Observables/StandardToolFactories.cs"
+    },
+    {
+      "factory": "TopologyGeoprocessingTools",
+      "defaultPrefix": "Topology",
+      "groupName": "Geoprocessing",
+      "experimental": true,
+      "tools": [
+        {
+          "suffix": ".GP.Reverse",
+          "name": "Reverse",
+          "iconKey": "Refresh",
+          "description": "Click an arc to reverse its internal points (start/end nodes are pinned).",
+          "optionIDs": [],
+          "availabilityExpression": null,
+          "sourceVariable": "face"
+        },
+        {
+          "suffix": ".GP.Snap",
+          "name": "Snap",
+          "iconKey": "Pin",
+          "description": "Click an arc (or drag a closed lasso) to snap its internal points to nearby high or low ground.",
+          "optionIDs": [
+            "Experimental.Snap.SearchRadiusPixels",
+            "Experimental.Snap.SearchRadiusWorld",
+            "Polyline.Snap.SampleSpacing",
+            "Polyline.Snap.SearchMode",
+            "Polyline.Snap.ElevationMode",
+            "Polyline.Snap.PointsPerRing",
+            "Polyline.Snap.Iterations"
+          ],
+          "availabilityExpression": "() => terrainSource?.Invoke() != null",
+          "sourceVariable": "toolDescriptor"
+        },
+        {
+          "suffix": ".GP.Filter",
+          "name": "Filter",
+          "iconKey": "Filter",
+          "description": "Click an arc to Douglas-Peucker simplify its internal points. Hover to preview.",
+          "optionIDs": [
+            "Arc.Filter.Epsilon"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor2"
+        },
+        {
+          "suffix": ".GP.Smooth",
+          "name": "Smooth",
+          "iconKey": "Smooth",
+          "description": "Click an arc to smooth its internal points (moving average). Hover to preview.",
+          "optionIDs": [
+            "Arc.Smooth.WindowSize",
+            "Arc.Smooth.Iterations"
+          ],
+          "availabilityExpression": null,
+          "sourceVariable": "toolDescriptor3"
+        },
+        {
+          "suffix": ".GP.SmartAdd",
+          "name": "Ridge",
+          "iconKey": "AI",
+          "description": "Click to start drawing an arc whose segments follow ridges/valleys between clicks (requires terrain).",
+          "optionIDs": [
+            "Polyline.SmartAdd.Algorithm",
+            "Polyline.SmartAdd.DpTolerancePixels",
+            "Polyline.SmartAdd.MaxSegmentPixels",
+            "Polyline.SmartAdd.PreviewThrottlePixels",
+            "Polyline.SmartAdd.HighGround.Alpha",
+            "Polyline.SmartAdd.HighGround.BailRatio",
+            "Polyline.SmartAdd.HighGround.SnapRadiusCells",
+            "Polyline.SmartAdd.Hessian.FrangiBeta",
+            "Polyline.SmartAdd.Hessian.FeaturePenaltyKappa",
+            "Polyline.SmartAdd.Hessian.OffFeatureBailMultiplier",
+            "Polyline.SmartAdd.Hessian.MinExpansionsBudget",
+            "Polyline.SmartAdd.Hessian.ExpansionsPerEuclidPx",
+            "Polyline.SmartAdd.Hessian.MaxEuclidCells"
+          ],
+          "availabilityExpression": "() => batchSample != null",
+          "sourceVariable": "toolDescriptor4"
+        },
+        {
+          "suffix": ".GP.DeepConnect",
+          "name": "Connect",
+          "iconKey": "Link",
+          "description": "Click to draw an arc whose vertices snap to the nearest visible polyline, polygon ring, or topology arc.",
+          "optionIDs": [
+            "DeepConnect.SnapTolerancePixels"
+          ],
+          "availabilityExpression": "() => deepConnectSupplier != null",
+          "sourceVariable": "toolDescriptor5"
+        }
+      ],
+      "source": "Visual.Mapping.Observables.dll/Visual.Mapping.Observables/StandardToolFactories.cs"
+    }
+  ],
+  "limits": [
+    "Presentation metadata does not prove original map editing, availability, activation or tool routing.",
+    "Generic polyline/polygon factories require runtime source context IDs and option scopes from the adapter."
+  ]
+}

@@ -1,0 +1,832 @@
+using System.Globalization;
+using System.Xml.Linq;
+using Geospatial.GDALAssist;
+using H5Assist;
+using Ras.Layers;
+using Ras.Layers.Terrains;
+using Ras.Observables;
+using Utility.Files;
+
+namespace Ras.Backend;
+
+public sealed record CatalogTreeMapDocument(string Id, string Name, string Kind);
+public sealed record CatalogTreeRequest(
+    string ProjectPath,
+    string? ProjectXml = null,
+    string Mode = "Catalog",
+    string[]? FocusedGeometryIds = null,
+    string[]? FocusedPlanIds = null,
+    string? MapId = null,
+    CatalogTreeMapDocument[]? Maps = null,
+    string[]? FocusedBoundaryConditionIds = null);
+public sealed record CatalogTreeProperty(string Id, string Label, string Value);
+public sealed record CatalogTreeSummary(string? Name = null, string? Filename = null,
+    string? DateCreated = null, string? DateLastModified = null, string? Description = null);
+public sealed record CatalogTreeBackupSummary(string Filename, string DateCreated, string DateLastModified,
+    bool CanSaveAsNewGeometry = false, string? Revision = null,
+    string? ParentGeometryPath = null, string? ParentGeometryRevision = null,
+    string? ProjectRevision = null);
+public sealed record CatalogTreeNode(
+    string Id,
+    string SourceClass,
+    string Name,
+    bool LocalizeName = false,
+    CatalogTreeNode[]? Children = null,
+    string? AssetID = null,
+    CatalogTreeSummary? CatalogSummary = null,
+    CatalogTreeBackupSummary? BackupSummary = null,
+    CatalogTreeProperty[]? Properties = null,
+    string? Checked = null,
+    bool IsPinned = false,
+    bool CanPin = false,
+    bool CanRename = false,
+    bool CanMove = false,
+    bool CanAcceptChildren = false,
+    bool CanCreateFolder = false,
+    CatalogTreeNodeLocator? Locator = null,
+    CatalogTreeLayerError[]? LayerErrors = null,
+    string? DiagnosticStatus = null,
+    string? DiagnosticSourceIdentity = null,
+    string? DiagnosticSourceRevision = null,
+    string? DiagnosticReadError = null,
+    string? ResultComputeState = null,
+    string? ResultComputeFailureReason = null,
+    string? ResultComputeSourcePath = null,
+    string? ResultComputeSourceRevision = null)
+{
+    // Retained internally so MapTreeService can mirror MultiResultVisualContext's
+    // Latest key-frame selection without adding implementation metadata to the
+    // native tree wire model.
+    internal DateTime? ResultEndTime { get; init; }
+    internal string? ResultPlanName { get; init; }
+    internal string? SelectedResultAssetID { get; init; }
+    internal string? SelectedResultRevision { get; init; }
+}
+public sealed record CatalogTreeNodeLocator(
+    string RootName,
+    string NodeType,
+    string NodeName,
+    int[]? NodePath = null,
+    string? AssetID = null,
+    string? MapType = null,
+    string? Filename = null,
+    string? FilenameRelative = null,
+    string? ParentGeometryAssetID = null,
+    int[]? ParentGeometryNodePath = null,
+    string? ParentGeometryNodeName = null,
+    string? AssociationAssetID = null,
+    string? AssociationKind = null,
+    string? ParentPlanAssetID = null,
+    int[]? ParentPlanNodePath = null,
+    string? ParentPlanNodeName = null,
+    string? ParentResultNodeType = null,
+    string? ParentResultAssetID = null,
+    int[]? ParentResultNodePath = null,
+    string? ParentResultNodeName = null,
+    string? ParentResultRevision = null,
+    string? ParentBoundaryConditionAssetID = null,
+    int[]? ParentBoundaryConditionNodePath = null,
+    string? ParentBoundaryConditionNodeName = null);
+public sealed record CatalogTreeSnapshot(CatalogTreeNode[] Roots);
+
+/// <summary>
+/// Read-only source adapter for the two distinct HEC-RAS tree models. Catalog
+/// roots match RasCatalogTree; map/project trees match ProjectTreeModeVM and
+/// are assembled from the same loaded Project/ObservableProject objects.
+/// </summary>
+public static class CatalogTreeService
+{
+    private static readonly StringComparer PathComparer = OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
+    public static CatalogTreeSnapshot LoadCatalog(CatalogTreeRequest request)
+    {
+        using var project = new CatalogProjectContext(request);
+        CatalogTreeNode[] roots = BuildCatalog(project.Project, project.Observables, request.Maps ?? [],
+            project.Diagnostics);
+        return new CatalogTreeSnapshot(project.Diagnostics.Attach(roots));
+    }
+
+    public static CatalogTreeSnapshot LoadProject(CatalogTreeRequest request)
+    {
+        using var project = new CatalogProjectContext(request);
+        CatalogTreeNode[] roots = BuildProjectTree(project.Project, project.Observables, request);
+        return new CatalogTreeSnapshot(project.Diagnostics.Attach(roots));
+    }
+
+    public static CatalogTreeNode[] LoadMapTreeDefaults(CatalogTreeRequest request, string mapType)
+        => LoadMapTreeDefaults(request, mapType, protectedReadPaths: null);
+
+    internal static CatalogTreeNode[] LoadMapTreeDefaults(CatalogTreeRequest request, string mapType,
+        string[]? protectedReadPaths)
+    {
+        using var project = new CatalogProjectContext(request, protectedReadPaths);
+        CatalogTreeNode[] roots = mapType switch
+        {
+            "Project" => BuildProjectTree(project.Project, project.Observables, request with { Mode = "Project" })
+                .Where(node => node.Name != "Layers").ToArray(),
+            "Buildable" => BuildableMapTreeDefaults(project.Observables, request.FocusedGeometryIds ?? [],
+                request.FocusedBoundaryConditionIds ?? []),
+            "Geometry" => GeometryMapTreeDefaults(project.Project, project.Observables, request),
+            "Plan" => PlanMapTreeDefaults(project.Project, project.Observables, request),
+            _ => throw new NotSupportedException("Persistent map trees are supported only for Project, Buildable, Geometry and Plan maps.")
+        };
+        return project.Diagnostics.Attach(roots);
+    }
+
+    private static CatalogTreeNode[] BuildableMapTreeDefaults(ObservableProject observables,
+        IEnumerable<string> geometryIDs, IEnumerable<string> boundaryConditionIDs)
+    {
+        var included = geometryIDs.ToHashSet(PathComparer);
+        CatalogTreeNode[] geometries = observables.Geometries
+            .Select(GeometryProjectNode)
+            .Where(node => node.AssetID is { } path && included.Contains(path))
+            .ToArray();
+        var includedBoundaryConditions = boundaryConditionIDs.ToHashSet(PathComparer);
+        CatalogTreeNode[] boundaries = observables.BoundaryConditions
+            .Select(BoundaryConditionProjectNode)
+            .Where(node => node.AssetID is { } path && includedBoundaryConditions.Contains(path))
+            .ToArray();
+        return [Group("LayersSectionContext", "Layers", [..geometries, ..boundaries])];
+    }
+
+    private static CatalogTreeNode[] GeometryMapTreeDefaults(Project project, ObservableProject observables,
+        CatalogTreeRequest request)
+    {
+        CatalogTreeNode[] roots = BuildProjectTree(project, observables, request with { Mode = "Geometry" });
+        CatalogTreeNode focused = roots.Single(node => node.Name == "Focused Geometries");
+        CatalogTreeNode matching = roots.Single(node => node.Name == "Matching Layers");
+        CatalogTreeNode layers = WithDirectBoundaryConditions(roots.Single(node => node.Name == "Layers"),
+            observables, request.FocusedBoundaryConditionIds ?? []);
+        return [focused, matching, layers];
+    }
+
+    private static CatalogTreeNode[] PlanMapTreeDefaults(Project project, ObservableProject observables,
+        CatalogTreeRequest request)
+    {
+        CatalogTreeNode[] roots = BuildProjectTree(project, observables, request with { Mode = "Plan" });
+        CatalogTreeNode focused = roots.Single(node => node.Name == "Focused Plans");
+        CatalogTreeNode matching = roots.Single(node => node.Name == "Matching Layers");
+        CatalogTreeNode layers = roots.Single(node => node.Name == "Layers");
+
+        CatalogTreeNode[] focusedPlans = (focused.Children ?? []).Select(plan => plan with
+        {
+            Children = (plan.Children ?? []).Select(child => PlanAssociation(child)).ToArray()
+        }).ToArray();
+        CatalogTreeNode[] matchingChildren = (matching.Children ?? []).Select(child =>
+            PlanAssociation(child)).ToArray();
+        CatalogTreeNode layersWithBoundaries = WithDirectBoundaryConditions(layers, observables,
+            request.FocusedBoundaryConditionIds ?? []);
+        return [focused with { Children = focusedPlans.Length == 0 ? null : focusedPlans },
+            matching with { Children = matchingChildren.Length == 0 ? null : matchingChildren }, layersWithBoundaries];
+    }
+
+    private static CatalogTreeNode WithDirectBoundaryConditions(CatalogTreeNode layers,
+        ObservableProject observables, IEnumerable<string> boundaryConditionIDs)
+    {
+        var included = boundaryConditionIDs.ToHashSet(PathComparer);
+        CatalogTreeNode[] boundaries = observables.BoundaryConditions
+            .Select(BoundaryConditionProjectNode)
+            .Where(node => node.AssetID is { } path && included.Contains(path))
+            .ToArray();
+        return layers with { Children = [..layers.Children ?? [], ..boundaries] };
+    }
+
+    private static CatalogTreeNode PlanAssociation(CatalogTreeNode node)
+    {
+        string? kind = node.SourceClass switch
+        {
+            "ObservableGeometry" => "Geometry",
+            "ObservableTerrain" => "Terrain",
+            "ObservableNValueLayer" => "NValue",
+            "ObservableClassificationLayer" => "Classification",
+            "ObservableBoundaryCondition" => "BoundaryCondition",
+            _ => null
+        };
+        return kind is null ? node : WithAssociation(node, kind);
+    }
+
+    private static CatalogTreeNode[] BuildCatalog(Project project, ObservableProject observables,
+        IReadOnlyList<CatalogTreeMapDocument> maps, CatalogDiagnosticsService.Context diagnostics)
+    {
+        var modelChildren = new[]
+        {
+            Group("TerrainRootContext", "Terrains", observables.Terrains.Select(item => Node(item)).ToArray()),
+            Group("GeometryRootContext", "Geometries",
+                observables.Geometries.Select(item => GeometryCatalogNode(item, diagnostics)).ToArray()),
+            Group("NValueRootContext", "NValues", observables.NValues.Select(item => Node(item)).ToArray()),
+            Group("BoundaryConditionRootContext", "Boundary Conditions", observables.BoundaryConditions.Select(BoundaryConditionCatalogNode).ToArray()),
+            Group("PlanRootContext", "Plans", observables.Plans.Select(PlanCatalogNode).ToArray()),
+            Group("ResultRootContext", "Results", observables.Results.Select(ResultNode).ToArray()),
+            Group("ClassificationRootContext", "Classifications", observables.Classifications.Select(item => Node(item)).ToArray())
+        };
+
+        var projectProperties = new List<CatalogTreeProperty>
+        {
+            new("ProjectCount/Terrains", "Terrains", observables.Terrains.Count.ToString(CultureInfo.InvariantCulture)),
+            new("ProjectCount/Geometries", "Geometries", observables.Geometries.Count.ToString(CultureInfo.InvariantCulture)),
+            new("ProjectCount/Plans", "Plans", observables.Plans.Count.ToString(CultureInfo.InvariantCulture)),
+            new("ProjectCount/Results", "Results", observables.Results.Count.ToString(CultureInfo.InvariantCulture)),
+            new("ProjectCount/BoundaryConditions", "Boundary Conditions", observables.BoundaryConditions.Count.ToString(CultureInfo.InvariantCulture)),
+            new("ProjectCount/NValues", "N-Value Layers", observables.NValues.Count.ToString(CultureInfo.InvariantCulture)),
+            new("ProjectCount/Classifications", "Classifications", observables.Classifications.Count.ToString(CultureInfo.InvariantCulture)),
+            new("Project/Units", "Units", observables.Units.ToString())
+        };
+        if (observables.Projection is { } projection)
+        {
+            projectProperties.Add(new("Project/ProjectionName", "Projection", projection.GetName()));
+            projectProperties.Add(new("Project/ProjectionWKT", "Well-Known Text", projection.GetWKT()));
+        }
+        var model = new CatalogTreeNode("catalog/model", "ModelSectionContext", "Project", true,
+            modelChildren, CatalogSummary: new CatalogTreeSummary(project.Name, FullProjectPath(project),
+                Description: project.Description), Properties: projectProperties.ToArray());
+        var connections = project.ConnectionSource.Connections.Select((connection, index) =>
+        {
+            string id = "connection:" + index.ToString(CultureInfo.InvariantCulture);
+            string type = connection.SaveXML().Attribute("Type")?.Value ?? connection.GetType().Name;
+            var properties = new List<CatalogTreeProperty>
+            {
+                new("Name", "Name", connection.Name),
+                new("Type", "Type", type),
+                new("Description", "Description", connection.Description)
+            };
+            if (connection is PathExternalConnection pathConnection)
+            {
+                properties.Add(new("RelativePath", "Relative Path", pathConnection.RelativePath ?? ""));
+                properties.Add(new("AbsolutePath", "Absolute Path", pathConnection.AbsolutePath ?? ""));
+            }
+            if (connection is DirectoryExternalConnection directoryConnection)
+            {
+                properties.Add(new("SearchPattern", "Filename Pattern", directoryConnection.SearchPattern ?? "*"));
+                properties.Add(new("Recurse", "Include Subfolders", directoryConnection.Recurse.ToString()));
+            }
+            string sourceClass = connection is FileExternalConnection
+                ? "ExternalFileConnectionCatalogNode"
+                : "ExternalConnectionCatalogNode";
+            return new CatalogTreeNode(id, sourceClass, connection.Name,
+                Properties: properties.ToArray());
+        }).ToArray();
+        var externalConnections = Group("ExternalConnectionsSectionContext", "External Connections", connections);
+        var mapNodes = maps.Select(map => new CatalogTreeNode("map:" + map.Id, "MapDocumentNode", map.Name,
+            Properties: [new CatalogTreeProperty("Kind", "Kind", map.Kind)])).ToArray();
+        var mapRoot = Group("MapsSectionContext", "Maps", mapNodes);
+        return [model, externalConnections, mapRoot];
+    }
+
+    private static CatalogTreeNode PlanCatalogNode(ObservablePlan plan)
+    {
+        ObservableGeometry? geometry = plan.AssociatedGeometry;
+        ObservableNValueLayer? nvalue = geometry?.AssociatedNValueLayer;
+        var node = Node(plan);
+        return node with
+        {
+            Properties = (node.Properties ?? []).Concat([
+                new CatalogTreeProperty("PlanAssociation/Geometry", "Associated Geometry", geometry?.Name ?? ""),
+                new CatalogTreeProperty("PlanAssociation/NValueMode", "Associated N-Value Mode", nvalue?.Mode.ToString() ?? ""),
+                new CatalogTreeProperty("PlanAssociation/Classification", "Classification Layer", nvalue?.ClassificationLayer?.Name ?? "")
+            ]).ToArray()
+        };
+    }
+
+    private static CatalogTreeNode BoundaryConditionCatalogNode(ObservableBoundaryCondition condition)
+    {
+        var node = Node(condition);
+        return node with
+        {
+            Properties = (node.Properties ?? []).Concat([
+                new CatalogTreeProperty("BoundaryCondition/StartTime", "Start Time", condition.StartTime.ToString()),
+                new CatalogTreeProperty("BoundaryCondition/EndTime", "End Time", condition.EndTime.ToString())
+            ]).ToArray()
+        };
+    }
+
+    private static CatalogTreeNode[] BuildProjectTree(Project project, ObservableProject observables,
+        CatalogTreeRequest request)
+    {
+        var plans = observables.Plans.ToDictionary(item => AssetPath(project, item.Filename)!, StringComparer.Ordinal);
+        var geometries = observables.Geometries.ToDictionary(item => AssetPath(project, item.Filename)!, StringComparer.Ordinal);
+        var results = observables.Results.ToArray();
+
+        CatalogTreeNode[] baseRoots =
+        [
+            Group("PlansSectionContext", "Plans", observables.Plans.Select(item => Node(item)).ToArray()),
+            Group("ResultsSectionContext", "Results", ProjectResults(project, results)),
+            Group("GeometriesSectionContext", "Geometries", observables.Geometries.Select(GeometryProjectNode).ToArray()),
+            Group("TerrainsSectionContext", "Terrains", observables.Terrains.Select(TerrainProjectNode).ToArray()),
+            Group("SurfaceLayersSectionContext", "Surface Layers",
+                observables.NValues.Select(item => Node(item)).Concat(observables.Classifications.Select(item => Node(item))).ToArray()),
+            Group("MapLayersSectionContext", "Map Layers", []),
+            Group("FeaturesSectionContext", "Features", []),
+            Group("BoundaryConditionsSectionContext", "Boundary Conditions",
+                observables.BoundaryConditions.Select(BoundaryConditionProjectNode).ToArray()),
+            Group("LayersSectionContext", "Layers", [])
+        ];
+
+        return request.Mode switch
+        {
+            "Project" => baseRoots,
+            "Plan" => PlanModeRoots(project, request.FocusedPlanIds ?? [], plans, results, baseRoots),
+            "Geometry" => GeometryModeRoots(request.FocusedGeometryIds ?? [], geometries, baseRoots),
+            _ => throw new NotSupportedException("Unsupported project tree mode: " + request.Mode)
+        };
+    }
+
+    private static CatalogTreeNode[] PlanModeRoots(Project project,
+        IEnumerable<string> focusedIDs, IReadOnlyDictionary<string, ObservablePlan> plans,
+        IReadOnlyList<ObservableResult> results, CatalogTreeNode[] baseRoots)
+    {
+        var focused = focusedIDs.Distinct(StringComparer.Ordinal).Select(id => plans.GetValueOrDefault(id))
+            .Where(item => item != null).Cast<ObservablePlan>().ToArray();
+        var matchingChildren = new List<CatalogTreeNode>();
+        bool geometriesMatch = false, terrainsMatch = false, nvaluesMatch = false, boundariesMatch = false;
+        if (focused.Length > 1)
+        {
+            geometriesMatch = MatchSourceAssociations(focused.Select(plan => plan.AssociatedGeometry));
+            terrainsMatch = MatchSourceAssociations(focused.Select(plan => plan.AssociatedGeometry?.AssociatedTerrain));
+            nvaluesMatch = MatchSourceAssociations(focused.Select(plan => plan.AssociatedGeometry?.AssociatedNValueLayer));
+            boundariesMatch = MatchSourceAssociations(focused.Select(plan => plan.AssociatedBoundaryCondition));
+            ObservablePlan first = focused[0];
+            if (terrainsMatch && first.AssociatedGeometry?.AssociatedTerrain is { } commonTerrain)
+                matchingChildren.Add(TerrainProjectNode(commonTerrain));
+            if (geometriesMatch && first.AssociatedGeometry is { } commonGeometry)
+                matchingChildren.Add(GeometryDependencyNode(commonGeometry));
+            if (nvaluesMatch && first.AssociatedGeometry?.AssociatedNValueLayer is { } commonNValue)
+                matchingChildren.Add(Node(commonNValue));
+            if (boundariesMatch && first.AssociatedBoundaryCondition is { } commonBoundary)
+                matchingChildren.Add(BoundaryConditionProjectNode(commonBoundary));
+        }
+
+        var focusedNodes = focused.Select(plan => FocusedPlanNode(project, plan, results,
+            buildGeometry: !geometriesMatch, buildTerrain: !terrainsMatch,
+            buildNValue: !nvaluesMatch, buildBoundaryCondition: !boundariesMatch)).ToArray();
+        return [
+            Group("FocusedPlansSectionContext", "Focused Plans", focusedNodes),
+            Group("MatchingPlanLayersSectionContext", "Matching Layers", matchingChildren.ToArray()),
+            ..baseRoots
+        ];
+    }
+
+    private static CatalogTreeNode[] GeometryModeRoots(IEnumerable<string> focusedIDs,
+        IReadOnlyDictionary<string, ObservableGeometry> geometries,
+        CatalogTreeNode[] baseRoots)
+    {
+        var focused = focusedIDs.Distinct(StringComparer.Ordinal).Select(id => geometries.GetValueOrDefault(id))
+            .Where(item => item != null).Cast<ObservableGeometry>().ToArray();
+        var matchingChildren = new List<CatalogTreeNode>();
+        bool terrainsMatch = false, nvaluesMatch = false, classificationsMatch = false;
+        if (focused.Length > 1)
+        {
+            terrainsMatch = MatchSourceAssociations(focused.Select(item => item.AssociatedTerrain));
+            nvaluesMatch = MatchSourceAssociations(focused.Select(item => item.AssociatedNValueLayer));
+            classificationsMatch = MatchSourceAssociations(focused.Where(item => item.AssociatedNValueLayer != null)
+                .Select(item => item.AssociatedNValueLayer?.ClassificationLayer));
+            if (terrainsMatch && focused[0].AssociatedTerrain is { } terrain)
+                matchingChildren.Add(WithAssociation(TerrainProjectNode(terrain), "Terrain"));
+            if (nvaluesMatch && focused[0].AssociatedNValueLayer is { } nvalue)
+                matchingChildren.Add(WithAssociation(Node(nvalue), "NValue"));
+            if (classificationsMatch && focused[0].AssociatedNValueLayer?.ClassificationLayer is { } classification)
+                matchingChildren.Add(WithAssociation(Node(classification), "Classification"));
+        }
+        var focusedNodes = focused.Select(item => FocusedGeometryNode(item, buildTerrain: !terrainsMatch,
+            buildNValue: !nvaluesMatch, buildClassification: !classificationsMatch)).ToArray();
+        return [
+            Group("FocusedGeometriesSectionContext", "Focused Geometries", focusedNodes),
+            Group("MatchingGeometryLayersSectionContext", "Matching Layers", matchingChildren.ToArray()),
+            ..baseRoots
+        ];
+    }
+
+    private static CatalogTreeNode FocusedPlanNode(Project project, ObservablePlan plan,
+        IReadOnlyList<ObservableResult> results, bool buildGeometry, bool buildTerrain,
+        bool buildNValue, bool buildBoundaryCondition)
+    {
+        var children = new List<CatalogTreeNode>();
+        if (plan.AssociatedGeometry is { } geometry)
+        {
+            if (buildGeometry) children.Add(GeometryDependencyNode(geometry));
+            if (geometry.AssociatedNValueLayer is { } nvalue)
+            {
+                if (buildNValue) children.Add(Node(nvalue));
+                if (nvalue.ClassificationLayer is { } classification) children.Add(Node(classification));
+            }
+            if (buildTerrain && geometry.AssociatedTerrain is { } terrain) children.Add(TerrainProjectNode(terrain));
+        }
+        if (buildBoundaryCondition && plan.AssociatedBoundaryCondition is { } boundary)
+            children.Add(BoundaryConditionProjectNode(boundary));
+        var planResults = results.Where(result => result.Plan?.Name == plan.Name).ToArray();
+        if (planResults.Length > 0)
+            children.Add(new CatalogTreeNode(NodeID("multi-result", AssetPath(project, plan.Filename) ?? plan.Filename),
+                "MultiResultNodeVM", plan.Name,
+                Children: planResults.OrderBy(item => item.Name, StringComparer.CurrentCulture).Select(ResultNode).ToArray(),
+                AssetID: AssetPath(project, plan.Filename)));
+        return Node(plan, children.ToArray());
+    }
+
+    private static CatalogTreeNode GeometryDependencyNode(ObservableGeometry geometry) =>
+        Node(geometry, GeometryComponents(geometry));
+
+    private static CatalogTreeNode FocusedGeometryNode(ObservableGeometry geometry, bool buildTerrain,
+        bool buildNValue, bool buildClassification)
+    {
+        var children = GeometryComponents(geometry).ToList();
+        if (geometry.AssociatedNValueLayer is { } nvalue)
+        {
+            if (buildNValue) children.Add(WithAssociation(Node(nvalue), "NValue"));
+            if (buildClassification && nvalue.ClassificationLayer is { } classification)
+                children.Add(WithAssociation(Node(classification), "Classification"));
+        }
+        if (buildTerrain && geometry.AssociatedTerrain is { } terrain)
+            children.Add(WithAssociation(TerrainProjectNode(terrain), "Terrain"));
+        return Node(geometry, children.ToArray());
+    }
+
+    private static CatalogTreeNode WithAssociation(CatalogTreeNode node, string kind)
+    {
+        if (node.AssetID is not { Length: > 0 } assetID)
+            throw new InvalidDataException("A source-associated map layer has no asset identity.");
+        string nodeType = node.SourceClass switch
+        {
+            "ObservableGeometry" => "Geometry",
+            "ObservableTerrain" => "Terrain",
+            "ObservableNValueLayer" => "NValue",
+            "ObservableClassificationLayer" => "Classification",
+            "ObservableBoundaryCondition" => "BoundaryCondition",
+            _ => throw new InvalidDataException("The associated source layer type is not supported.")
+        };
+        var locator = node.Locator ?? new CatalogTreeNodeLocator("", nodeType, node.Name, AssetID: assetID);
+        return node with
+        {
+            Locator = locator with { AssociationAssetID = assetID, AssociationKind = kind }
+        };
+    }
+
+    private static CatalogTreeNode[] ProjectResults(Project project, IReadOnlyList<ObservableResult> results)
+    {
+        var grouped = results.Where(result => result.Plan != null).GroupBy(result => result.Plan.Name, StringComparer.Ordinal)
+            .Select(group =>
+            {
+                Plan[] plans = project.Plans.Where(item =>
+                    string.Equals(item.Name, group.Key, StringComparison.Ordinal)).ToArray();
+                string? planAsset = plans.Length == 1 ? AssetPath(project, plans[0].Filename) : null;
+                return new CatalogTreeNode(NodeID("multi-result", planAsset ?? group.Key), "MultiResultNodeVM", group.Key,
+                    Children: group.OrderBy(item => item.Name, StringComparer.CurrentCulture).Select(ResultNode).ToArray(),
+                    AssetID: planAsset);
+            });
+        var unmatched = results.Where(result => result.Plan == null).Select(ResultNode).ToArray();
+        return grouped.Concat(unmatched.Length == 0 ? [] : [new CatalogTreeNode("folder:unmatched-results", "FolderVM", "Unmatched Results", Children: unmatched)])
+            .ToArray();
+    }
+
+    private static CatalogTreeNode GeometryProjectNode(ObservableGeometry geometry) => Node(geometry, GeometryComponents(geometry));
+
+    private static CatalogTreeNode[] GeometryComponents(ObservableGeometry geometry)
+    {
+        var children = new List<CatalogTreeNode>
+        {
+            Component("ConceptualMeshLayerVisualContext", "Conceptual Mesh") with { LocalizeName = true },
+            Component("FlowAreaLayerVisualContext", "Computational Mesh") with { LocalizeName = true }
+        };
+        if (geometry.CulvertBarrelLayer != null)
+            children.Add(Component("CulvertBarrelLayerVisualContext", "Culvert Barrels") with { LocalizeName = true });
+        return children.ToArray();
+    }
+
+    private static CatalogTreeNode TerrainProjectNode(ObservableTerrain terrain)
+    {
+        string? terrainPath = AssetPath(terrain.Layer.Project!, terrain.Layer.Filename);
+        var inputs = terrain.VectorModTerrainInputs.Select((input, index) =>
+            TerrainInputNode(terrainPath, input, index)).ToArray();
+        return Node(terrain, inputs);
+    }
+
+    private static CatalogTreeNode TerrainInputNode(string? terrainPath, IObservableTerrainInput input, int inputIndex)
+    {
+        string sourceClass = TerrainInputSourceClass(input);
+        CatalogTreeNode[]? children = input.GetType().Name == "ObservableChannelModTerrainInput"
+            ? [Component("ChannelModTopologyLayerVisualContext", "Topology"), Component("ChannelModTerrainInputVC", "Cross Sections")]
+            : null;
+        if (terrainPath is null)
+            return Component(sourceClass, input.Name, children);
+
+        string id = TerrainInputNodeID(terrainPath, sourceClass, input.Name, inputIndex);
+        bool canRender = sourceClass is "ChannelModTerrainInputParentVC" or "LeveeModTerrainInputVC"
+            or "PolygonRasterModTerrainInputVisualContext";
+        return new CatalogTreeNode(id, sourceClass, input.Name,
+            Children: children is { Length: > 0 } ? children : null,
+            AssetID: terrainPath,
+            Checked: canRender ? "unchecked" : null,
+            CanPin: false,
+            Properties: [
+                new CatalogTreeProperty("TerrainInput/SourceClass", "Source Class", sourceClass),
+                new CatalogTreeProperty("TerrainInput/Index", "Source Index", inputIndex.ToString(CultureInfo.InvariantCulture))
+            ]);
+    }
+
+    private static string TerrainInputSourceClass(IObservableTerrainInput input) => input.GetType().Name switch
+    {
+        "ObservableChannelModTerrainInput" => "ChannelModTerrainInputParentVC",
+        "ObservableLeveeModTerrainInput" => "LeveeModTerrainInputVC",
+        "ObservablePolygonRasterModTerrainInput" => "PolygonRasterModTerrainInputVisualContext",
+        "ObservableEllipseRasterModificationLayer" => "EllipseRasterModTerrainInputVisualContext",
+        _ => "TerrainInputNode"
+    };
+
+    internal static string TerrainInputNodeID(string terrainPath, string sourceClass, string inputName, int inputIndex)
+    {
+        string canonicalPath = SourceFilePaths.Canonical(terrainPath);
+        string identity = string.Join("\n", canonicalPath, sourceClass, inputIndex.ToString(CultureInfo.InvariantCulture), inputName);
+        return "terrain-input:" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(identity)))[..24];
+    }
+
+    internal static TerrainInputMapContextData ReadTerrainInputMapContext(
+        CatalogTreeRequest request, string inputNodeID, string expectedSourceClass, string expectedTerrainPath)
+    {
+        using var project = new CatalogProjectContext(request with { Mode = "Project" });
+        string canonicalTerrainPath = SourceFilePaths.Canonical(expectedTerrainPath);
+        var terrainMatches = project.Observables.Terrains
+            .Where(candidate => AssetPath(candidate.Layer.Project!, candidate.Layer.Filename) is { } path &&
+                PathComparer.Equals(SourceFilePaths.Canonical(path), canonicalTerrainPath))
+            .ToArray();
+        if (terrainMatches.Length != 1) throw new SourceFileChangedException();
+        ObservableTerrain terrain = terrainMatches[0];
+        var inputMatches = terrain.VectorModTerrainInputs.Select((input, index) => (input, index))
+            .Where(pair => string.Equals(TerrainInputSourceClass(pair.input), expectedSourceClass, StringComparison.Ordinal) &&
+                string.Equals(TerrainInputNodeID(canonicalTerrainPath, expectedSourceClass, pair.input.Name, pair.index),
+                    inputNodeID, StringComparison.Ordinal))
+            .ToArray();
+        if (inputMatches.Length != 1) throw new SourceFileChangedException();
+
+        (string? stablePath, string? revision) = TryReadStableRevision(canonicalTerrainPath);
+        if (stablePath is null || revision is null || !PathComparer.Equals(stablePath, canonicalTerrainPath))
+            throw new SourceFileChangedException();
+
+        Projection? sourceProjection = terrain.Layer.Project?.Projection;
+        Projection? mapProjection = project.Project.Projection;
+        if ((sourceProjection is null) != (mapProjection is null))
+            throw new InvalidDataException("The terrain input and map projections do not share a valid transformation.");
+        ReprojectionTransformer? transform = sourceProjection is not null && mapProjection is not null &&
+            !sourceProjection.IsEqual(mapProjection)
+                ? ReprojectionTransformer.GetOrMake(sourceProjection, mapProjection) : null;
+
+        IObservableTerrainInput observable = inputMatches[0].input;
+        TerrainInputMapContextFeature[] features = observable.TerrainInput switch
+        {
+            ChannelModTerrainInput channel => channel.Features.Select((feature, index) =>
+                LineFeature(inputNodeID, index, feature.Line, transform)).Where(feature => feature is not null)
+                .Cast<TerrainInputMapContextFeature>().ToArray(),
+            LeveeModTerrainInput levee => levee.Features.Select((feature, index) =>
+                LineFeature(inputNodeID, index, feature.Line, transform)).Where(feature => feature is not null)
+                .Cast<TerrainInputMapContextFeature>().ToArray(),
+            PolygonRasterModTerrainInput polygon => polygon.Features.Select((feature, index) =>
+                PolygonFeature(inputNodeID, index, feature.Polygon, transform)).Where(feature => feature is not null)
+                .Cast<TerrainInputMapContextFeature>().ToArray(),
+            _ => throw new NotSupportedException("This terrain input does not expose a source map render layer.")
+        };
+
+        (string? currentPath, string? currentRevision) = TryReadStableRevision(canonicalTerrainPath);
+        if (!PathComparer.Equals(currentPath, stablePath) || !string.Equals(currentRevision, revision, StringComparison.Ordinal))
+            throw new SourceFileChangedException();
+        return new TerrainInputMapContextData(inputNodeID, inputMatches[0].index, canonicalTerrainPath, revision,
+            expectedSourceClass, features);
+    }
+
+    private static TerrainInputMapContextFeature? LineFeature(string inputNodeID, int index,
+        Geospatial.Vectors.Polyline? line, ReprojectionTransformer? transform)
+    {
+        if (line is null || line.Count < 2) return null;
+        Geospatial.Vectors.Point[] points = line.GetPointBufferUnsafe().Span.ToArray();
+        if (points.Any(point => !double.IsFinite(point.X) || !double.IsFinite(point.Y))) return null;
+        transform?.Transform(points.AsSpan(), points.AsSpan());
+        if (points.Any(point => !double.IsFinite(point.X) || !double.IsFinite(point.Y))) return null;
+        return new TerrainInputMapContextFeature(inputNodeID + ":feature:" + index.ToString(CultureInfo.InvariantCulture),
+            "line", points.Select(point => new TerrainMapCoordinate(point.X, point.Y)).ToArray(), false);
+    }
+
+    private static TerrainInputMapContextFeature? PolygonFeature(string inputNodeID, int index,
+        Geospatial.Vectors.Polygon? polygon, ReprojectionTransformer? transform)
+    {
+        if (polygon is null || polygon.Count < 3) return null;
+        Geospatial.Vectors.Point[] points = polygon.GetPointBufferUnsafe().Span.ToArray();
+        if (points.Any(point => !double.IsFinite(point.X) || !double.IsFinite(point.Y))) return null;
+        transform?.Transform(points.AsSpan(), points.AsSpan());
+        if (points.Any(point => !double.IsFinite(point.X) || !double.IsFinite(point.Y))) return null;
+        return new TerrainInputMapContextFeature(inputNodeID + ":feature:" + index.ToString(CultureInfo.InvariantCulture),
+            "polygon", points.Select(point => new TerrainMapCoordinate(point.X, point.Y)).ToArray(), true);
+    }
+
+    private static CatalogTreeNode BoundaryConditionProjectNode(ObservableBoundaryCondition condition)
+    {
+        var children = new List<CatalogTreeNode>
+        {
+            Component("BoundaryConditionLineLayerVC", "Boundary Condition Lines"),
+            Component("PrecipitationLayerVisualContext", "Precipitation")
+        };
+        // Wind is a separate source context below the exact Boundary owner.
+        // Result-owned BoundaryCondition rows cannot supply the project
+        // WindLayer source used by the retained map sampler.
+        if (!condition.IsResult)
+            children.Add(Component("WindLayerVisualContext", "Wind Forces") with { LocalizeName = true });
+        return Node(condition, children.ToArray());
+    }
+
+    private static CatalogTreeNode GeometryCatalogNode(ObservableGeometry geometry,
+        CatalogDiagnosticsService.Context diagnostics)
+    {
+        string parentPath = Path.GetFullPath(geometry.Filename);
+        (string? parentCanonicalPath, string? parentRevision) = diagnostics.ReadStableRevision(parentPath);
+        (string? projectCanonicalPath, string? projectRevision) = TryReadStableRevision(geometry.Project.Filename);
+        var backups = geometry.BackupFiles.Select(filename =>
+        {
+            string backupPath = Path.GetFullPath(filename);
+            (string? canonicalPath, string? revision) = TryReadStableRevision(backupPath);
+            bool canRestore = canonicalPath != null && revision != null &&
+                parentCanonicalPath != null && parentRevision != null &&
+                projectCanonicalPath != null && projectRevision != null;
+            return new CatalogTreeNode(
+                NodeID("backup", (parentCanonicalPath ?? parentPath) + "/" + (canonicalPath ?? backupPath)),
+                "BackupNodeVM", Path.GetFileName(backupPath),
+                AssetID: canonicalPath,
+                BackupSummary: new CatalogTreeBackupSummary(backupPath, geometry.Geometry.DateCreated ?? "",
+                    geometry.Geometry.DateLastModified ?? "", canRestore, revision,
+                    parentCanonicalPath, parentRevision, projectRevision));
+        }).ToArray();
+        CatalogTreeNode[]? children = backups.Length == 0 ? null : [Group("BackupRootNodeVM", "Backups", backups)];
+        return Node(geometry, children);
+    }
+
+    internal static (string? CanonicalPath, string? Revision) TryReadStableRevision(string path)
+    {
+        try
+        {
+            string canonicalBefore = SourceFilePaths.Canonical(path);
+            var before = new FileInfo(path);
+            long lengthBefore = before.Length;
+            DateTime writeBefore = before.LastWriteTimeUtc;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            string revision = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
+            before.Refresh();
+            string canonicalAfter = SourceFilePaths.Canonical(path);
+            if (!string.Equals(canonicalBefore, canonicalAfter, StringComparison.Ordinal) ||
+                before.Length != lengthBefore || before.LastWriteTimeUtc != writeBefore)
+                return (null, null);
+            return (canonicalBefore, revision);
+        }
+        catch (IOException) { return (null, null); }
+        catch (UnauthorizedAccessException) { return (null, null); }
+        catch (ArgumentException) { return (null, null); }
+    }
+
+    private static CatalogTreeNode ResultNode(ObservableResult observable)
+    {
+        Result result = observable.Result;
+        Project project = result.Project;
+        string? assetPath = AssetPath(project, result.Filename);
+        (string? computeSourcePath, string? computeSourceRevision) = assetPath is null
+            ? (null, null) : TryReadStableRevision(assetPath);
+        Ras.Layers.Results.ComputeSummary? computeSummary = null;
+        if (computeSourcePath is not null && computeSourceRevision is not null)
+        {
+            // The retained metadata reader instantiates default nested objects
+            // even when their HDF group is absent. Only an actually stored
+            // summary proves that this Result contains a completed run record.
+            try
+            {
+                using (var reader = new H5Reader(computeSourcePath))
+                    if (reader.ExistsAsGroup("/Results/" + Result.ComputeSummaryGroupName))
+                        computeSummary = result.ComputeSummary;
+                (string? currentPath, string? currentRevision) = TryReadStableRevision(assetPath!);
+                if (!PathComparer.Equals(currentPath, computeSourcePath) ||
+                    !string.Equals(currentRevision, computeSourceRevision, StringComparison.Ordinal))
+                    (computeSourcePath, computeSourceRevision) = (null, null);
+            }
+            catch (Exception)
+            {
+                // Existing source diagnostics separately retain read failures.
+                // An unreadable source cannot establish a compute state/SHA.
+                (computeSourcePath, computeSourceRevision) = (null, null);
+            }
+        }
+        bool computeSourceStable = computeSourcePath is not null && computeSourceRevision is not null;
+        string? computeState = !computeSourceStable || computeSummary is null
+            ? null : computeSummary.Success ? "completed" : "failed";
+        string? computeFailureReason = !computeSourceStable || computeSummary?.Success != false
+            ? null : observable.FriendlyFailureReason;
+        string id = NodeID("asset", assetPath ?? result.Filename);
+        var children = new List<CatalogTreeNode>();
+        if (result.Plan is not null)
+            children.Add(PlanCatalogNode(observable.Plan));
+        if (result.Geometry is not null)
+            children.Add(FocusedGeometryNode(observable.Geometry, buildTerrain: true,
+                buildNValue: true, buildClassification: true));
+        if (result.BoundaryConditions is not null)
+            children.Add(BoundaryConditionProjectNode(observable.BoundaryCondition));
+        return new CatalogTreeNode(id, "ObservableResult", result.Name,
+            Children: children.Count == 0 ? null : children.ToArray(), AssetID: assetPath,
+            CatalogSummary: new CatalogTreeSummary(result.Name, assetPath), Properties: [
+                new CatalogTreeProperty("Name", "Name", result.Name),
+                new CatalogTreeProperty("Filename", "Filename", assetPath ?? result.Filename)
+            ], ResultComputeState: computeState, ResultComputeFailureReason: computeFailureReason,
+            ResultComputeSourcePath: computeSourcePath, ResultComputeSourceRevision: computeSourceRevision)
+        {
+            ResultEndTime = computeSourceStable ? computeSummary?.EndTime : null,
+            ResultPlanName = result.Plan?.Name
+        };
+    }
+
+    private static CatalogTreeNode Node(ObservableCoreLayer observable, CatalogTreeNode[]? children = null)
+    {
+        return Node(observable.Layer, children, observable.GetType().Name);
+    }
+
+    private static CatalogTreeNode Node(CoreLayerBase layer, CatalogTreeNode[]? children = null,
+        string? sourceClass = null)
+    {
+        string? assetPath = AssetPath(layer.Project!, layer.Filename);
+        string id = NodeID("asset", assetPath ?? layer.Filename);
+        var summary = new CatalogTreeSummary(layer.Name, assetPath, layer.DateCreated,
+            layer.DateLastModified, layer.Description);
+        var properties = new[]
+        {
+            new CatalogTreeProperty("Name", "Name", layer.Name),
+            new CatalogTreeProperty("Filename", "Filename", assetPath ?? layer.Filename),
+            new CatalogTreeProperty("DateCreated", "Date Created", layer.DateCreated ?? ""),
+            new CatalogTreeProperty("DateLastModified", "Date Last Modified", layer.DateLastModified ?? ""),
+            new CatalogTreeProperty("Description", "Description", layer.Description ?? "")
+        };
+        return new CatalogTreeNode(id, sourceClass ?? layer.GetType().Name, layer.Name,
+            Children: children is { Length: > 0 } ? children : null, AssetID: assetPath,
+            CatalogSummary: summary, Properties: properties);
+    }
+
+    private static CatalogTreeNode Group(string sourceClass, string name, CatalogTreeNode[] children) =>
+        new("group:" + sourceClass, sourceClass, name, true, children.Length == 0 ? null : children);
+
+    private static CatalogTreeNode Component(string sourceClass, string name, CatalogTreeNode[]? children = null) =>
+        new("component:" + sourceClass + ":" + name, sourceClass, name,
+            Children: children is { Length: > 0 } ? children : null);
+
+    private static string NodeID(string type, string value) => type + ":" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value)))[..24];
+    // RasTreeBase.TryUpdateMatch ignores null associations and marks a group
+    // matched when all non-null values refer to the same source model.
+    private static bool MatchSourceAssociations<T>(IEnumerable<T?> values) where T : class
+    {
+        T? first = null;
+        bool matches = true;
+        foreach (T? value in values)
+        {
+            if (value == null) continue;
+            if (matches && first != null && !ReferenceEquals(first, value)) matches = false;
+            else if (first == null) first = value;
+        }
+        return matches;
+    }
+
+    private static string? AssetPath(Project project, string? filename)
+    {
+        if (string.IsNullOrWhiteSpace(filename)) return null;
+        string candidate = Path.IsPathRooted(filename) ? filename : Path.Combine(project.ProjectDirectory, filename);
+        return Path.GetFullPath(candidate);
+    }
+
+    private static string FullProjectPath(Project project) => Path.GetFullPath(project.Filename);
+
+    private sealed class CatalogProjectContext : IDisposable
+    {
+        public Project Project { get; }
+        public ObservableProject Observables { get; }
+        public CatalogDiagnosticsService.Context Diagnostics { get; }
+
+        public CatalogProjectContext(CatalogTreeRequest request, string[]? protectedReadPaths = null)
+        {
+            if (string.IsNullOrWhiteSpace(request.ProjectPath)) throw new ArgumentException("The project path is required.");
+            string path = Path.GetFullPath(request.ProjectPath);
+            if (!File.Exists(path)) throw new FileNotFoundException("The project file was not found.", path);
+            HashSet<string> protectedSources = (protectedReadPaths ?? [])
+                .Select(SourceFilePaths.Canonical)
+                .ToHashSet(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            Diagnostics = new CatalogDiagnosticsService.Context(path, protectedSources);
+            Project = new Project(path, sourcePath =>
+                !protectedSources.Contains(SourceFilePaths.Canonical(sourcePath)));
+            try
+            {
+                if (request.ProjectXml != null) Project.ApplyEditorMetadata(XElement.Parse(request.ProjectXml));
+                Diagnostics.BindProject(Project);
+                Observables = new ObservableProject(Project, Utility.SynchronizationContext.None);
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            foreach (CoreLayerBase layer in Project.Plans.Cast<CoreLayerBase>().Concat(Project.Geometries)
+                .Concat(Project.Terrains).Concat(Project.BoundaryConditions).Concat(Project.NValues)
+                .Concat(Project.ClassificationLayers)) layer.Dispose();
+            foreach (Result result in Project.Results) result.Dispose();
+        }
+    }
+}

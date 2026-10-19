@@ -1,0 +1,27 @@
+<Solution>
+  <Project Path="Host/Ras.Backend.Host.csproj" />
+  <Folder Name="/Core/">
+    <Project Path="Source/Geospatial.Core/Geospatial.Core.csproj" />
+    <Project Path="Source/Geospatial.GDALAssist/Geospatial.GDALAssist.csproj" />
+    <Project Path="Source/Geospatial.IO/Geospatial.IO.csproj" />
+    <Project Path="Source/Geospatial.Rendering/Geospatial.Rendering.csproj" />
+    <Project Path="Source/H5Assist/H5Assist.csproj" />
+    <Project Path="Source/Hec.Dss/Hec.Dss.csproj" />
+    <Project Path="Source/PipeClient/PipeClient.csproj" />
+    <Project Path="Source/Ras.Core/Ras.Core.csproj" />
+    <Project Path="Source/Ras.Engine/Ras.Engine.csproj" />
+    <Project Path="Source/Ras.Engine.Interop/Ras.Engine.Interop.csproj" />
+    <Project Path="Source/Ras.Mapper/Ras.Mapper.csproj" />
+    <Project Path="Source/Ras.Migration/Ras.Migration.csproj" />
+    <Project Path="Source/Ras.Observables/Ras.Observables.csproj" />
+    <Project Path="Source/Ras.Rendering/Ras.Rendering.csproj" />
+    <Project Path="Source/Testing.Core/Testing.Core.csproj" />
+    <Project Path="Source/TiffAssist/TiffAssist.csproj" />
+    <Project Path="Source/TiffBinaryReader/TiffBinaryReader.csproj" />
+    <Project Path="Source/Utility.Communication/Utility.Communication.csproj" />
+    <Project Path="Source/Utility.Core/Utility.Core.csproj" />
+    <Project Path="Source/Utility.Math.x86/Utility.Math.x86.csproj" />
+    <Project Path="Source/Visual.Mapping.Observables/Visual.Mapping.Observables.csproj" />
+    <Project Path="Source/Visual.Observables/Visual.Observables.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,284 @@
+{
+  "source": "Visual.Mapping.WinUI.dll/Visual.Mapping.WinUI.Controls/RecipeBuilder.cs",
+  "xbfSha256": "5e5e561df6c3eb755c809bfed241d497c9040dcd6ce81534a19e00dbe1f0ac17",
+  "resource": {
+    "file": "Ras.Interface.WinUI.pri",
+    "offset": 3423688
+  },
+  "commands": [
+    {
+      "id": "Distort",
+      "parameters": [
+        {
+          "id": "Jitter",
+          "title": "Jitter",
+          "description": "How much variance the points move around by"
+        },
+        {
+          "id": "Count",
+          "title": "Count",
+          "description": ""
+        },
+        {
+          "id": "NudgeConvex",
+          "title": "Nudge Convex",
+          "description": "-1: Moves points without regard to concavity. 0: Avoids concave cells, but may create collinear faces. 0>: Additionally nudges towards the point."
+        }
+      ],
+      "sourceIcon": "Area",
+      "paletteDescription": "Moves face points around randomly based on a jitter parameter",
+      "paletteStream": 5,
+      "description": "Moves face points around randomly based on a jitter parameter",
+      "stepStream": 16
+    },
+    {
+      "id": "OptSkew",
+      "parameters": [
+        {
+          "id": "Count",
+          "title": "Count",
+          "description": "The number of repeated passes. Higher values will do more nudging, at the expense of mesh computation time."
+        }
+      ],
+      "sourceIcon": "GridClosed",
+      "paletteDescription": "Nudges computational nodes to reduce cell skew, closer to equiangular.",
+      "paletteStream": 6,
+      "description": "Nudges computational nodes to reduce cell skew, closer to equiangular.",
+      "stepStream": 17
+    },
+    {
+      "id": "OptTopology",
+      "parameters": [
+        {
+          "id": "Threshold",
+          "title": "Threshold",
+          "description": "Lower bound on the cost function for considering a change. (0.5 is a reasonable default given default weights)",
+          "minimum": 0.0,
+          "maximum": 100.0,
+          "recommendedMinimum": 20.0,
+          "recommendedMaximum": 80.0
+        },
+        {
+          "id": "DeltaThreshold",
+          "title": "Delta Threshold",
+          "description": "",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "recommendedMinimum": 0.05,
+          "recommendedMaximum": 0.5
+        },
+        {
+          "id": "Merge",
+          "title": "Merge",
+          "description": "Toggle for merge operation consideration"
+        },
+        {
+          "id": "Collapse",
+          "title": "Collapse",
+          "description": "Toggle for merge operation consideration"
+        },
+        {
+          "id": "Perimeter",
+          "title": "Perimeter",
+          "description": "Can be set to false to avoid operating on nodes along the arc of the conceptual mesh"
+        },
+        {
+          "id": "Skew",
+          "title": "Skew",
+          "description": "Set the weight of skew; what mesh quality is required to be considered for operation",
+          "minimum": 0.0,
+          "maximum": 100.0,
+          "recommendedMinimum": 1.0,
+          "recommendedMaximum": 5.0
+        },
+        {
+          "id": "CellArea",
+          "title": "Cell Area",
+          "description": "Set the weight of cell area; what cell area range is considered for operation",
+          "minimum": 0.0,
+          "maximum": 10.0,
+          "recommendedMinimum": 0.0,
+          "recommendedMaximum": 2.0
+        },
+        {
+          "id": "FaceSmooth",
+          "title": "Face Smooth",
+          "description": "Set the weight of face smoothing; how smooth the geometry needs to be to be considered for operation",
+          "minimum": 0.0,
+          "maximum": 100.0,
+          "recommendedMinimum": 20.0,
+          "recommendedMaximum": 80.0
+        },
+        {
+          "id": "FaceLength",
+          "title": "Face Length",
+          "description": "Set the weight of face length; how long the face can be to be considered for operation",
+          "minimum": 0.0,
+          "maximum": 10.0,
+          "recommendedMinimum": 0.0,
+          "recommendedMaximum": 0.2
+        }
+      ],
+      "sourceIcon": "Topo",
+      "paletteDescription": "Supports two distinct topological operations, merge and collapse, based on a cost function set with parameters.",
+      "paletteStream": 7,
+      "description": "Supports two distinct topological operations, merge and collapse, based on a cost function set with parameters.",
+      "stepStream": 18
+    },
+    {
+      "id": "Orthogonalize",
+      "parameters": [
+        {
+          "id": "Count",
+          "title": "Count",
+          "description": "Number of top-level iterations"
+        },
+        {
+          "id": "Scaler",
+          "title": "Scaler",
+          "description": "Multiplier for the update step"
+        },
+        {
+          "id": "Sliding",
+          "title": "Sliding",
+          "description": "If true, smoothing will also apply to boundary nodes (along arcs). If false, only non-boundary nodes are adjusted. Even with sliding set to true, nodes will not be moved if a neighboring region is expected but not yet present. For example, when smoothing a region, nodes along a perimeter can be adjusted, but nodes shared by 2 regions will not be moved. If applied globally then nodes shared between two regions can be adjusted, but nodes of the conceptual mesh are still treated as fixed."
+        },
+        {
+          "id": "Method",
+          "title": "Method",
+          "description": "How the orthogonalization update is computed"
+        },
+        {
+          "id": "SmoothMethod",
+          "title": "SmoothMethod",
+          "description": "How the smoothing update is computed"
+        },
+        {
+          "id": "Alpha",
+          "title": "Alpha",
+          "description": "Scales the relative contributions of orthogonalization and smoiothing vectors according to a function"
+        }
+      ],
+      "sourceIcon": "Cube",
+      "paletteDescription": "Improves cell orthogonality such that faces are closer to perpendicular to the line between adjacent cell centers.",
+      "paletteStream": 8,
+      "description": "Improves cell orthogonality such that faces are closer to perpendicular to the line between adjacent cell centers.",
+      "stepStream": 19
+    },
+    {
+      "id": "RemoveFaces",
+      "parameters": [
+        {
+          "id": "Threshold",
+          "title": "Threshold",
+          "description": "Threshhold for merging quads.",
+          "minimum": 0.0,
+          "maximum": 100.0,
+          "recommendedMinimum": 20.0,
+          "recommendedMaximum": 80.0
+        }
+      ],
+      "sourceIcon": "SquareAndTriangle",
+      "paletteDescription": "The opposite of Split, combining adjacent triangles into a quad by removing their shared face",
+      "paletteStream": 9,
+      "description": "The opposite of Split, and will combine adjacent triangles into a quadrilateral",
+      "stepStream": 20
+    },
+    {
+      "id": "RemoveNodes",
+      "parameters": [
+        {
+          "id": "Threshold",
+          "title": "Threshold",
+          "description": "Threshold for collapsing a node, based on a cost function",
+          "minimum": 0.0,
+          "maximum": 100.0,
+          "recommendedMinimum": 20.0,
+          "recommendedMaximum": 80.0
+        }
+      ],
+      "sourceIcon": "Mesh",
+      "paletteDescription": "Merges 4 cells around a node, producing 2 cells",
+      "paletteStream": 10,
+      "description": "Merges 4 cells around a node, producing 2 cells",
+      "stepStream": 21
+    },
+    {
+      "id": "SmoothAngles",
+      "parameters": [
+        {
+          "id": "Count",
+          "title": "Count",
+          "description": "The number of smoothing iterations."
+        }
+      ],
+      "sourceIcon": "Compass",
+      "paletteDescription": "Applies Zhou and Shimada angle-based smoothing",
+      "paletteStream": 11,
+      "description": "Applies Zhou and Shimada angle-based smoothing",
+      "stepStream": 22
+    },
+    {
+      "id": "Smooth",
+      "parameters": [
+        {
+          "id": "Count",
+          "title": "Count",
+          "description": "The number of repeated passes. Higher values will do more smoothing, at the expense of mesh computation time"
+        },
+        {
+          "id": "Scaled",
+          "title": "Scaled",
+          "description": "If true, adjust the smoothing to try to maintain the target length of faces. In areas of sharp gradients in the size function this generally gives better results. When false, a straight average of adjacent nodes is used"
+        },
+        {
+          "id": "Sliding",
+          "title": "Sliding",
+          "description": "If true, smoothing will also apply to boundary nodes (along arcs). If false, only non-boundary nodes are adjusted. Even with sliding set to true, nodes will not be moved if a neighboring region is expected but not yet present. For example, when smoothing a region, nodes along a perimeter can be adjusted, but nodes shared by 2 regions will not be moved. If applied globally then nodes shared between two regions can be adjusted, but nodes of the conceptual mesh are still treated as fixed."
+        }
+      ],
+      "sourceIcon": "Smooth",
+      "paletteDescription": "Replaces computational nodes with the average of their adjacent node locations",
+      "paletteStream": 12,
+      "description": "Replaces computational nodes with the average of their adjacent node locations",
+      "stepStream": 23
+    },
+    {
+      "id": "Split",
+      "parameters": [
+        {
+          "id": "Threshold",
+          "title": "Threshold",
+          "description": "Threshold for splitting quads.",
+          "minimum": 0.0,
+          "maximum": 100.0,
+          "recommendedMinimum": 20.0,
+          "recommendedMaximum": 80.0
+        }
+      ],
+      "sourceIcon": "Split",
+      "paletteDescription": "Splits quads into two triangles based on an orthogonality threshold",
+      "paletteStream": 13,
+      "description": "Splits quads into two triangles based on an orthogonality threshold",
+      "stepStream": 24
+    },
+    {
+      "id": "SwapEdges",
+      "parameters": [],
+      "sourceIcon": "Synchronize",
+      "paletteDescription": "Replaces the common face of a pair of adjacent triangles with a face connecting the two other points",
+      "paletteStream": 14,
+      "description": "Replaces the common face of a pair of adjacent triangles with a face connecting the two other points",
+      "stepStream": 25
+    },
+    {
+      "id": "Unknown",
+      "parameters": [],
+      "sourceIcon": "AI",
+      "paletteDescription": "Unknown Ingredient - could not parse this ingredient (did you import an invalid string?)",
+      "paletteStream": 15,
+      "description": "Unknown Ingredient - could not parse this ingredient (did you import an invalid string?)",
+      "stepStream": 26
+    }
+  ]
+}

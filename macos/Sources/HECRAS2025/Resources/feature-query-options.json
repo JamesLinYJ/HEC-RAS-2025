@@ -1,0 +1,340 @@
+{
+  "osmPresets": [
+    {
+      "id": "Buildings",
+      "name": "Buildings",
+      "description": "Building footprints, for structure inventory and hydraulic obstructions.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way",
+            "Relation"
+          ],
+          "filters": [
+            {
+              "key": "building",
+              "operator": "Exists",
+              "value": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MajorRoads",
+      "name": "Major Roads",
+      "description": "Motorways, trunk, primary, and secondary roads (and their link ramps) - key hydraulic barriers and evacuation routes.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way"
+          ],
+          "filters": [
+            {
+              "key": "highway",
+              "operator": "OneOf",
+              "value": "motorway;trunk;primary;secondary;motorway_link;trunk_link;primary_link;secondary_link"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AllRoads",
+      "name": "All Roads",
+      "description": "Every tagged road, from motorways to footpaths. Can return a very large dataset over wide extents.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way"
+          ],
+          "filters": [
+            {
+              "key": "highway",
+              "operator": "Exists",
+              "value": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "Railways",
+      "name": "Railways",
+      "description": "Rail, light rail, subway, tram, and narrow-gauge tracks.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way"
+          ],
+          "filters": [
+            {
+              "key": "railway",
+              "operator": "OneOf",
+              "value": "rail;light_rail;subway;tram;narrow_gauge"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "Bridges",
+      "name": "Bridges",
+      "description": "Structures tagged as bridges, spanning roads, railways, or waterways.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way"
+          ],
+          "filters": [
+            {
+              "key": "bridge",
+              "operator": "Exists",
+              "value": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "Culverts",
+      "name": "Culverts",
+      "description": "Ways tagged as culverts, where a road, rail, or waterway passes underground.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way"
+          ],
+          "filters": [
+            {
+              "key": "tunnel",
+              "operator": "Equals",
+              "value": "culvert"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "DamsAndWeirs",
+      "name": "Dams & Weirs",
+      "description": "Dams and weirs, mapped either as crossing lines or as areas.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way",
+            "Relation"
+          ],
+          "filters": [
+            {
+              "key": "waterway",
+              "operator": "OneOf",
+              "value": "dam;weir"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "LeveesAndEmbankments",
+      "name": "Levees & Embankments",
+      "description": "Flood-control levees/dykes, and roads or rail built up on embankments.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way",
+            "Relation"
+          ],
+          "filters": [
+            {
+              "key": "man_made",
+              "operator": "OneOf",
+              "value": "dyke;embankment"
+            }
+          ]
+        },
+        {
+          "kinds": [
+            "Way"
+          ],
+          "filters": [
+            {
+              "key": "embankment",
+              "operator": "Equals",
+              "value": "yes"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "Waterways",
+      "name": "Waterways",
+      "description": "River, stream, canal, drain, and ditch centerlines.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way"
+          ],
+          "filters": [
+            {
+              "key": "waterway",
+              "operator": "OneOf",
+              "value": "river;stream;canal;drain;ditch"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "WaterBodies",
+      "name": "Water Bodies",
+      "description": "Lakes, ponds, and reservoirs mapped as areas.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way",
+            "Relation"
+          ],
+          "filters": [
+            {
+              "key": "natural",
+              "operator": "Equals",
+              "value": "water"
+            }
+          ]
+        },
+        {
+          "kinds": [
+            "Way",
+            "Relation"
+          ],
+          "filters": [
+            {
+              "key": "landuse",
+              "operator": "Equals",
+              "value": "reservoir"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "Wetlands",
+      "name": "Wetlands",
+      "description": "Marsh, swamp, and other wetland areas.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way",
+            "Relation"
+          ],
+          "filters": [
+            {
+              "key": "natural",
+              "operator": "Equals",
+              "value": "wetland"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "LandUse",
+      "name": "Land Use",
+      "description": "Land use polygons, useful for assigning roughness values.",
+      "clauses": [
+        {
+          "kinds": [
+            "Way",
+            "Relation"
+          ],
+          "filters": [
+            {
+              "key": "landuse",
+              "operator": "Exists",
+              "value": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AdministrativeBoundaries",
+      "name": "Administrative Boundaries",
+      "description": "Administrative boundary relations (countries, states, counties, municipalities).",
+      "clauses": [
+        {
+          "kinds": [
+            "Relation"
+          ],
+          "filters": [
+            {
+              "key": "boundary",
+              "operator": "Equals",
+              "value": "administrative"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "Places",
+      "name": "Places",
+      "description": "City, town, village, and hamlet location points.",
+      "clauses": [
+        {
+          "kinds": [
+            "Node"
+          ],
+          "filters": [
+            {
+              "key": "place",
+              "operator": "OneOf",
+              "value": "city;town;village;hamlet"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "nldLayers": [
+    {
+      "id": "AlignmentLines",
+      "name": "Alignment Lines",
+      "merged": false
+    },
+    {
+      "id": "Embankments",
+      "name": "Embankments",
+      "merged": false
+    },
+    {
+      "id": "Floodwalls",
+      "name": "Floodwalls",
+      "merged": false
+    },
+    {
+      "id": "SystemRoutes",
+      "name": "RAS Merged Alignments",
+      "merged": true
+    }
+  ],
+  "exportFormats": [
+    {
+      "name": "Shapefile",
+      "extension": ".shp",
+      "id": "Shapefile"
+    },
+    {
+      "name": "GeoJSON",
+      "extension": ".geojson",
+      "id": "GeoJson"
+    }
+  ],
+  "sources": [
+    "ras2025/exports-all-managed-v1/assemblies/Geospatial.IO.dll/Geospatial.IO.Network.OSM/OsmPresets.cs",
+    "ras2025/exports-all-managed-v1/assemblies/Visual.Mapping.WinUI.dll/Visual.Mapping.WinUI.Controls.NLD/NLDQuerierControl.cs",
+    "ras2025/exports-all-managed-v1/assemblies/Visual.Mapping.WinUI.dll/Visual.Mapping.WinUI.Controls.Vector/VectorExportFormatOption.cs"
+  ]
+}

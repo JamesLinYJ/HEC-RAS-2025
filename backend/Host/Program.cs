@@ -1,0 +1,259 @@
+using System.Text;
+using System.Text.Json;
+using Geospatial.GDALAssist;
+using Ras.Backend;
+
+// One request per child process keeps source object/native resource lifetime
+// isolated. stdout is exclusively the protocol; legacy diagnostic writes go to stderr.
+Console.InputEncoding = Encoding.UTF8;
+Console.OutputEncoding = new UTF8Encoding(false);
+using TextWriter protocol = BackendStandardOutput.OpenProtocolWriter();
+var responses = new BackendProtocolWriter(protocol);
+Console.SetOut(Console.Error);
+using IDisposable backendLogging = BackendApplicationLogging.Initialize();
+string? id = null;
+bool streamProgress = false;
+bool duplexMode = args.Contains("--duplex", StringComparer.Ordinal);
+try
+{
+    // The process argument selects framing before any input is consumed, so
+    // legacy callers retain arbitrary valid multi-line JSON via ReadToEnd.
+    string input = duplexMode
+        ? await Console.In.ReadLineAsync() ?? string.Empty
+        : await Console.In.ReadToEndAsync();
+    var request = JsonSerializer.Deserialize<BackendRequest>(input, BackendJson.Options)
+        ?? throw new ArgumentException("Missing backend request.");
+    id = request.Id;
+    if (string.IsNullOrWhiteSpace(id)) throw new ArgumentException("Missing request identity.");
+    if (request.Duplex != duplexMode)
+        throw new ArgumentException("The duplex request mode does not match the child process mode.");
+    streamProgress = request.StreamProgress || duplexMode;
+    await using BackendDuplexControlReader? duplexControls = duplexMode
+        ? new BackendDuplexControlReader(request.Id, Console.In) : null;
+    Action<BackendOperationProgress>? report = streamProgress ? progress => responses.Progress(request.Id, progress) : null;
+    DssRuntimeService.Configure();
+    GDALSetup.InitializeMultiplatform();
+    HdfRuntimeService.Configure();
+    object result = request.Method switch
+    {
+        "backend.info" => new { protocolVersion = 1, runtime = System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier },
+        "runtime.gdal" => GdalRuntimeService.Inspect(),
+        "runtime.hdf" => HdfRuntimeService.Inspect(),
+        "runtime.dss" => DssRuntimeService.Inspect(),
+        "projectLibrary.catalog" => await ProjectLibraryService.CatalogAsync(request.Parameters.Deserialize<ProjectLibraryCatalogRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing project library catalog request.")),
+        "projectLibrary.open" => await ProjectLibraryService.OpenAsync(request.Parameters.Deserialize<ProjectLibraryOpenRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing project library open request."), report),
+        "workspace.update.catalog" => await WorkspaceUpdateService.CatalogAsync(request.Parameters.Deserialize<WorkspaceUpdateCatalogRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing update catalog request."), report),
+        "workspace.update.package.prepare" => await WorkspaceUpdateService.PreparePackageAsync(request.Parameters.Deserialize<WorkspaceUpdatePackagePrepareRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing update package request."), report),
+        "plan.analysis.diffOptions" => ModelEditorAdapter.LoadPlanAnalysisDiffOptions(request.Parameters.Deserialize<PlanAnalysisDiffOptionsRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Plan comparison options request.")),
+        "plan.analysis.diff" => ModelEditorAdapter.ComparePlanAnalysis(request.Parameters.Deserialize<PlanAnalysisDiffRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Plan comparison request.")),
+        "plan.r2rMatrix.options" => ModelEditorAdapter.LoadPlanMatrixOptions(request.Parameters.Deserialize<PlanMatrixOptionsRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Plan matrix options request.")),
+        "plan.r2rMatrix.preview" => ModelEditorAdapter.PreviewPlanMatrix(request.Parameters.Deserialize<PlanMatrixPreviewRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Plan matrix preview request.")),
+        "plan.r2rMatrix.emit" when duplexControls is not null => await ModelEditorAdapter.EmitPlanMatrixDuplexAsync(request.Parameters.Deserialize<PlanMatrixEmitRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Plan matrix output request."), report, duplexControls),
+        "developer.projectArchive.prepare" when duplexControls is not null => await DeveloperProjectArchiveService.PrepareDuplexAsync(request.Parameters.Deserialize<DeveloperProjectArchiveRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing developer project archive request."), report, duplexControls),
+        "developer.projectArchive.cleanup" => DeveloperProjectArchiveService.Cleanup(request.Parameters.Deserialize<DeveloperProjectArchiveCleanupRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing developer archive cleanup request.")),
+        "testing.workspace.load" => await TestingService.LoadAsync(request.Parameters.Deserialize<TestingWorkspaceRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing testing workspace request.")),
+        "testing.action" => await TestingService.PerformAsync(request.Parameters.Deserialize<TestingActionRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing testing action.")),
+        "testing.poi.import" => await TestingService.ImportPointsAsync(request.Parameters.Deserialize<TestingPoiImportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing testing point import request.")),
+        "testing.upload.prepare" => await TestingService.PrepareUploadAsync(request.Parameters.Deserialize<TestingUploadPrepareRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing testing upload context.")),
+        "testing.upload.execute" when duplexControls is not null => await TestingService.ExecuteUploadDuplexAsync(request.Parameters.Deserialize<TestingUploadExecuteRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing testing upload request."), report, duplexControls),
+        "testing.upload.execute" => await TestingService.ExecuteUploadAsync(request.Parameters.Deserialize<TestingUploadExecuteRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing testing upload request."), report),
+        "workspace.import.archive" => await WorkspaceFileImportService.PrepareArchiveAsync(request.Parameters.Deserialize<WorkspaceArchiveImportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing project archive import request."), report, duplexControls),
+        "workspace.import.coreHdf" => await WorkspaceFileImportService.PrepareCoreHdfAsync(request.Parameters.Deserialize<WorkspaceCoreHdfImportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing core HDF import request."), report, duplexControls),
+        "map.streamMode.connect" when duplexControls is not null => await MapStreamModeService.RunAsync(request.Parameters.Deserialize<StreamModeConnectRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing stream mode connection request."), frame => report?.Invoke(new BackendOperationProgress(StreamMapFrame: frame)), duplexControls),
+        "geoprocessing.execute" when duplexControls is not null => await GeoprocessingToolService.ExecuteDuplexAsync(request.Parameters.Deserialize<GeoprocessingPolylineRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geoprocessing request."), report, duplexControls),
+        "geoprocessing.execute" => GeoprocessingToolService.Execute(request.Parameters.Deserialize<GeoprocessingPolylineRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geoprocessing request."), report),
+        "geoprocessing.validate" => GeoprocessingToolService.ValidateInputs(request.Parameters.Deserialize<GeoprocessingPolylineValidationRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geoprocessing validation request.")),
+        "raster.import.context.inspect" => RasterImportContextPropertiesService.Inspect(request.Parameters.Deserialize<RasterImportContextPropertiesRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing raster import properties request.")),
+        "temporal.input.parse" => TemporalInputService.Parse(request.Parameters.Deserialize<TemporalInputParseRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing temporal input request.")),
+        "featureQuery.snapshot" => FeatureQueryService.Snapshot(request.Parameters.Deserialize<FeatureQuerySnapshotRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing feature query context.")),
+        "map.vector.savePolylineShapefileDraft" => MapShapefilePolylineDraftService.Save(request.Parameters.Deserialize<MapShapefilePolylineDraftSaveRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Shapefile polyline draft.")),
+        "map.tree.meshErrors" => MapTreeService.MeshErrors(request.Parameters.Deserialize<MapTreeMeshErrorRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map mesh error context.")),
+        "map.measureTerrainElevations" => MapTerrainElevationService.Sample(request.Parameters.Deserialize<MapTerrainElevationRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map terrain elevation context.")),
+        "map.boundary.lineTimeSeries" => await ModelEditorAdapter.LoadMapBoundaryLineTimeSeriesAsync(request.Parameters.Deserialize<MapBoundaryLineTimeSeriesRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing boundary line time-series context.")),
+        "featureQuery.query" => await FeatureQueryService.QueryAsync(request.Parameters.Deserialize<FeatureQueryQueryRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing feature query request."), report, duplexControls),
+        "featureQuery.save" => await FeatureQueryService.SaveAsync(request.Parameters.Deserialize<FeatureQuerySaveRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing feature export request."), report, duplexControls),
+        "featureQuery.suggest" => await FeatureQueryService.SuggestAsync(request.Parameters.Deserialize<FeatureQuerySuggestionRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing feature tag suggestion request.")),
+        "cumulus.environments" => await CumulusImportService.GetEnvironmentsAsync(request.Parameters.Deserialize<CumulusEnvironmentRequest>(BackendJson.Options)),
+        "cumulus.token.exchange" => await CumulusImportService.ExchangeTokenAsync(request.Parameters.Deserialize<CumulusTokenExchangeRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Cumulus authorization exchange.")),
+        "cumulus.token.refresh" => await CumulusImportService.RefreshTokenAsync(request.Parameters.Deserialize<CumulusTokenRefreshRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Cumulus token refresh.")),
+        "cumulus.products" => await CumulusImportService.GetProductsAsync(request.Parameters.Deserialize<CumulusProductsRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Cumulus product request.")),
+        "cumulus.grids.query" => await CumulusImportService.QueryGridsAsync(request.Parameters.Deserialize<CumulusGridQueryRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Cumulus grid query.")),
+        "cumulus.grids.footprint" => await CumulusImportService.ProbeGridFootprintAsync(request.Parameters.Deserialize<CumulusGridFootprintRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Cumulus grid footprint request.")),
+        "model.cumulusGridImport" when duplexControls is not null => await CumulusImportService.ImportDuplexAsync(request.Parameters.Deserialize<CumulusGridImportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Cumulus grid import."), report, duplexControls),
+        "dss.catalog" => DssRecordService.Catalog(request.Parameters.Deserialize<DssCatalogRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing DSS catalog request.")),
+        "dss.read" => DssRecordService.Read(request.Parameters.Deserialize<DssReadRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing DSS record read request.")),
+        "vector.symbology.inspect" => VectorSymbologyService.Inspect(request.Parameters.Deserialize<VectorSymbologyInspectRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing vector symbology inspection request.")),
+        "vector.symbology.evaluate" => VectorSymbologyService.Evaluate(request.Parameters.Deserialize<VectorSymbologyEvaluateRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing vector symbology evaluation request.")),
+        "unitCalculator.load" => UnitCalculatorService.Load(request.Parameters.Deserialize<UnitCalculatorLoadRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing unit calculator load request.")),
+        "unitCalculator.convert" => UnitCalculatorService.Convert(request.Parameters.Deserialize<UnitCalculatorConvertRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing unit calculator conversion request.")),
+        "wilcock.load" => WilcockService.Load(request.Parameters.Deserialize<WilcockLoadRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Wilcock load request.")),
+        "wilcock.evaluate" => WilcockService.Evaluate(request.Parameters.Deserialize<WilcockEvaluateRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Wilcock calculation request.")),
+        "stableChannel.open" => StableChannelDebugService.Open(request.Parameters.Deserialize<StableChannelDebugOpenRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing stable channel context.")),
+        "stableChannel.compute" => StableChannelDebugService.Compute(request.Parameters.Deserialize<StableChannelDebugComputeRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing stable channel calculation request.")),
+        "stableChannel.save" => StableChannelDebugService.Save(request.Parameters.Deserialize<StableChannelDebugSaveRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing stable channel save request.")),
+        "boundary.initialConditions.inspect" => ModelEditorAdapter.Inspect(request.Parameters.Deserialize<BoundaryInitialConditionsInspectRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing initial conditions inspection request.")),
+        "boundary.initialConditions.attach" => await ModelEditorAdapter.AttachAsync(request.Parameters.Deserialize<BoundaryInitialConditionsAttachRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing initial conditions attachment request.")),
+        "boundary.initialConditions.status" => await ModelEditorAdapter.Status(request.Parameters.Deserialize<BoundaryInitialConditionsStatusRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing initial conditions status request.")),
+        "model.catalog" => ModelEditorAdapter.Catalog(request.Parameters.Deserialize<ModelCatalogRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing model catalog request.")),
+        "model.terrainTopology" => await ModelEditorAdapter.TerrainTopologyAsync(request.Parameters.Deserialize<TerrainTopologyRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain topology request.")),
+        "catalog.modelAction.inspect" => CatalogModelActionService.Inspect(request.Parameters.Deserialize<CatalogModelActionRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing catalog model action request.")),
+        "catalog.modelAction.perform" => CatalogModelActionService.Perform(request.Parameters.Deserialize<CatalogModelActionRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing catalog model action request.")),
+        "catalog.modelAction.cleanup" => CatalogModelActionService.Cleanup(request.Parameters.Deserialize<CatalogModelActionCleanupRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing catalog model cleanup request.")),
+        "catalog.tree.load" => CatalogTreeService.LoadCatalog(request.Parameters.Deserialize<CatalogTreeRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing catalog tree request.")),
+        "geometry.backup.restore" => GeometryBackupService.Restore(request.Parameters.Deserialize<GeometryBackupRestoreRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Geometry backup restore request.")),
+        "geometry.backup.createNamed" => GeometryBackupService.CreateNamed(request.Parameters.Deserialize<GeometryNamedBackupRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Geometry named backup request.")),
+        "project.tree.load" => CatalogTreeService.LoadProject(request.Parameters.Deserialize<CatalogTreeRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing project tree request.")),
+        "rasterSymbology.inspect" => RasterSymbologyService.Inspect(request.Parameters.Deserialize<RasterSymbologyRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing raster symbology request.")),
+        "rasterMap.load" => RasterSymbologyService.Load(request.Parameters.Deserialize<RasterSymbologyRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing raster source request.")),
+        "rasterSymbology.histogram" => RasterSymbologyService.Histogram(request.Parameters.Deserialize<RasterSymbologyHistogramRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing raster histogram request.")),
+        "rasterSymbology.selectPalette" => RasterSymbologyService.SelectPalette(request.Parameters.Deserialize<RasterSymbologySelectPaletteRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing raster palette request.")),
+        "rasterSymbology.apply" => RasterSymbologyService.Apply(request.Parameters.Deserialize<RasterSymbologyApplyRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing raster symbology edits.")),
+        "rasterSymbology.reset" => RasterSymbologyService.Reset(request.Parameters.Deserialize<RasterSymbologyRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing raster reset request.")),
+        "rasterSymbology.savePalette" => RasterSymbologyService.SavePalette(request.Parameters.Deserialize<RasterSymbologySavePaletteRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing custom palette request.")),
+        "rasterSymbology.deletePalette" => RasterSymbologyService.DeletePalette(request.Parameters.Deserialize<RasterSymbologyDeletePaletteRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing custom palette removal request.")),
+        "topology.load" => await ModelEditorAdapter.LoadGeometryTopologyAsync(request.Parameters.Deserialize<GeometryTopologyLoadRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry topology request.")),
+        "topology.edit" => await ModelEditorAdapter.EditGeometryTopologyAsync(request.Parameters.Deserialize<GeometryTopologyEditRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry topology edit.")),
+        "topology.save" => await ModelEditorAdapter.SaveGeometryTopologyAsync(request.Parameters.Deserialize<GeometryTopologySaveRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry topology save request.")),
+        "topology.arcPoints" => await ModelEditorAdapter.LoadGeometryTopologyArcPointsAsync(request.Parameters.Deserialize<GeometryTopologyArcPointsRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry topology arc-points request.")),
+        "topology.recipe" => await ModelEditorAdapter.LoadGeometryTopologyRecipeAsync(request.Parameters.Deserialize<GeometryTopologyRecipeRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry topology recipe request.")),
+        "topology.filter" => await ModelEditorAdapter.FilterGeometryTopologyAsync(request.Parameters.Deserialize<GeometryTopologyFilterRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry topology filter request.")),
+        "geometry.culverts.load" => await ModelEditorAdapter.LoadGeometryCulvertsAsync(request.Parameters.Deserialize<GeometryCulvertLoadRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry culvert request.")),
+        "geometry.culverts.terrainPreview" => await ModelEditorAdapter.LoadGeometryCulvertTerrainPreviewAsync(request.Parameters.Deserialize<GeometryCulvertTerrainPreviewRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing culvert terrain preview request.")),
+        "geometry.culverts.mapCommandPreview" => await ModelEditorAdapter.PreviewGeometryCulvertMapCommandAsync(request.Parameters.Deserialize<GeometryCulvertMapCommandPreviewRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing culvert map command preview request.")),
+        "geometry.culverts.smartAddPreview" => await ModelEditorAdapter.PreviewGeometryCulvertSmartAddAsync(request.Parameters.Deserialize<GeometryCulvertSmartAddPreviewRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing culvert SmartAdd preview request.")),
+        "geometry.culverts.edit" => await ModelEditorAdapter.EditGeometryCulvertsAsync(request.Parameters.Deserialize<GeometryCulvertEditRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry culvert edit.")),
+        "geometry.mesh.load" => await ModelEditorAdapter.LoadGeometryMeshAsync(request.Parameters.Deserialize<GeometryMeshLoadRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry mesh request.")),
+        "geometry.mesh.generate" when duplexControls is not null => await ModelEditorAdapter.GenerateGeometryMeshDuplexAsync(request.Parameters.Deserialize<GeometryMeshGenerateRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing mesh generation request."), report, duplexControls),
+        "geometry.mesh.computePropertyTables" when duplexControls is not null => await ModelEditorAdapter.ComputeGeometryMeshPropertyTablesDuplexAsync(request.Parameters.Deserialize<GeometryMeshPropertyTablesRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry property table request."), report, duplexControls),
+        "geometry.mesh.edit" => await ModelEditorAdapter.EditGeometryMeshAsync(request.Parameters.Deserialize<GeometryMeshEditRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry mesh edit.")),
+        "geometry.mesh.degreeErrors" => await ModelEditorAdapter.ScanGeometryMeshDegreeErrorsAsync(request.Parameters.Deserialize<GeometryMeshDegreeScanRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing geometry mesh degree scan.")),
+        "plan.results.catalog" => PlanResultCatalogService.Load(request.Parameters.Deserialize<PlanResultCatalogRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing related plan results request.")),
+        "result.inspect" => ResultInspectorService.Inspect(request.Parameters.Deserialize<ResultInspectorRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing result inspection request.")),
+        "result.planSettings" => await ResultPlanSettingsService.InspectAsync(request.Parameters.Deserialize<ResultPlanSettingsRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing result plan settings request.")),
+        "result.planSettings.save" => await ResultPlanSettingsService.SaveAsync(request.Parameters.Deserialize<ResultPlanSettingsSaveRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing result plan settings save request.")),
+        "map.terrainInput.render" => TerrainInputMapContextService.Render(request.Parameters.Deserialize<TerrainInputMapContextRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain input map context request.")),
+        "support.bugReport.components" => await BugReportService.ComponentsAsync(request.Parameters.Deserialize<BugReportComponentsRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing bug report components request.")),
+        "support.bugReport.geometryCapture" => BugReportService.CaptureGeometry(request.Parameters.Deserialize<BugReportGeometryCaptureRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing bug report geometry capture request.")),
+        "support.bugReport.submit" => await BugReportService.SubmitAsync(request.Parameters.Deserialize<BugReportSubmitRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing bug report submit request.")),
+        "result.planContext" => InspectResultPlanContext(request.Parameters.Deserialize<ResultPlanContextRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing result plan context request.")),
+        "result.planAssociations" => PlanResultAssociationService.Inspect(request.Parameters.Deserialize<PlanResultAssociationRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Result plan association request.")),
+        "result.linkedProfiles" => LinkedResultProfilesService.Read(request.Parameters.Deserialize<LinkedResultProfilesRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing linked Result profile request.")),
+        "result.linkedMap" => LinkedResultMapService.Render(request.Parameters.Deserialize<LinkedResultMapRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing linked Result map request.")),
+        "nvalue.preview" => NValuePreviewService.Load(request.Parameters.Deserialize<NValuePreviewRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing N-value preview request.")),
+        "result.delete.prepare" => ResultInspectorService.PrepareDelete(request.Parameters.Deserialize<ResultDeletePreparationRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing result deletion request.")),
+        "map.document.create" => MapTreeService.CreateMap(request.Parameters.Deserialize<MapDocumentRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map document request.")),
+        "map.document.rename" => MapTreeService.RenameMap(request.Parameters.Deserialize<MapDocumentRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map document request.")),
+        "map.document.delete" => MapTreeService.DeleteMap(request.Parameters.Deserialize<MapDocumentRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map document request.")),
+        "classic.crossSections.catalog" => ClassicCrossSectionService.Catalog(request.Parameters.Deserialize<ClassicCrossSectionCatalogRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing cross-section catalog request.")),
+        "classic.crossSections.profile" => ClassicCrossSectionService.Profile(request.Parameters.Deserialize<ClassicCrossSectionProfileRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing cross-section profile request.")),
+        "map.vector.import" => MapTreeService.ImportGeoJSONVector(request.Parameters.Deserialize<MapVectorImportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map vector import request.")),
+        "map.raster.import" => MapTreeService.ImportRaster(request.Parameters.Deserialize<MapRasterImportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map raster import request.")),
+        "map.vector.source.load" => MapVectorSourceService.Load(request.Parameters.Deserialize<MapVectorSourceLoadRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map vector source read request.")),
+        "map.vector.captureShapefile" => MapTreeService.CaptureShapefileFamily((request.Parameters.Deserialize<MapShapefileFamilyCaptureRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Shapefile capture request.")).SourcePath),
+        "map.vector.importShapefile" => MapTreeService.ImportShapefileVector(request.Parameters.Deserialize<MapShapefileVectorImportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Shapefile map import request.")),
+        "map.geometry.load" => await ModelEditorAdapter.LoadMapGeometryAsync(request.Parameters.Deserialize<MapGeometryRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map Geometry request.")),
+        "map.boundary.geometry.load" => await ModelEditorAdapter.LoadMapBoundaryGeometryAsync(request.Parameters.Deserialize<MapBoundaryGeometryRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map boundary Geometry request.")),
+        "map.result.geometry.load" => await ModelEditorAdapter.LoadMapResultGeometryAsync(request.Parameters.Deserialize<MapResultGeometryRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map Result Geometry request.")),
+        "map.result.culvertProfile" => ModelEditorAdapter.LoadMapResultCulvertProfile(request.Parameters.Deserialize<MapResultCulvertProfileRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map Result culvert profile request.")),
+        "map.associations.load" => AssociatedMapLayersService.Load(request.Parameters.Deserialize<AssociatedMapLayersRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing associated map layer request.")),
+        "map.associationStyle.load" => AssociatedRasterStyleService.Load(request.Parameters.Deserialize<AssociatedRasterStyleRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing associated raster style request.")),
+        "map.associationStyle.apply" => AssociatedRasterStyleService.Apply(request.Parameters.Deserialize<AssociatedRasterStyleApplyRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing associated raster style request.")),
+        "map.background.styles" => await BackgroundMapService.GetStylesAsync(request.Parameters.Deserialize<BackgroundMapStylesRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing background map styles request.")),
+        "map.background.cache" => BackgroundMapService.Cache(request.Parameters.Deserialize<BackgroundMapCacheRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing background map cache request.")),
+        "map.background.render" => await BackgroundMapService.RenderAsync(request.Parameters.Deserialize<BackgroundMapRenderRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing background map render request.")),
+        "map.tree.load" => MapTreeService.Load(request.Parameters.Deserialize<MapTreeRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map tree request.")),
+        "map.tree.perform" => MapTreeService.Perform(request.Parameters.Deserialize<MapTreeActionRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map tree action.")),
+        "map.polyline.geoprocess" => MapPolylineGeoprocessService.Transform(request.Parameters.Deserialize<MapPolylineGeoprocessRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing polyline geoprocessing request.")),
+        "map.resultSources" => MapResultChartService.Sources(request.Parameters.Deserialize<MapResultSourcesRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map result sources request.")),
+        "map.dynamicProfiles" => MapDynamicProfileService.Sample(request.Parameters.Deserialize<MapDynamicProfileRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map dynamic profile request.")),
+        "map.resultSelection" => MapResultChartService.Selection(request.Parameters.Deserialize<MapResultSelectionRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map result selection request.")),
+        "map.resultSampleLine" => await MapResultChartService.SampleLine(request.Parameters.Deserialize<MapResultSampleLineRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map result sample line request."), report),
+        "map.resultRender" => MapResultRenderService.Render(request.Parameters.Deserialize<MapResultRenderRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map result render request.")),
+        "map.resultVelocityField" => MapResultVelocityFieldService.Sample(request.Parameters.Deserialize<MapResultVelocityFieldRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map result velocity field request.")),
+        "map.windVelocityField" => MapWindVelocityFieldService.Sample(request.Parameters.Deserialize<MapWindVelocityFieldRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing map wind velocity field request.")),
+        "result.profileSources" => ResultProfileSampleLineService.Sources(request.Parameters.Deserialize<ResultProfileSourcesRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing result profile sources request.")),
+        "result.profileSampleLine" => await ResultProfileSampleLineService.ComputeAsync(request.Parameters.Deserialize<ResultProfileSampleLineRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing result profile sample line request."), report),
+        "result.profileCatalog" => ResultProfileService.Catalog(request.Parameters.Deserialize<ResultProfileCatalogRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing result profile catalog request.")),
+        "result.profile" => ResultProfileService.Read(request.Parameters.Deserialize<ResultProfileRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing result profile request.")),
+        "result.profileMap" => ResultProfileService.Map(request.Parameters.Deserialize<ResultProfileMapRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing result profile map request.")),
+        "planExport.accessFolders" => PlanExportService.AccessFolders(request.Parameters.Deserialize<PlanExportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing plan export request.")),
+        "planExport.inspect" => PlanExportService.Inspect(request.Parameters.Deserialize<PlanExportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing plan export request.")),
+        "planExport.execute" => PlanExportService.Export(request.Parameters.Deserialize<PlanExportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing plan export request.")),
+        "modelCreation.inspect" => ModelCreationService.Inspect(request.Parameters.Deserialize<CreationRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing model creation request.")),
+        "modelCreation.create" => ModelCreationService.Create(request.Parameters.Deserialize<CreationRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing model creation request.")),
+        "surfaceCreation.inspect" => SurfaceCreationService.Inspect(request.Parameters.Deserialize<SurfaceCreationRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing surface creation request.")),
+        "surfaceCreation.create" => SurfaceCreationService.Create(request.Parameters.Deserialize<SurfaceCreationRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing surface creation request.")),
+        "projectMigration.inspect" => ProjectMigrationService.Inspect(request.Parameters.Deserialize<ProjectMigrationInspectRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing project migration inspection request.")),
+        "projectMigration.execute" => ProjectMigrationService.Execute(request.Parameters.Deserialize<ProjectMigrationRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing project migration request."), report),
+        "attributeTable.load" => AttributeTableService.Load(request.Parameters.Deserialize<AttributeTableLoadRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing shapefile path.")),
+        "table.filter" => TableFilterService.Evaluate(request.Parameters.Deserialize<TableFilterRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing table filter request.")),
+        "attributeTable.transform" => AttributeTableService.Transform(request.Parameters.Deserialize<AttributeTableTransformRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing attribute table edits.")),
+        "projection.evaluate" => ProjectionService.Evaluate(request.Parameters.Deserialize<ProjectionRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing projection definition.")),
+        "projection.search" => ProjectionService.Search(request.Parameters.Deserialize<ProjectionSearchRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing projection search.")),
+        "reprojection.transform" => ReprojectionService.TransformReprojection(request.Parameters.Deserialize<ReprojectionRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing reprojection request.")),
+        "reprojection.identify" => ReprojectionService.IdentifyProjection(request.Parameters.Deserialize<ReprojectionIdentifyRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing projection identification request.")),
+        "model.load" => await ModelEditorAdapter.LoadAsync(request.Parameters.Deserialize<ModelRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing model request.")),
+        "model.refreshPlanContext" => await ModelEditorAdapter.RefreshPlanContextAsync(request.Parameters.Deserialize<ModelSaveRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing plan context refresh request.")),
+        "model.precompute" => await ModelEditorAdapter.PrecomputePlanAsync(request.Parameters.Deserialize<ModelSaveRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing plan precompute request.")),
+        "model.precomputeDrafts" => await ModelEditorAdapter.PrecomputePlanDraftsAsync(request.Parameters.Deserialize<PlanPrecomputeDraftRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing associated Plan precompute request.")),
+        "plan.compute.inspect" => await ModelEditorAdapter.InspectPlanComputeAsync(request.Parameters.Deserialize<PlanComputeInspectionRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing plan compute inspection request.")),
+        "plan.compute.execute" when duplexControls is not null => await ModelEditorAdapter.ExecutePlanComputeDuplexAsync(
+            request.Parameters.Deserialize<PlanComputeExecuteRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing plan compute execution request."),
+            report, duplexControls),
+        "plan.compute.execute" => await ModelEditorAdapter.ExecutePlanComputeAsync(request.Parameters.Deserialize<PlanComputeExecuteRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing plan compute execution request."), report),
+        "model.seriesTransform" => await ModelEditorAdapter.TransformSeriesAsync(request.Parameters.Deserialize<SeriesTransformRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing series transform request.")),
+        "model.boundaryTransform" => await ModelEditorAdapter.TransformBoundaryAsync(request.Parameters.Deserialize<BoundaryTransformRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing boundary transform request.")),
+        "model.terrainTransform" => await ModelEditorAdapter.TransformTerrainAsync(request.Parameters.Deserialize<TerrainTransformRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain transform request.")),
+        "model.terrainMap" => await ModelEditorAdapter.TerrainMapAsync(request.Parameters.Deserialize<TerrainMapRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain map context.")),
+        "model.terrainAIEnhance" when duplexControls is not null => await ModelEditorAdapter.EnhanceTerrainFromUSGSAsync(request.Parameters.Deserialize<TerrainAIEnhanceRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain enhancement request."), report, duplexControls),
+        "model.sourceProperty.validate" => await ModelEditorAdapter.ValidateSourcePropertyAsync(request.Parameters.Deserialize<SourcePropertyValidationRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing source property validation request.")),
+        "topology.regionProperty.validate" => await ModelEditorAdapter.ValidateGeometryRegionPropertyAsync(request.Parameters.Deserialize<SourcePropertyValidationRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing region property validation request.")),
+        "model.terrainInputImportInspect" => await ModelEditorAdapter.InspectTerrainInputImportAsync(request.Parameters.Deserialize<TerrainInputImportInspectRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain input inspection request.")),
+        "model.terrainInputAppend" => await ModelEditorAdapter.AppendTerrainInputsAsync(request.Parameters.Deserialize<TerrainInputAppendRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain input append request.")),
+        "model.terrainInputImportStatus" => await ModelEditorAdapter.GetTerrainInputImportStatusAsync(request.Parameters.Deserialize<TerrainInputImportStatusRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain import status request.")),
+        "model.terrainInputImportCancel" => ModelEditorAdapter.CancelTerrainInputImport(request.Parameters.Deserialize<TerrainInputImportCancelRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain import cancellation request.")),
+        "model.terrainInputImportDiscard" => ModelEditorAdapter.DiscardTerrainInputImport(request.Parameters.Deserialize<TerrainInputImportDiscardRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain import discard request.")),
+        "model.terrainInputImportDiscardBatch" => ModelEditorAdapter.DiscardTerrainInputImportBatch(request.Parameters.Deserialize<TerrainInputImportDiscardBatchRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain import batch discard request.")),
+        "model.classificationMap" => await ModelEditorAdapter.ClassificationMapAsync(request.Parameters.Deserialize<ClassificationMapRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing classification map context.")),
+        "terrain.raster.export" when duplexControls is not null => await ModelEditorAdapter.ExportTerrainRasterAsync(
+            request.Parameters.Deserialize<TerrainRasterExportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain raster export request."), report, duplexControls),
+        "model.terrainUSGSQuery" => await ModelEditorAdapter.QueryTerrainUSGSAsync(
+            request.Parameters.Deserialize<TerrainUSGSQueryRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain USGS query request.")),
+        "model.terrainUSGSDownload" when duplexControls is not null => await ModelEditorAdapter.DownloadTerrainUSGSAsync(
+            request.Parameters.Deserialize<TerrainUSGSDownloadRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain USGS download request."), report, duplexControls),
+        "model.terrainUSGSCleanup" => await ModelEditorAdapter.CleanupTerrainUSGSAsync(
+            request.Parameters.Deserialize<TerrainUSGSCleanupRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing terrain USGS cleanup request.")),
+        "model.classificationInspect" => await ModelEditorAdapter.InspectClassificationAsync(request.Parameters.Deserialize<ClassificationImportInspectRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing classification input files.")),
+        "model.classificationImport" => await ModelEditorAdapter.ImportClassificationAsync(request.Parameters.Deserialize<ClassificationImportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing classification input files.")),
+        "model.classificationTransform" => await ModelEditorAdapter.TransformClassificationAsync(request.Parameters.Deserialize<ClassificationTransformRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing classification transform request.")),
+        "model.manningTransform" => await ModelEditorAdapter.TransformManningAsync(request.Parameters.Deserialize<ManningTransformRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing Manning transform request.")),
+        "model.spatialTransform" => await ModelEditorAdapter.TransformSpatialAsync(request.Parameters.Deserialize<SpatialTransformRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing spatial transform request.")),
+        "model.gridInspect" => await ModelEditorAdapter.InspectGridAsync(request.Parameters.Deserialize<SpatialGridInspectRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing grid inputs.")),
+        "model.gridFrame" => await ModelEditorAdapter.GridFrameAsync(request.Parameters.Deserialize<SpatialGridFrameRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing grid timestep.")),
+        "model.gridImport" => await ModelEditorAdapter.ImportGridAsync(request.Parameters.Deserialize<SpatialGridImportRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing grid selection.")),
+        "model.save" => await ModelEditorAdapter.SaveAsync(request.Parameters.Deserialize<ModelSaveRequest>(BackendJson.Options) ?? throw new ArgumentException("Missing model edits.")),
+        _ => throw new NotSupportedException("Unsupported backend operation: " + request.Method)
+    };
+    responses.Complete(new { id, result }, streamProgress);
+    return 0;
+}
+
+catch (Exception error)
+{
+    while (error is System.Reflection.TargetInvocationException invocation && invocation.InnerException is Exception inner) error = inner;
+    BackendApplicationLogging.WriteUnhandled(error);
+    string code = error switch
+    {
+        SourceFileChangedException => "sourceChanged",
+        FileNotFoundException or DirectoryNotFoundException => "notFound",
+        UnauthorizedAccessException => "accessDenied",
+        NotSupportedException => "unsupported",
+        ArgumentException or FormatException or System.ComponentModel.DataAnnotations.ValidationException => "invalidInput",
+        _ => "sourceFailure"
+    };
+    responses.Complete(new { id, error = new { code, message = error.Message } }, streamProgress);
+    return 1;
+}
+
+static ResultPlanContextSnapshot InspectResultPlanContext(ResultPlanContextRequest request) =>
+    ResultPlanContextService.Inspect(request.ProjectPath, request.ProjectXml, request.ResultPath, request.Revision);

@@ -1,0 +1,392 @@
+[
+  {
+    "id": "OptSkew",
+    "title": "OptSkew",
+    "parameters": [
+      {
+        "id": "count",
+        "title": "Count",
+        "kind": "integer",
+        "defaultValue": "2"
+      }
+    ],
+    "palette": true,
+    "paletteDefaults": {},
+    "aliases": [],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/OptSkewStep.cs"
+  },
+  {
+    "id": "OptTopology",
+    "title": "OptTopology",
+    "parameters": [
+      {
+        "id": "merge",
+        "title": "Merge",
+        "kind": "boolean",
+        "defaultValue": "true"
+      },
+      {
+        "id": "collapse",
+        "title": "Collapse",
+        "kind": "boolean",
+        "defaultValue": "true"
+      },
+      {
+        "id": "perimeter",
+        "title": "Perimeter",
+        "kind": "boolean",
+        "defaultValue": "true"
+      },
+      {
+        "id": "threshold",
+        "title": "Threshold",
+        "kind": "number",
+        "defaultValue": "0.5"
+      },
+      {
+        "id": "deltaCost",
+        "title": "Delta cost",
+        "kind": "number",
+        "defaultValue": "0.05"
+      },
+      {
+        "id": "skew",
+        "title": "Skew",
+        "kind": "number",
+        "defaultValue": "2.0"
+      },
+      {
+        "id": "cellArea",
+        "title": "Cell area",
+        "kind": "number",
+        "defaultValue": "0"
+      },
+      {
+        "id": "faceSmooth",
+        "title": "Face smooth",
+        "kind": "number",
+        "defaultValue": "30.0"
+      },
+      {
+        "id": "faceLength",
+        "title": "Face length",
+        "kind": "number",
+        "defaultValue": "0.1"
+      },
+      {
+        "id": "count",
+        "title": "Count",
+        "kind": "integer",
+        "defaultValue": "-1"
+      }
+    ],
+    "palette": true,
+    "paletteDefaults": {},
+    "aliases": [],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/OptTopologyStep.cs"
+  },
+  {
+    "id": "Orthogonalize",
+    "title": "Orthogonalize",
+    "parameters": [
+      {
+        "id": "method",
+        "title": "Method",
+        "kind": "integer",
+        "defaultValue": "1"
+      },
+      {
+        "id": "scaler",
+        "title": "Scaler",
+        "kind": "number",
+        "defaultValue": "1.0"
+      },
+      {
+        "id": "alpha",
+        "title": "Alpha",
+        "kind": "number",
+        "defaultValue": "0.8"
+      },
+      {
+        "id": "count",
+        "title": "Count",
+        "kind": "integer",
+        "defaultValue": "10"
+      },
+      {
+        "id": "sliding",
+        "title": "Sliding",
+        "kind": "boolean",
+        "defaultValue": "true"
+      },
+      {
+        "id": "useArea",
+        "title": "Use area",
+        "kind": "boolean",
+        "defaultValue": "true"
+      },
+      {
+        "id": "smoothmethod",
+        "title": "Smoothmethod",
+        "kind": "integer",
+        "defaultValue": "1"
+      },
+      {
+        "id": "nudgeTriangles",
+        "title": "Nudge triangles",
+        "kind": "boolean",
+        "defaultValue": "true"
+      }
+    ],
+    "palette": true,
+    "paletteDefaults": {
+      "count": "20",
+      "scaler": "1.0",
+      "sliding": "true",
+      "method": "0",
+      "smoothmethod": "0",
+      "alpha": "0.9"
+    },
+    "aliases": [],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/OrthogonalizeStep.cs"
+  },
+  {
+    "id": "RemoveFaces",
+    "title": "RemoveFaces",
+    "parameters": [
+      {
+        "id": "threshold",
+        "title": "Threshold",
+        "kind": "number",
+        "defaultValue": "0.1"
+      }
+    ],
+    "palette": true,
+    "paletteDefaults": {
+      "threshold": "0.5"
+    },
+    "aliases": [
+      "Merge"
+    ],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/RemoveFacesStep.cs"
+  },
+  {
+    "id": "RemoveNodes",
+    "title": "RemoveNodes",
+    "parameters": [
+      {
+        "id": "perimeter",
+        "title": "Perimeter",
+        "kind": "boolean",
+        "defaultValue": "true"
+      },
+      {
+        "id": "threshold",
+        "title": "Threshold",
+        "kind": "number",
+        "defaultValue": "0.5"
+      },
+      {
+        "id": "deltaCost",
+        "title": "Delta cost",
+        "kind": "number",
+        "defaultValue": "0.05"
+      },
+      {
+        "id": "skew",
+        "title": "Skew",
+        "kind": "number",
+        "defaultValue": "2.0"
+      },
+      {
+        "id": "cellArea",
+        "title": "Cell area",
+        "kind": "number",
+        "defaultValue": "0"
+      },
+      {
+        "id": "faceSmooth",
+        "title": "Face smooth",
+        "kind": "number",
+        "defaultValue": "30.0"
+      },
+      {
+        "id": "faceLength",
+        "title": "Face length",
+        "kind": "number",
+        "defaultValue": "0.1"
+      },
+      {
+        "id": "count",
+        "title": "Count",
+        "kind": "integer",
+        "defaultValue": "-1"
+      }
+    ],
+    "palette": true,
+    "paletteDefaults": {},
+    "aliases": [
+      "MergeFaces"
+    ],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/RemoveNodesStep.cs"
+  },
+  {
+    "id": "Smooth",
+    "title": "Smooth",
+    "parameters": [
+      {
+        "id": "count",
+        "title": "Count",
+        "kind": "integer",
+        "defaultValue": "10"
+      },
+      {
+        "id": "scaled",
+        "title": "Scaled",
+        "kind": "boolean",
+        "defaultValue": "true"
+      },
+      {
+        "id": "useArea",
+        "title": "Use area",
+        "kind": "boolean",
+        "defaultValue": "true"
+      },
+      {
+        "id": "sliding",
+        "title": "Sliding",
+        "kind": "boolean",
+        "defaultValue": "true"
+      }
+    ],
+    "palette": true,
+    "paletteDefaults": {},
+    "aliases": [],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/SmoothStep.cs"
+  },
+  {
+    "id": "SmoothAngles",
+    "title": "SmoothAngles",
+    "parameters": [
+      {
+        "id": "count",
+        "title": "Count",
+        "kind": "integer",
+        "defaultValue": "10"
+      }
+    ],
+    "palette": true,
+    "paletteDefaults": {},
+    "aliases": [],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/SmoothAnglesStep.cs"
+  },
+  {
+    "id": "Split",
+    "title": "Split",
+    "parameters": [
+      {
+        "id": "threshold",
+        "title": "Threshold",
+        "kind": "number",
+        "defaultValue": "0.5"
+      }
+    ],
+    "palette": true,
+    "paletteDefaults": {},
+    "aliases": [],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/SplitStep.cs"
+  },
+  {
+    "id": "SwapEdges",
+    "title": "SwapEdges",
+    "parameters": [
+      {
+        "id": "threshold",
+        "title": "Threshold",
+        "kind": "integer",
+        "defaultValue": "-1"
+      },
+      {
+        "id": "shorten",
+        "title": "Shorten",
+        "kind": "boolean",
+        "defaultValue": "false"
+      },
+      {
+        "id": "delaunay",
+        "title": "Delaunay",
+        "kind": "boolean",
+        "defaultValue": "true"
+      }
+    ],
+    "palette": true,
+    "paletteDefaults": {},
+    "aliases": [],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/SwapEdgesStep.cs"
+  },
+  {
+    "id": "Distort",
+    "title": "Distort",
+    "parameters": [
+      {
+        "id": "count",
+        "title": "Count",
+        "kind": "integer",
+        "defaultValue": "1"
+      },
+      {
+        "id": "jitter",
+        "title": "Jitter",
+        "kind": "number",
+        "defaultValue": "0.25"
+      },
+      {
+        "id": "nudgeConvex",
+        "title": "Nudge convex",
+        "kind": "number",
+        "defaultValue": "-1.0"
+      }
+    ],
+    "palette": false,
+    "paletteDefaults": {},
+    "aliases": [],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/DistortStep.cs"
+  },
+  {
+    "id": "ForceDisplacement",
+    "title": "ForceDisplacement",
+    "parameters": [
+      {
+        "id": "count",
+        "title": "Count",
+        "kind": "integer",
+        "defaultValue": "10"
+      },
+      {
+        "id": "cull",
+        "title": "Cull",
+        "kind": "boolean",
+        "defaultValue": "false"
+      },
+      {
+        "id": "insert",
+        "title": "Insert",
+        "kind": "boolean",
+        "defaultValue": "false"
+      }
+    ],
+    "palette": false,
+    "paletteDefaults": {},
+    "aliases": [],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/ForceDisplacementStep.cs"
+  },
+  {
+    "id": "Default",
+    "title": "Default",
+    "parameters": [],
+    "palette": false,
+    "paletteDefaults": {},
+    "aliases": [],
+    "source": "Geospatial.Core.dll/Geospatial.Vectors.Topology/DefaultStep.cs"
+  }
+]

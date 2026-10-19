@@ -1,0 +1,8 @@
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.nupkg binary
+*.h5 binary
+*.png binary
+*.jpg binary
+*.tif binary

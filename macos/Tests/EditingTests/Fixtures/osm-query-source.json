@@ -1,0 +1,108 @@
+{
+  "presets": [
+    {
+      "id": "Buildings",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"building\"]({{bbox}});\n  relation[\"building\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "MajorRoads",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"highway\"~\"^(motorway|trunk|primary|secondary|motorway_link|trunk_link|primary_link|secondary_link)$\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "AllRoads",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"highway\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "Railways",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"railway\"~\"^(rail|light_rail|subway|tram|narrow_gauge)$\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "Bridges",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"bridge\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "Culverts",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"tunnel\"=\"culvert\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "DamsAndWeirs",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"waterway\"~\"^(dam|weir)$\"]({{bbox}});\n  relation[\"waterway\"~\"^(dam|weir)$\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "LeveesAndEmbankments",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"man_made\"~\"^(dyke|embankment)$\"]({{bbox}});\n  relation[\"man_made\"~\"^(dyke|embankment)$\"]({{bbox}});\n  way[\"embankment\"=\"yes\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "Waterways",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"waterway\"~\"^(river|stream|canal|drain|ditch)$\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "WaterBodies",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"natural\"=\"water\"]({{bbox}});\n  relation[\"natural\"=\"water\"]({{bbox}});\n  way[\"landuse\"=\"reservoir\"]({{bbox}});\n  relation[\"landuse\"=\"reservoir\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "Wetlands",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"natural\"=\"wetland\"]({{bbox}});\n  relation[\"natural\"=\"wetland\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "LandUse",
+      "ql": "[out:json][timeout:180];\n(\n  way[\"landuse\"]({{bbox}});\n  relation[\"landuse\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "AdministrativeBoundaries",
+      "ql": "[out:json][timeout:180];\n(\n  relation[\"boundary\"=\"administrative\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "id": "Places",
+      "ql": "[out:json][timeout:180];\n(\n  node[\"place\"~\"^(city|town|village|hamlet)$\"]({{bbox}});\n);\nout geom;"
+    }
+  ],
+  "filters": [
+    {
+      "comparison": "Exists",
+      "key": "custom\\\"key",
+      "value": "a.b;way+;two words;[x]",
+      "ql": "[out:json][timeout:180];\n(\n  nwr[\"custom\\\\\\\"key\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "comparison": "NotExists",
+      "key": "custom\\\"key",
+      "value": "a.b;way+;two words;[x]",
+      "ql": "[out:json][timeout:180];\n(\n  nwr[!\"custom\\\\\\\"key\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "comparison": "Equals",
+      "key": "custom\\\"key",
+      "value": "a.b;way+;two words;[x]",
+      "ql": "[out:json][timeout:180];\n(\n  nwr[\"custom\\\\\\\"key\"=\"a.b;way+;two words;[x]\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "comparison": "NotEquals",
+      "key": "custom\\\"key",
+      "value": "a.b;way+;two words;[x]",
+      "ql": "[out:json][timeout:180];\n(\n  nwr[\"custom\\\\\\\"key\"!=\"a.b;way+;two words;[x]\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "comparison": "Matches",
+      "key": "custom\\\"key",
+      "value": "a.b;way+;two words;[x]",
+      "ql": "[out:json][timeout:180];\n(\n  nwr[\"custom\\\\\\\"key\"~\"a.b;way+;two words;[x]\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "comparison": "NotMatches",
+      "key": "custom\\\"key",
+      "value": "a.b;way+;two words;[x]",
+      "ql": "[out:json][timeout:180];\n(\n  nwr[\"custom\\\\\\\"key\"!~\"a.b;way+;two words;[x]\"]({{bbox}});\n);\nout geom;"
+    },
+    {
+      "comparison": "OneOf",
+      "key": "custom\\\"key",
+      "value": "a.b;way+;two words;[x]",
+      "ql": "[out:json][timeout:180];\n(\n  nwr[\"custom\\\\\\\"key\"~\"^(a\\\\.b|way\\\\+|two\\\\ words|\\\\[x])$\"]({{bbox}});\n);\nout geom;"
+    }
+  ],
+  "source": "ras2025/exports-all-managed-v1/assemblies/Geospatial.IO.dll/Geospatial.IO.Network.OSM",
+  "limits": [
+    "Original query text only; no projection, network service, file saving or solver acceptance."
+  ]
+}

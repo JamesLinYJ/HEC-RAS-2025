@@ -1,0 +1,615 @@
+{
+  "palettes": [
+    {
+      "id": "OGTerrain",
+      "name": "Terrain Classic",
+      "colors": [
+        "66CDAAFF",
+        "FFFF00FF",
+        "008000FF",
+        "FFA500FF",
+        "8B0000FF",
+        "A52A2AFF",
+        "808080FF",
+        "FFFAFAFF"
+      ]
+    },
+    {
+      "id": "Terrain",
+      "name": "Terrain",
+      "colors": [
+        "99F5FFFF",
+        "44E044FF",
+        "008000FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "8B0000FF",
+        "A42A2AFF",
+        "808080FF",
+        "FFFFFFFF"
+      ]
+    },
+    {
+      "id": "WaterSurface",
+      "name": "Water Surface",
+      "colors": [
+        "7FFF00FF",
+        "008000FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "FF0000FF",
+        "FFC0CBFF",
+        "FF00FFFF"
+      ]
+    },
+    {
+      "id": "Depths",
+      "name": "Depths",
+      "colors": [
+        "008080FF",
+        "0000FFFF"
+      ]
+    },
+    {
+      "id": "Grayscale",
+      "name": "Grayscale",
+      "colors": [
+        "FFFFFFFF",
+        "000000FF"
+      ]
+    },
+    {
+      "id": "Velocities",
+      "name": "Velocities",
+      "colors": [
+        "00008BFF",
+        "0000FFFF",
+        "90EE90FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "FF4500FF",
+        "8B0000FF"
+      ]
+    },
+    {
+      "id": "EnergyDepth",
+      "name": "Energy Depth",
+      "colors": [
+        "90EE90FF",
+        "006400FF"
+      ]
+    },
+    {
+      "id": "WaterSurfaceElevation",
+      "name": "Water Surface Elevation",
+      "colors": [
+        "7FFF00FF",
+        "008000FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "FF0000FF",
+        "FFC0CBFF",
+        "FF00FFFF"
+      ]
+    },
+    {
+      "id": "WSError",
+      "name": "Water Surface Error",
+      "colors": [
+        "C8BEBE00",
+        "E28C8CFF",
+        "F04646FF",
+        "FF0000FF",
+        "A00000FF"
+      ]
+    },
+    {
+      "id": "Courant",
+      "name": "Courant",
+      "colors": [
+        "008040FF",
+        "70EF78FF",
+        "A8E400FF",
+        "E4D200FF",
+        "FFA600FF",
+        "FE6A00FF",
+        "FA3D00FF",
+        "F12200FF",
+        "D70000FF"
+      ]
+    },
+    {
+      "id": "ArrivalTime",
+      "name": "Arrival Time",
+      "colors": [
+        "FF0000FF",
+        "CD5C5CFF",
+        "FFA500FF",
+        "FFFF00FF",
+        "90EE90FF",
+        "008000FF"
+      ]
+    },
+    {
+      "id": "Duration",
+      "name": "Duration",
+      "colors": [
+        "90EE90FF",
+        "008000FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "CD5C5CFF",
+        "FF0000FF"
+      ]
+    },
+    {
+      "id": "Shear",
+      "name": "Shear",
+      "colors": [
+        "98FB98FF",
+        "D2B48CFF",
+        "FFFF00FF",
+        "FFA500FF",
+        "CD5C5CFF",
+        "FF0000FF"
+      ]
+    },
+    {
+      "id": "StreamPower",
+      "name": "Stream Power",
+      "colors": [
+        "98FB98FF",
+        "D2B48CFF",
+        "FFFF00FF",
+        "FFA500FF",
+        "CD5C5CFF",
+        "FF0000FF"
+      ]
+    },
+    {
+      "id": "Ice",
+      "name": "Ice",
+      "colors": [
+        "D3D3D3FF",
+        "4682B4FF"
+      ]
+    },
+    {
+      "id": "Hazard",
+      "name": "Hazard",
+      "colors": [
+        "0000FFFF",
+        "4169E1FF",
+        "00FFFFFF",
+        "7CFC00FF",
+        "90EE90FF",
+        "008000FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "FF0000FF",
+        "FF69B4FF",
+        "FF00FFFF"
+      ]
+    },
+    {
+      "id": "DepthForecast",
+      "name": "Depth Forecast",
+      "colors": [
+        "ADD8E6FF",
+        "4169E1FF",
+        "FFFF00FF",
+        "FF0000FF"
+      ]
+    },
+    {
+      "id": "Weather",
+      "name": "Weather",
+      "colors": [
+        "7CFC00FF",
+        "90EE90FF",
+        "008000FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "FF0000FF",
+        "FF00FFFF",
+        "FF69B4FF",
+        "00FFFFFF",
+        "4169E1FF"
+      ]
+    },
+    {
+      "id": "ManningsN",
+      "name": "Mannings N",
+      "colors": [
+        "00FFFFFF",
+        "00BFFFFF",
+        "0000FFFF",
+        "008000FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "FF0000FF"
+      ]
+    },
+    {
+      "id": "Rainbow",
+      "name": "Rainbow",
+      "colors": [
+        "EE82EEFF",
+        "4B0082FF",
+        "0000FFFF",
+        "008000FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "FF0000FF"
+      ]
+    },
+    {
+      "id": "GrayToRed",
+      "name": "Gray To Red",
+      "colors": [
+        "D3D3D3FF",
+        "FF0000FF"
+      ]
+    },
+    {
+      "id": "Interpolation",
+      "name": "Interpolation",
+      "colors": [
+        "FFFFFFFF",
+        "000000FF"
+      ]
+    },
+    {
+      "id": "InterpolationM",
+      "name": "Interpolation M",
+      "colors": [
+        "808080FF",
+        "FF0000FF",
+        "0000FFFF",
+        "FF0000FF",
+        "808080FF"
+      ]
+    },
+    {
+      "id": "BBGYOR",
+      "name": "Cyan to Red",
+      "colors": [
+        "00FFFFFF",
+        "0000FFFF",
+        "008000FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "FF0000FF"
+      ]
+    },
+    {
+      "id": "RedGreen",
+      "name": "Red To Green",
+      "colors": [
+        "FF0000FF",
+        "FFA500FF",
+        "FFFF00FF",
+        "0000FFFF",
+        "00FFFFFF",
+        "008000FF",
+        "90EE90FF"
+      ]
+    },
+    {
+      "id": "GreenRed",
+      "name": "Green To Red",
+      "colors": [
+        "90EE90FF",
+        "008000FF",
+        "00FFFFFF",
+        "0000FFFF",
+        "FFFF00FF",
+        "FFA500FF",
+        "FF0000FF"
+      ]
+    },
+    {
+      "id": "GraytoRed",
+      "name": "Gray To Red",
+      "colors": [
+        "808080FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "FF0000FF"
+      ]
+    },
+    {
+      "id": "Precipitation",
+      "name": "Precipitation",
+      "colors": [
+        "99999900",
+        "00FF81FF",
+        "00C655FF",
+        "00A543FF",
+        "008937FF",
+        "006C2EFF",
+        "005E29FF",
+        "FFF601FF",
+        "F8B800FF",
+        "FF8A2AFF",
+        "F56300FF",
+        "E80000FF",
+        "B20000FF",
+        "EB008BFF",
+        "A900CBFF",
+        "82028AFF",
+        "640063FF"
+      ]
+    },
+    {
+      "id": "PrecipitationCumulative",
+      "name": "Precipitation Cumulative",
+      "colors": [
+        "99999900",
+        "4BD2F7FF",
+        "76A0C6FF",
+        "3C4BACFF",
+        "3CF74BFF",
+        "3CB447FF",
+        "3C8743FF",
+        "F7F73CFF",
+        "FBDE88FF",
+        "F7AC3CFF",
+        "F73C3CFF",
+        "BF3C3CFF",
+        "993C3CFF",
+        "F73CF7FF",
+        "9974E4FF"
+      ]
+    },
+    {
+      "id": "PrecipitationIncremental",
+      "name": "Precipitation Incremental",
+      "colors": [
+        "99999900",
+        "00FF81FF",
+        "00C655FF",
+        "00A543FF",
+        "008937FF",
+        "006C2EFF",
+        "005E29FF",
+        "FFF601FF",
+        "F8B800FF",
+        "FF8A2AFF",
+        "F56300FF",
+        "E80000FF",
+        "B20000FF",
+        "EB008BFF",
+        "A900CBFF",
+        "82028AFF",
+        "640063FF"
+      ]
+    },
+    {
+      "id": "BedChange",
+      "name": "Bed Change",
+      "colors": [
+        "FF0000FF",
+        "FFFFFFFF",
+        "0000FFFF"
+      ]
+    },
+    {
+      "id": "SedimentConcentration",
+      "name": "Sediment Concentration",
+      "colors": [
+        "2F80FAFF",
+        "2797EBFF",
+        "1CAADFFF",
+        "00B9C7FF",
+        "29C3AAFF",
+        "48CB86FF",
+        "81CC59FF",
+        "BBC42FFF",
+        "EABA30FF",
+        "FEC735FF",
+        "F5EE21FF"
+      ]
+    },
+    {
+      "id": "SedimentConcentrationAlt",
+      "name": "Sediment Concentration Alt",
+      "colors": [
+        "80FFFFC8",
+        "D38A03FF",
+        "AC7102FF",
+        "6F4802FF",
+        "472F01FF",
+        "221600FF"
+      ]
+    },
+    {
+      "id": "Mud",
+      "name": "Mud",
+      "colors": [
+        "FAD158C8",
+        "D38A03FF",
+        "AC7102FF",
+        "6F4802FF",
+        "472F01FF",
+        "221600FF"
+      ]
+    },
+    {
+      "id": "WindSpeed",
+      "name": "Wind Speed",
+      "colors": [
+        "CCCCCCFF",
+        "666666FF",
+        "C560FFFF",
+        "7640FFFF",
+        "0000FFFF",
+        "01FFC5FF",
+        "01FF00FF",
+        "B9FF00FF",
+        "EFFF00FF",
+        "FFEF00FF",
+        "FFD200FF",
+        "FFB400FF",
+        "FF9500FF",
+        "FF6C00FF",
+        "FF5A00FF",
+        "FF4700FF",
+        "FF2300FF",
+        "FF0000FF",
+        "C50000FF",
+        "950000FF",
+        "6D0000FF",
+        "9A0028FF",
+        "9F003BFF",
+        "C50049FF",
+        "FF00FFFF"
+      ]
+    },
+    {
+      "id": "AirTemperature",
+      "name": "Air Temperature",
+      "colors": [
+        "F08CDCFF",
+        "DC50C8FF",
+        "A014B4FF",
+        "783CC8FF",
+        "0A64F0FF",
+        "00C8FFFF",
+        "00C8A0FF",
+        "00C814FF",
+        "AAE100FF",
+        "FAF500FF",
+        "FFA500FF",
+        "FF0000FF",
+        "8B0000FF"
+      ]
+    },
+    {
+      "id": "NLCD",
+      "name": "NLCD",
+      "colors": [
+        "5475A8FF",
+        "FFFFFFFF",
+        "E8D1D1FF",
+        "E29E8CFF",
+        "FF0000FF",
+        "B50000FF",
+        "D2CDC0FF",
+        "85C77EFF",
+        "38814EFF",
+        "D4E7B0FF",
+        "AF963CFF",
+        "DCCA8FFF",
+        "FDE9AAFF",
+        "D1D182FF",
+        "A3CC51FF",
+        "82BA9EFF",
+        "FBF65DFF",
+        "CA9146FF",
+        "C8E6F8FF",
+        "64B3CBFF"
+      ]
+    },
+    {
+      "id": "AndersonII",
+      "name": "Anderson II",
+      "colors": [
+        "E29E8CFF",
+        "FF0000FF",
+        "B50000FF",
+        "000000FF",
+        "B50000FF",
+        "E29E8CFF",
+        "E8D1D1FF",
+        "FBF65DFF",
+        "CA9146FF",
+        "FBF65DFF",
+        "E1C850FF",
+        "FDE9AAFF",
+        "DCCA8FFF",
+        "EBD29BFF",
+        "85C77EFF",
+        "38814EFF",
+        "D4E7B0FF",
+        "5475A8FF",
+        "5475A8FF",
+        "5475A8FF",
+        "5475A8FF",
+        "C8E6F8FF",
+        "64B3D5FF",
+        "D2CDC0FF",
+        "D2CDC0FF",
+        "D2CDC0FF",
+        "D2CDC0FF",
+        "D2CDC0FF",
+        "D2CDC0FF",
+        "D2CDC0FF",
+        "AABA9EFF",
+        "82D29EFF",
+        "D2CDC0FF",
+        "82BADCFF",
+        "82BA9EFF",
+        "FFFFFFFF",
+        "FFFFFFFF"
+      ]
+    },
+    {
+      "id": "CCAP",
+      "name": "CCAP",
+      "colors": [
+        "000000FF",
+        "FFFFFFFF",
+        "C2C2C2FF",
+        "979797FF",
+        "CCCC00FF",
+        "542100FF",
+        "C1A04FFF",
+        "F2BA87FF",
+        "00F200FF",
+        "003A00FF",
+        "07A03AFF",
+        "6D6D00FF",
+        "F2F200FF",
+        "F9D100FF",
+        "AAF9EFFF",
+        "005B5BFF",
+        "F26DF8FF",
+        "F200F2FF",
+        "3D003DFF",
+        "6D006DFF",
+        "AF00AFFF",
+        "00F2F2FF",
+        "000077FF",
+        "0000F2FF",
+        "6675DBFF"
+      ]
+    },
+    {
+      "id": "CumulativeIterations",
+      "name": "Cumulative Iterations",
+      "colors": [
+        "90EE90FF",
+        "FFFF00FF",
+        "FFA500FF",
+        "FF4500FF",
+        "8B0000FF"
+      ]
+    },
+    {
+      "id": "AirPressure",
+      "name": "AirPressure",
+      "colors": [
+        "0000FFFF",
+        "008000FF",
+        "FFFF00FF",
+        "FF0000FF"
+      ]
+    }
+  ],
+  "source": "ras2025/exports-all-managed-v1/assemblies/Geospatial.Rendering.dll/Geospatial.Rendering/ColorPalettes.cs",
+  "limits": [
+    "Unit-specific InterpolatedSurfaceFill presets and user palettes are supplied by the source adapter.",
+    "These are original palette constants, not fabricated raster values or rendering acceptance."
+  ]
+}
