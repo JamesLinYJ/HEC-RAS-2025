@@ -292,6 +292,11 @@ struct DataToolSheet: View {
         // Keep Run visible but disabled until the route can supply one.
         if kind == .geoprocessing { return false }
         if kind == .planExport && (store.hasUnsavedModelEdits || store.isSavingAll) { return false }
+        if kind == .planExport,
+           editor.fields["PlanExporterControl/EnableUpload"] == "true",
+           editor.fields["PlanExporterControl/ModelId"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            return false
+        }
         if kind == .credentials { return state.presentation.support?.canLogin == true }
         guard state.presentation.canExecute else { return false }
         if kind == .reportIssue {

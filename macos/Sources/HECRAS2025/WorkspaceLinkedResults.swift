@@ -162,7 +162,8 @@ struct MapLinkedResultsSection: View {
                 contextToken: snapshot.sources.contextToken,
                 sourceIdentity: mapState.linkedResultSourceIdentity,
                 resultNodeIdentity: node.id, selectionIndex: slot.selectionIndex,
-                anchorPath: result.resultPath, anchorRevision: result.revision)
+                anchorPath: result.resultPath, anchorRevision: result.revision,
+                coreLayerContext: store.captureCoreLayerRequestContext())
         } catch {
             captureError = L10n.text(error.localizedDescription)
         }
@@ -188,7 +189,8 @@ private struct MapLinkedResultPicker: View {
     private var ownerIdentity: String {
         [store.projectSessionID.uuidString, store.mapWorkflowIdentity(mapState.id),
             mapState.linkedResultSourceIdentity,
-            store.document?.url?.standardizedFileURL.path ?? ""].joined(separator: "\n")
+            store.document?.url?.standardizedFileURL.path ?? "",
+            store.captureCoreLayerRequestContext()?.identityToken ?? ""].joined(separator: "\n")
     }
     private var canAccept: Bool {
         context != nil && !selectedGroupIDs.isEmpty && !isLoading && !isSubmitting && isCurrentOwner()
@@ -267,7 +269,8 @@ private struct MapLinkedResultPicker: View {
         }
         do {
             let loaded = try await provider.inspect(resultPath: URL(fileURLWithPath: capture.anchorPath),
-                projectPath: projectURL, projectXml: capture.projectXML, revision: capture.anchorRevision)
+                projectPath: projectURL, projectXml: capture.projectXML, revision: capture.anchorRevision,
+                coreLayerContext: capture.coreLayerContext)
             guard !Task.isCancelled, isCurrentOwner(),
                   MapLinkedResultCapture.canonical(loaded.projectPath) == MapLinkedResultCapture.canonical(capture.projectPath),
                   MapLinkedResultCapture.canonical(loaded.resultPath) == capture.anchorPath,
@@ -305,6 +308,7 @@ private struct MapLinkedResultPicker: View {
                             projectPath: store.document?.url,
                             projectXML: store.document?.editorXML(overridingDescription: store.descriptionDraft),
                             sourceIdentity: mapState.linkedResultSourceIdentity,
+                            coreLayerContext: store.captureCoreLayerRequestContext(),
                             sources: mapState.resultSources.snapshot)
                     })
                 guard activated, isCurrentOwner() else {
@@ -324,6 +328,7 @@ private struct MapLinkedResultPicker: View {
             projectPath: store.document?.url,
             projectXML: store.document?.editorXML(overridingDescription: store.descriptionDraft),
             sourceIdentity: mapState.linkedResultSourceIdentity,
+            coreLayerContext: store.captureCoreLayerRequestContext(),
             sources: mapState.resultSources.snapshot)
     }
 }

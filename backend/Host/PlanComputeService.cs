@@ -59,7 +59,7 @@ public static partial class ModelEditorAdapter
         string assetPath = SourceFilePaths.Canonical(model.AssetPath);
         string revision = Revision(assetPath);
         if (!string.Equals(revision, model.Revision, StringComparison.Ordinal)) throw new SourceFileChangedException();
-        VerifyOwningProject(projectPath, assetPath);
+        VerifyOwningProject(projectPath, assetPath, model.CoreLayerContext);
         string projectRevision = Revision(projectPath);
         string projectXmlFingerprint = HashText(model.ProjectXml!);
 
@@ -128,7 +128,7 @@ public static partial class ModelEditorAdapter
         string assetPath = SourceFilePaths.Canonical(model.AssetPath);
         string revision = Revision(assetPath);
         if (!string.Equals(revision, model.Revision, StringComparison.Ordinal)) throw new SourceFileChangedException();
-        VerifyOwningProject(projectPath, assetPath);
+        VerifyOwningProject(projectPath, assetPath, model.CoreLayerContext);
         string projectRevision = Revision(projectPath);
         string projectXmlFingerprint = HashText(model.ProjectXml!);
 

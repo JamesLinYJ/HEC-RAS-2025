@@ -17,6 +17,13 @@ final class BoundaryMapSession: ObservableObject {
     private var captures: [BoundaryMapCapture] = []
     private var visualStylesByCaptureIdentity: [String: BoundaryMapRenderStyle] = [:]
     private var showsStrokeVerticesByOwner: [String: Bool] = [:]
+    private var showsAttachedFacesByOwner: [String: Bool] = [:]
+    private var attachedFaceImagesByOwner: [String: CGImage] = [:]
+    private var attachedFacesViewport: MapSourceRenderViewport?
+    private var attachedFacesTasks: [String: Task<BoundaryMapSnapshot, Error>] = [:]
+    private var attachedFacesGenerations: [String: UInt64] = [:]
+    @Published private(set) var attachedFacesLoadingOwners: Set<String> = []
+    @Published private(set) var attachedFacesErrorsByOwner: [String: String] = [:]
     // ActiveFeaturesControl owns a SelectedSet per render-layer instance.
     // Keep BoundaryCondition lines from separate Result/source captures in
     // separate selections even though they share one native map canvas.
@@ -72,6 +79,62 @@ final class BoundaryMapSession: ObservableObject {
         return showsStrokeVerticesByOwner[BoundaryMapRenderOwnerIdentity.key(for: capture)] ?? false
     }
 
+    func showsAttachedFaces(for capture: BoundaryMapCapture) -> Bool {
+        guard captures.contains(where: { $0.identity == capture.identity }),
+              capture.resultOwner != nil else { return false }
+        return showsAttachedFacesByOwner[BoundaryMapRenderOwnerIdentity.key(for: capture)] ?? false
+    }
+
+    func attachedFacesFrame(for capture: BoundaryMapCapture) -> MapSourceRasterFrame? {
+        guard showsAttachedFaces(for: capture), capture.isChecked, capture.effectiveVisible else { return nil }
+        return entries.first(where: { $0.capture.identity == capture.identity })?.attachedFaces
+    }
+
+    func attachedFacesImage(for capture: BoundaryMapCapture) -> CGImage? {
+        guard showsAttachedFaces(for: capture), capture.isChecked, capture.effectiveVisible else { return nil }
+        return attachedFaceImagesByOwner[BoundaryMapRenderOwnerIdentity.key(for: capture)]
+    }
+
+    func setShowsAttachedFaces(_ enabled: Bool, for capture: BoundaryMapCapture) {
+        let ownerKey = BoundaryMapRenderOwnerIdentity.key(for: capture)
+        guard capture.resultOwner != nil,
+              captures.contains(where: { $0.identity == capture.identity }) else { return }
+        guard showsAttachedFacesByOwner[ownerKey] != enabled else { return }
+        showsAttachedFacesByOwner[ownerKey] = enabled
+        attachedFacesGenerations[ownerKey, default: 0] &+= 1
+        attachedFacesTasks.removeValue(forKey: ownerKey)?.cancel()
+        attachedFacesLoadingOwners.remove(ownerKey)
+        attachedFacesErrorsByOwner.removeValue(forKey: ownerKey)
+        if !enabled { replaceAttachedFaces(nil, capture: capture) }
+        renderRevision &+= 1
+        if enabled, capture.isChecked, capture.effectiveVisible, attachedFacesViewport != nil {
+            Task { await renderAttachedFaces(for: capture) }
+        }
+    }
+
+    func attachedFacesError(for capture: BoundaryMapCapture) -> String? {
+        attachedFacesErrorsByOwner[BoundaryMapRenderOwnerIdentity.key(for: capture)]
+    }
+
+    /// Re-renders only owners with the source option enabled. Canvas camera
+    /// updates carry the exact visible project extent and backing pixel size.
+    func updateAttachedFacesViewport(_ viewport: MapSourceRenderViewport?) async {
+        guard viewport != attachedFacesViewport else { return }
+        attachedFacesViewport = viewport
+        for capture in captures where showsAttachedFaces(for: capture)
+            && capture.isChecked && capture.effectiveVisible {
+            attachedFacesGenerations[BoundaryMapRenderOwnerIdentity.key(for: capture), default: 0] &+= 1
+            attachedFacesTasks.removeValue(forKey: BoundaryMapRenderOwnerIdentity.key(for: capture))?.cancel()
+            replaceAttachedFaces(nil, capture: capture)
+        }
+        renderRevision &+= 1
+        guard viewport != nil else { return }
+        for capture in captures where showsAttachedFaces(for: capture)
+            && capture.isChecked && capture.effectiveVisible {
+            await renderAttachedFaces(for: capture)
+        }
+    }
+
     func configure(captures newCaptures: [BoundaryMapCapture]) async {
         if captures.map(\.identity) == newCaptures.map(\.identity),
            entries.count == newCaptures.count, !entries.contains(where: { $0.status == .loading || $0.status == .failed }) {
@@ -85,11 +148,31 @@ final class BoundaryMapSession: ObservableObject {
         showsStrokeVerticesByOwner = showsStrokeVerticesByOwner.filter {
             currentOwnerKeys.contains($0.key)
         }
+        let retainedOwnerKeys = Set(newCaptures.filter { $0.resultOwner != nil }.map(BoundaryMapRenderOwnerIdentity.key))
+        showsAttachedFacesByOwner = showsAttachedFacesByOwner.filter { retainedOwnerKeys.contains($0.key) }
+        attachedFaceImagesByOwner = attachedFaceImagesByOwner.filter { retainedOwnerKeys.contains($0.key) }
+        for capture in newCaptures where !capture.isChecked || !capture.effectiveVisible {
+            attachedFaceImagesByOwner.removeValue(forKey: BoundaryMapRenderOwnerIdentity.key(for: capture))
+        }
+        for key in Array(attachedFacesTasks.keys) where !retainedOwnerKeys.contains(key) {
+            attachedFacesGenerations[key, default: 0] &+= 1
+            attachedFacesTasks.removeValue(forKey: key)?.cancel()
+            attachedFacesLoadingOwners.remove(key)
+            attachedFacesErrorsByOwner.removeValue(forKey: key)
+        }
         activeRequest?.cancel()
         activeRequest = nil
         activeRequestID = nil
         captures = newCaptures
         await loadCurrentCaptures(force: false)
+        // A Result owner or map-tree refresh can replace the boundary source
+        // receipt while leaving the visible camera unchanged. Rebuild each
+        // enabled source overlay from that refreshed owner instead of keeping
+        // a prior captured image until the user next pans the map.
+        for capture in captures where showsAttachedFaces(for: capture)
+            && capture.isChecked && capture.effectiveVisible {
+            await renderAttachedFaces(for: capture)
+        }
     }
 
     func refresh() async {
@@ -97,6 +180,10 @@ final class BoundaryMapSession: ObservableObject {
         activeRequest = nil
         activeRequestID = nil
         await loadCurrentCaptures(force: true)
+        for capture in captures where showsAttachedFaces(for: capture)
+            && capture.isChecked && capture.effectiveVisible {
+            await renderAttachedFaces(for: capture)
+        }
     }
 
     func cancel() {
@@ -104,6 +191,11 @@ final class BoundaryMapSession: ObservableObject {
         activeRequest?.cancel()
         activeRequest = nil
         activeRequestID = nil
+        for task in attachedFacesTasks.values { task.cancel() }
+        attachedFacesTasks.removeAll()
+        attachedFaceImagesByOwner.removeAll()
+        attachedFacesGenerations = attachedFacesGenerations.mapValues { $0 &+ 1 }
+        attachedFacesLoadingOwners.removeAll()
         isLoading = false
         let message = L10n.text("Boundary map loading was cancelled.")
         entries = entries.map { entry in
@@ -124,6 +216,14 @@ final class BoundaryMapSession: ObservableObject {
         captures = []
         visualStylesByCaptureIdentity = [:]
         showsStrokeVerticesByOwner = [:]
+        showsAttachedFacesByOwner = [:]
+        attachedFaceImagesByOwner = [:]
+        attachedFacesViewport = nil
+        for task in attachedFacesTasks.values { task.cancel() }
+        attachedFacesTasks.removeAll()
+        attachedFacesGenerations.removeAll()
+        attachedFacesLoadingOwners.removeAll()
+        attachedFacesErrorsByOwner.removeAll()
         entries = []
         lineSelectionsBySource = [:]
         activeLineSelectionSource = nil
@@ -293,7 +393,8 @@ final class BoundaryMapSession: ObservableObject {
                 let request = Task { @MainActor in
                     try await provider.load(capture,
                         boundarySourceState: boundarySourceState,
-                        contextToken: previousExact?.contextToken)
+                        contextToken: previousExact?.contextToken,
+                        attachedFacesViewport: nil)
                 }
                 activeRequest = request
                 let snapshot = try await request.value
@@ -330,6 +431,75 @@ final class BoundaryMapSession: ObservableObject {
                              sourceState: String?, message: String) -> BoundaryMapSourceState {
         BoundaryMapSourceState(capture: capture, contextToken: contextToken,
             boundarySourceState: sourceState, lines: [], status: .failed, diagnostic: message)
+    }
+
+    private func renderAttachedFaces(for capture: BoundaryMapCapture) async {
+        let ownerKey = BoundaryMapRenderOwnerIdentity.key(for: capture)
+        guard showsAttachedFaces(for: capture), capture.resultOwner != nil,
+              capture.isChecked, capture.effectiveVisible,
+              let viewport = attachedFacesViewport,
+              let index = entries.firstIndex(where: { $0.capture.identity == capture.identity }),
+              entries[index].status == .available,
+              let sourceState = entries[index].boundarySourceState,
+              !sourceState.isEmpty else { return }
+
+        attachedFacesGenerations[ownerKey, default: 0] &+= 1
+        let generation = attachedFacesGenerations[ownerKey, default: 0]
+        attachedFacesTasks.removeValue(forKey: ownerKey)?.cancel()
+        attachedFacesLoadingOwners.insert(ownerKey)
+        attachedFacesErrorsByOwner.removeValue(forKey: ownerKey)
+        renderRevision &+= 1
+        let contextToken = entries[index].contextToken
+        let task = Task { @MainActor in
+            try await provider.load(capture, boundarySourceState: sourceState,
+                contextToken: contextToken, attachedFacesViewport: viewport.extent,
+                renderScale: viewport.renderScale)
+        }
+        attachedFacesTasks[ownerKey] = task
+        do {
+            let snapshot = try await task.value
+            guard !task.isCancelled, attachedFacesGenerations[ownerKey] == generation,
+                  attachedFacesViewport == viewport,
+                  let currentIndex = entries.firstIndex(where: { $0.capture.identity == capture.identity }),
+                  captures.contains(where: { $0.identity == capture.identity }),
+                  showsAttachedFaces(for: capture) else { return }
+            let renderedState = try BackendBoundaryMapProvider.sourceState(from: snapshot,
+                capture: capture, attachedFacesViewport: viewport.extent)
+            guard renderedState.boundarySourceState == sourceState,
+                  renderedState.lines.map(\.id) == entries[currentIndex].lines.map(\.id) else {
+                throw BoundaryMapError.sourceChanged
+            }
+            replaceAttachedFaces(renderedState.attachedFaces, capture: capture)
+            attachedFacesErrorsByOwner.removeValue(forKey: ownerKey)
+        } catch is CancellationError {
+            // A camera or option change has already retired this generation.
+        } catch {
+            guard attachedFacesGenerations[ownerKey] == generation,
+                  captures.contains(where: { $0.identity == capture.identity }) else { return }
+            replaceAttachedFaces(nil, capture: capture)
+            attachedFacesErrorsByOwner[ownerKey] = L10n.text(error.localizedDescription)
+        }
+        if attachedFacesGenerations[ownerKey] == generation {
+            attachedFacesTasks.removeValue(forKey: ownerKey)
+            attachedFacesLoadingOwners.remove(ownerKey)
+            renderRevision &+= 1
+        }
+    }
+
+    private func replaceAttachedFaces(_ frame: MapSourceRasterFrame?, capture: BoundaryMapCapture) {
+        let ownerKey = BoundaryMapRenderOwnerIdentity.key(for: capture)
+        if let frame, let viewport = attachedFacesViewport,
+           let validated = try? frame.validated(for: viewport.extent), let image = validated.image {
+            attachedFaceImagesByOwner[ownerKey] = image
+        } else {
+            attachedFaceImagesByOwner.removeValue(forKey: ownerKey)
+        }
+        guard let index = entries.firstIndex(where: { $0.capture.identity == capture.identity }) else { return }
+        let old = entries[index]
+        entries[index] = BoundaryMapSourceState(capture: old.capture,
+            contextToken: old.contextToken, boundarySourceState: old.boundarySourceState,
+            lines: old.lines, status: old.status, diagnostic: old.diagnostic,
+            attachedFaces: frame)
     }
 
     private static func distance(_ point: CGPoint, toSegmentFrom start: CGPoint, to end: CGPoint) -> CGFloat {

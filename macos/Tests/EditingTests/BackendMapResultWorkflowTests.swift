@@ -99,16 +99,32 @@ struct BackendMapResultWorkflowTests {
         defer { try? FileManager.default.removeItem(at: workingRoot) }
 
         let layout = try FixtureLayout(root: workingRoot)
+        var visualizationXML = try String(contentsOf: layout.visualizationURL, encoding: .utf8)
+        guard let mapTypeRange = visualizationXML.range(of: "SelectedMapType=\"Depth\"") else {
+            throw MapResultWorkflowTestError.missingVelocityNode
+        }
+        visualizationXML.replaceSubrange(mapTypeRange, with: "SelectedMapType=\"Velocity\"")
+        try Data(visualizationXML.utf8).write(to: layout.visualizationURL, options: .atomic)
+        let workingBytes = try SourceByteSnapshot(root: workingRoot)
         let map = try Self.mapRequest(layout: layout)
         let mapID = try #require(UUID(uuidString: map.mapID))
         let client = BackendProcessClient(executableURL: URL(fileURLWithPath: backend))
         let chartProvider = BackendMapResultChartProvider(client: client)
         let sources = try await chartProvider.loadSources(map: map, selectionOverrides: [])
         try MapResultChartContractValidation.validate(sources, map: map, overrides: [])
-        let node = try #require(sources.activeNodes.first { $0.nodeKind == "Result" && $0.selections.contains { $0.selectedResult != nil } })
+        let node = try #require(sources.activeNodes.first {
+            $0.nodeKind == "Result" && $0.selectedMapType == "Velocity"
+                && $0.selections.contains { $0.selectedResult != nil }
+        })
+        let selected = try #require(node.selections.first(where: { $0.selectionIndex == 0 })?.selectedResult)
         let viewport = RasterMapViewExtent(minX: 0, minY: 0, maxX: 1, maxY: 1, pixelWidth: 32, pixelHeight: 32)
+        let options = MapResultRenderOptions(velocityDisplay: .vx,
+            mapDiagnostics: true, forceRecomputeMapPoints: true)
+        let slotOptions = MapResultRenderOptionOverride(selectionIndex: 0,
+            resultPath: selected.resultPath, revision: selected.revision, options: options)
         let prepared = try await BackendMapResultRenderProvider.prepare(client: client, map: map,
-            selectionOverrides: [], sources: sources, node: node, mapID: mapID, viewport: { viewport })
+            selectionOverrides: [], sources: sources, node: node, mapID: mapID,
+            viewport: { viewport }, renderOptions: [slotOptions])
         let firstLayer = try #require(prepared.initial.layers.first)
         #expect(prepared.initial.selectedProfileIndex == 0)
         #expect(prepared.presentation.steps.map(\.id) == [0, 1, 2])
@@ -119,6 +135,10 @@ struct BackendMapResultWorkflowTests {
         #expect(firstLayer.terrainRevision == prepared.initial.sources.first?.terrainRevision)
         #expect(!firstLayer.terrainPath.isEmpty && firstLayer.terrainRevision.count == 64)
         #expect(prepared.initial.sources.allSatisfy { $0.available && $0.terrainPath != nil && $0.terrainRevision?.count == 64 })
+        #expect(firstLayer.velocityDisplay == MapResultVelocityDisplay.vx.rawValue)
+        #expect(firstLayer.mapDiagnostics == true && firstLayer.forceRecomputeMapPoints == true)
+        #expect(!prepared.provider.currentDiagnosticAnnotations.isEmpty,
+            "The Swift provider accepts source face-point labels only when the exact Velocity slot reports diagnostics enabled.")
 
         let profileZeroUpdate = try await prepared.provider.selectProfile(0)
         #expect(profileZeroUpdate.rasters?.first?.rgba == firstLayer.rgba)
@@ -128,11 +148,15 @@ struct BackendMapResultWorkflowTests {
         #expect(profileTwoLayer.sourceMapID == mapID)
         #expect(profileTwoLayer.rgba.count == firstLayer.rgba.count)
         #expect(profileTwoLayer.rgba != firstLayer.rgba)
+        #expect(prepared.provider.currentDiagnosticAnnotations.allSatisfy {
+            $0.layerID == profileTwoLayer.id && $0.resultPath == selected.resultPath
+                && $0.revision.caseInsensitiveCompare(selected.revision) == .orderedSame
+        })
 
         let originalMismatches = try originalBytes.mismatches(root: fixture)
         #expect(originalMismatches.isEmpty,
             "Source byte mismatches: \(originalMismatches.joined(separator: "; "))")
-        let workingMismatches = try originalBytes.mismatches(root: workingRoot)
+        let workingMismatches = try workingBytes.mismatches(root: workingRoot)
         #expect(workingMismatches.isEmpty,
             "Working-copy byte mismatches: \(workingMismatches.joined(separator: "; "))")
     }

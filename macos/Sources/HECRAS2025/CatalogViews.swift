@@ -1,5 +1,6 @@
 import RASWorkspaceCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 // RasCatalog's left-panel header and section actions.
 struct CatalogPaneHeader: View {
@@ -9,6 +10,7 @@ struct CatalogPaneHeader: View {
     var body: some View {
         PaneHeading(title: "Project", symbol: "list.bullet.rectangle") {
             if includesCreateMenu { CatalogActionMenu(store: store) }
+            CatalogProjectHeaderActions(store: store)
             Button(action: store.revealProject) {
                 Image(systemName: "folder")
             }
@@ -20,6 +22,7 @@ struct CatalogPaneHeader: View {
 
 struct CatalogActionMenu: View {
     @ObservedObject var store: WorkspaceStore
+    @State private var isChoosingCoreLayer = false
 
     var body: some View {
         Menu {
@@ -40,6 +43,14 @@ struct CatalogActionMenu: View {
                     .disabled(!store.hasProject)
                 Button("Boundary Condition", systemImage: "waveform.path") { store.activeTool = .newBoundary }
                     .disabled(!store.hasProject)
+                Button("Import Core Layer…", systemImage: "square.and.arrow.down.on.square") {
+                    isChoosingCoreLayer = true
+                }
+                .disabled(!store.canImportCoreLayer)
+                Button("Core Layer References…", systemImage: "link") {
+                    store.presentCoreLayerReferenceManager()
+                }
+                .disabled(store.document?.url == nil)
             }
             Section("External Connections") {
                 Button("Add Connection…", systemImage: "link.badge.plus") {
@@ -58,6 +69,239 @@ struct CatalogActionMenu: View {
             Label("New", systemImage: "plus")
         }
         .help("New")
+        .fileImporter(isPresented: $isChoosingCoreLayer, allowedContentTypes: [.data]) { result in
+            switch result {
+            case .success(let sourceURL):
+                Task { await store.beginCoreLayerImport(sourceURL: sourceURL) }
+            case .failure(let error):
+                store.reportCoreLayerImportError(error)
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { store.coreLayerImportPresentation != nil && !store.isCoreLayerReferenceManagerPresented },
+            set: { if !$0 { store.cancelCoreLayerImportPresentation() } }
+        ), onDismiss: store.cancelCoreLayerImportPresentation) {
+            if let presentation = store.coreLayerImportPresentation {
+                CoreLayerImportDialog(presentation: presentation, store: store)
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { store.isCoreLayerReferenceManagerPresented },
+            set: { if !$0 { store.dismissCoreLayerReferenceManager() } }
+        )) {
+            CoreLayerReferenceManagerView(store: store)
+        }
+    }
+}
+
+private struct CoreLayerImportDialog: View {
+    let presentation: CoreLayerImportPresentation
+    @ObservedObject var store: WorkspaceStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var isWorking = false
+    @State private var errorMessage: String?
+
+    private var layerType: String {
+        presentation.inspection.kind == "geometry" ? "Geometry" : "Boundary Condition"
+    }
+
+    private var fileSize: String {
+        ByteCountFormatter.string(fromByteCount: presentation.inspection.fileSize, countStyle: .file)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Import Core Layer", systemImage: "square.and.arrow.down.on.square")
+                .font(.title2.weight(.semibold))
+            LabeledContent("Type", value: L10n.text(layerType))
+            LabeledContent("Name", value: presentation.inspection.name)
+            LabeledContent("File Size", value: fileSize)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Description").font(.caption).foregroundStyle(.secondary)
+                Text(presentation.inspection.description.isEmpty
+                    ? L10n.text("No description") : presentation.inspection.description)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Source File").font(.caption).foregroundStyle(.secondary)
+                Text(presentation.sourceURL.path)
+                    .font(.callout.monospaced())
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let errorMessage {
+                Label(errorMessage, systemImage: "xmark.octagon.fill")
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+            Divider()
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(isWorking)
+                Spacer()
+                if isWorking { ProgressView().controlSize(.small) }
+                Button("Copy File", systemImage: "doc.on.doc") {
+                    perform("copyFile")
+                }
+                .disabled(isWorking)
+                Button("Add Reference", systemImage: "link") {
+                    perform("addReference")
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(isWorking)
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(22)
+        .frame(minWidth: 520, idealWidth: 560)
+    }
+
+    private func perform(_ action: String) {
+        guard !isWorking else { return }
+        isWorking = true
+        errorMessage = nil
+        Task { @MainActor in
+            defer { isWorking = false }
+            do {
+                try await store.performCoreLayerImport(presentation, action: action)
+                dismiss()
+            } catch {
+                errorMessage = L10n.text(error.localizedDescription)
+            }
+        }
+    }
+}
+
+struct CoreLayerReferenceManagerView: View {
+    @ObservedObject var store: WorkspaceStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var isChoosingCoreLayer = false
+    @State private var isWorking = false
+    @State private var issue: String?
+    @State private var referenceToRemove: CoreLayerReferenceCapture?
+    @State private var confirmsRemoval = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Core Layer References", systemImage: "link")
+                .font(.title2.weight(.semibold))
+            Text("These Geometry and Boundary Condition files are attached to this open project session only. Removing a reference does not delete its file or change the saved project.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let issue {
+                Label(issue, systemImage: "xmark.octagon.fill")
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+
+            if store.sessionCoreLayerReferences.isEmpty {
+                ContentUnavailableView("No Core Layer References", systemImage: "link", description: Text("Add a Geometry or Boundary Condition file to the active map to create a session-only reference."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(store.sessionCoreLayerReferences, id: \.referenceID) { reference in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Label(reference.name,
+                                    systemImage: reference.kind == "geometry" ? "cube" : "waveform.path")
+                                    .font(.headline)
+                                Spacer()
+                                Text(L10n.text(reference.kind == "geometry" ? "Geometry" : "Boundary Condition"))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(reference.sourcePath)
+                                .font(.callout.monospaced())
+                                .textSelection(.enabled)
+                                .lineLimit(2)
+                            Text("Captured SHA-256: \(reference.sourceRevision)")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            HStack {
+                                Button("Reload Source", systemImage: "arrow.clockwise") {
+                                    reload(reference)
+                                }
+                                .disabled(isWorking || store.isManagingCoreLayerReferences)
+                                Spacer()
+                                Button("Remove Reference", systemImage: "minus.circle") {
+                                    referenceToRemove = reference
+                                    confirmsRemoval = true
+                                }
+                                .disabled(isWorking || store.isManagingCoreLayerReferences)
+                                .tint(.red)
+                            }
+                        }
+                        .padding(.vertical, 5)
+                    }
+                }
+                .listStyle(.inset)
+                .frame(minHeight: 210)
+            }
+
+            Divider()
+            HStack {
+                Button("Import Core Layer…", systemImage: "square.and.arrow.down.on.square") {
+                    isChoosingCoreLayer = true
+                }
+                .disabled(!store.canImportCoreLayer || isWorking || store.isManagingCoreLayerReferences)
+                Spacer()
+                if isWorking || store.isManagingCoreLayerReferences { ProgressView().controlSize(.small) }
+                Button("Done") {
+                    store.dismissCoreLayerReferenceManager()
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+                .disabled(isWorking || store.isManagingCoreLayerReferences)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 650, idealWidth: 740, minHeight: 420, idealHeight: 520)
+        .fileImporter(isPresented: $isChoosingCoreLayer, allowedContentTypes: [.data]) { result in
+            switch result {
+            case .success(let sourceURL): Task { await store.beginCoreLayerImport(sourceURL: sourceURL) }
+            case .failure(let error): store.reportCoreLayerImportError(error)
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { store.coreLayerImportPresentation != nil },
+            set: { if !$0 { store.cancelCoreLayerImportPresentation() } }
+        ), onDismiss: store.cancelCoreLayerImportPresentation) {
+            if let presentation = store.coreLayerImportPresentation {
+                CoreLayerImportDialog(presentation: presentation, store: store)
+            }
+        }
+        .alert("Remove Core Layer Reference?", isPresented: $confirmsRemoval) {
+            Button("Remove Reference", role: .destructive) { removeSelectedReference() }
+            Button("Cancel", role: .cancel) { referenceToRemove = nil }
+        } message: {
+            Text("This removes only the exact reference from the current project session. The source file and saved project remain unchanged. Any unsaved editor draft is kept and marked as conflicting.")
+        }
+    }
+
+    private func reload(_ reference: CoreLayerReferenceCapture) {
+        guard !isWorking else { return }
+        isWorking = true
+        issue = nil
+        Task { @MainActor in
+            defer { isWorking = false }
+            do { try await store.reloadCoreLayerReference(reference) }
+            catch { issue = L10n.text(error.localizedDescription) }
+        }
+    }
+
+    private func removeSelectedReference() {
+        guard !isWorking, let reference = referenceToRemove else { return }
+        isWorking = true
+        issue = nil
+        do { try store.removeCoreLayerReference(reference) }
+        catch { issue = L10n.text(error.localizedDescription) }
+        isWorking = false
+        referenceToRemove = nil
     }
 }
 
@@ -299,6 +543,9 @@ private struct LayerCatalogTreeRow: View {
                 Text(title).lineLimit(1)
             }
             CatalogLayerDiagnosticsRow(node: node, store: store)
+            if node.sourceClass == "ResultRootContext", node.name == "Results" {
+                CatalogResultHeaderRemovalAction(root: node, store: store)
+            }
             if ResultComputePresentationPath.applies(to: node.sourceClass) {
                 ResultComputeStatusIndicator(node: node, store: store)
             }

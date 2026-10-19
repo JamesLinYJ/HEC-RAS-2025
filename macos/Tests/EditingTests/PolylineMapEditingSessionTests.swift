@@ -104,6 +104,48 @@ struct PolylineMapEditingSessionTests {
     }
 
     @Test @MainActor
+    func selectedMapFeaturesDeleteAsOneUndoableSaveDraftAndKeepUnselectedGeometry() async throws {
+        let original = Data(#"{"type":"FeatureCollection","foreign":{"keep":true},"features":[{"type":"Feature","id":"banks","properties":{"name":"Banks"},"geometry":{"type":"MultiLineString","coordinates":[[[0,0,1,10],[1,1,2,20]],[[2,2,3,30],[3,3,4,40]]]}},{"type":"Feature","id":"levee","properties":{"name":"Levee"},"geometry":{"type":"LineString","coordinates":[[4,4],[5,5]]}},{"type":"Feature","id":"marker","properties":{"name":"Keep"},"geometry":{"type":"Point","coordinates":[8,9]}}]}"#.utf8)
+        let url = URL(fileURLWithPath: "/tmp/polyline-map-feature-delete.geojson")
+        let provider = MemoryPolylineMapEditingProvider(bytes: original, url: url)
+        let session = PolylineMapEditingSession(provider: provider)
+        let scope = PolylineMapEditingScope(projectSessionID: UUID(), mapID: UUID(),
+            layerID: url.path, canonicalPath: url.path)
+        #expect(await session.ensureLoaded(scope: scope))
+
+        let layer = try #require(session.currentMapLayer)
+        let selected = layer.features.filter { $0.kind == .line }
+        let featureIDs = Set(selected.map(\.stableIdentity))
+        #expect(featureIDs.count == 2)
+        #expect(session.selectMapFeatures(featureIDs, in: layer))
+        #expect(session.selectedLineIDs.count == 3)
+        #expect(session.canDeleteMapFeatures(featureIDs, in: layer))
+
+        #expect(await session.deleteMapFeatures(featureIDs, in: layer))
+        #expect(session.lines.isEmpty)
+        #expect(session.hasUnsavedChanges)
+        #expect(provider.bytes == original)
+        #expect(session.currentMapLayer?.features.map(\.stableIdentity).count == 1)
+        #expect(session.currentMapLayer?.features.first?.kind == .point)
+
+        #expect(await session.undo())
+        #expect(session.lines.count == 3)
+        #expect(session.currentMapLayer?.features.filter { $0.kind == .line }.map(\.stableIdentity).sorted()
+            == featureIDs.sorted())
+        let restoredLayer = try #require(session.currentMapLayer)
+        #expect(session.selectMapFeatures(featureIDs, in: restoredLayer))
+        #expect(await session.deleteMapFeatures(featureIDs, in: restoredLayer))
+        #expect(await session.save())
+        #expect(!session.hasUnsavedChanges)
+
+        let saved = try #require(JSONSerialization.jsonObject(with: provider.bytes) as? [String: Any])
+        #expect((saved["foreign"] as? [String: Bool])?["keep"] == true)
+        let savedFeatures = try #require(saved["features"] as? [[String: Any]])
+        #expect(savedFeatures.compactMap { $0["id"] as? String } == ["marker"])
+        #expect((savedFeatures.first?["geometry"] as? [String: Any])?["type"] as? String == "Point")
+    }
+
+    @Test @MainActor
     func clipboardPasteRejectsProjectionMismatchAndMOnlyWithoutDraftMutation() async throws {
         let original = Data(#"{"type":"FeatureCollection","features":[]}"#.utf8)
         let url = URL(fileURLWithPath: "/tmp/polyline-clipboard-reject.geojson")

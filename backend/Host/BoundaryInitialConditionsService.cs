@@ -224,9 +224,11 @@ public static partial class ModelEditorAdapter
             !string.Equals(Revision(outcome.ModelPath), modelRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
 
+        CoreLayerRequestContext? committedCoreLayerContext = CoreLayerImportService.RebaseContext(
+            request.Model.CoreLayerContext, projectRevision, outcome.ModelPath, modelRevision);
         ModelSnapshot snapshot = snapshotOverride ?? await LoadAsync(new ModelRequest(
             outcome.ModelPath, "Boundary Conditions", outcome.ProjectPath,
-            outcome.ProjectXml, SourceState: null));
+            outcome.ProjectXml, SourceState: null, CoreLayerContext: committedCoreLayerContext));
         if (!string.Equals(snapshot.Revision, modelRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
 
@@ -287,8 +289,9 @@ public static partial class ModelEditorAdapter
 
         // Check actual saved membership before ModelContext's staging behavior can
         // temporarily add a copied layer to the in-memory project.
-        VerifySavedBoundaryMembership(projectPath, assetPath);
-        var sourceRequest = new ModelRequest(assetPath, model.Kind, projectPath, capturedProjectXml, model.SourceState);
+        VerifySavedBoundaryMembership(projectPath, assetPath, model.CoreLayerContext);
+        var sourceRequest = new ModelRequest(assetPath, model.Kind, projectPath, capturedProjectXml,
+            model.SourceState, model.CoreLayerContext);
         using (var context = new ModelContext(sourceRequest))
         {
             if (context.Layer is not BoundaryCondition boundary || boundary.IsResult ||
@@ -310,9 +313,10 @@ public static partial class ModelEditorAdapter
             timestamp ?? "", culture.Name, culture);
     }
 
-    private static void VerifySavedBoundaryMembership(string projectPath, string assetPath)
+    private static void VerifySavedBoundaryMembership(string projectPath, string assetPath,
+        CoreLayerRequestContext? coreLayerContext)
     {
-        Project project = new(projectPath);
+        Project project = CoreLayerImportService.OpenProject(projectPath, null, coreLayerContext);
         try
         {
             BoundaryCondition[] matches = project.BoundaryConditions

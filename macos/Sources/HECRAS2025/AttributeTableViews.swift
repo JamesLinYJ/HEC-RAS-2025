@@ -1,4 +1,5 @@
 import AppKit
+import RASWorkspaceCore
 import SwiftUI
 
 struct AttributeTableSort: SortComparator {
@@ -33,6 +34,14 @@ struct AttributeTableWindow: View {
         _session = StateObject(wrappedValue: AttributeTableSession(provider: store.attributeTableProvider))
     }
     private var columns: [AttributeColumn] { session.data?.columns.filter { columnsShown.contains($0.id) } ?? [] }
+    private var routeFocusRowID: String? {
+        guard let route, let data = session.data, let focusRowID = route.focusRowID,
+              !route.path.isEmpty,
+              SourceFilePaths.canonical(URL(fileURLWithPath: route.path))
+                == SourceFilePaths.canonical(URL(fileURLWithPath: data.sourcePath)),
+              data.rows.contains(where: { $0.id == focusRowID }) else { return nil }
+        return focusRowID
+    }
     private var rows: [AttributeRow] {
         let filtered = (session.data?.rows ?? []).filter { row in
             if expressionMode { return expressionFilter.matchingRowIDs?.contains(row.id) ?? true }
@@ -86,6 +95,7 @@ struct AttributeTableWindow: View {
                         selectionColumnIDs: data.columns.map(\.id),
                         selection: $cellSelection,
                         rowSelection: $selection,
+                        focusRowID: routeFocusRowID,
                         initialWidth: { _ in 160 },
                         isReadOnly: \.readOnly,
                         value: { row, column in session.text(row: row, column: column) },
@@ -186,6 +196,9 @@ struct AttributeTableWindow: View {
                 columnsShown.formIntersection(newIDs); columnsShown.formUnion(newIDs.subtracting(oldIDs))
                 sort = sort.filter { newIDs.contains($0.columnID) }
             }
+            .onAppear { selectRouteFocusRowIfPresent() }
+            .onChange(of: session.data?.rows.map(\.id)) { _, _ in selectRouteFocusRowIfPresent() }
+            .onChange(of: route?.focusRowID) { _, _ in selectRouteFocusRowIfPresent() }
             .sheet(item: $columnEdit) { edit in AttributeColumnSheet(session: session, column: edit.column) }
     }
     private func open() {
@@ -198,6 +211,15 @@ struct AttributeTableWindow: View {
     private func copy(_ rows: [AttributeRow]) { if let data = session.data { store.system.copy(data.text(rows: rows, delimiter: "\t")) } }
     private func setSort(_ column: AttributeColumn, ascending: Bool) {
         sort = [.init(order: ascending ? .forward : .reverse, columnID: column.id, numeric: column.numeric)]
+    }
+    private func selectRouteFocusRowIfPresent() {
+        guard let focusRowID = routeFocusRowID else { return }
+        filter = ""
+        expressionMode = false
+        expressionFilter.clear()
+        sort = []
+        selection = [focusRowID]
+        cellSelection = .init()
     }
 }
 private struct AttributeColumnEdit: Identifiable { var id = UUID(); let column: AttributeColumn? }

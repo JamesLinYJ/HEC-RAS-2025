@@ -2,8 +2,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
+using Geospatial.GDALAssist;
 using Ras.Backend;
 using Ras.Layers;
+using OSGeo.GDAL;
 using Utility.Files;
 using Utility.Units;
 
@@ -92,8 +94,11 @@ internal static class MapLayerActionChecks
         var automaticProjectResults = MapTreeService.Load(projectMap);
         Check(Flatten(automaticProjectResults.Roots).Any(node => node.SourceClass == "MultiResultNodeVM" && node.Name == "Plan A"),
             "Project map Result groups come from the source Project tree and are not duplicated by a manual add action.");
+        byte[] beforeProjectResultAdd = File.ReadAllBytes(visualizationPath);
         Expect<NotSupportedException>(() => MapTreeService.Perform(new MapTreeActionRequest(
             projectMap, "addResult", SourcePath: resultPath, SourceRevision: resultRevision)));
+        Check(File.ReadAllBytes(visualizationPath).SequenceEqual(beforeProjectResultAdd),
+            "Project Result groups are source-generated and reject manual add without writing the .vis file.");
 
         string unlinkedDirectory = Path.Combine(temporary.FullName, "Unlinked");
         Directory.CreateDirectory(unlinkedDirectory);
@@ -196,6 +201,103 @@ internal static class MapLayerActionChecks
                 node.SourceClass == "PolylineMapLayerVisualContext" && PathEquals(node.AssetID!, vectorPath)),
             "Removing a Buildable vector removes only that map's precise .vis node while the Project map keeps its node.");
 
+        string rasterDirectory = Path.Combine(Path.GetDirectoryName(projectPath)!, "Raster Data");
+        Directory.CreateDirectory(rasterDirectory);
+        string projectRevision = Hash(File.ReadAllBytes(projectPath));
+        void VerifyRasterMapLayer(string filename, DataType dataType, int bands, string mapType)
+        {
+            string rasterPath = Path.Combine(rasterDirectory, filename);
+            CreateRaster(rasterPath, dataType, bands);
+            byte[] originalRaster = File.ReadAllBytes(rasterPath);
+            MapRasterLayerInspectResult inspected = MapRasterLayerService.Inspect(new(rasterPath));
+            Check(inspected.MapLayerType == mapType,
+                $"The {mapType} removal path starts with a GDAL-confirmed source map type.");
+            var owner = new MapDocumentRequest(buildableMap.ProjectPath, buildableMap.ProjectXml,
+                buildableMap.ProjectXmlSHA, buildableMap.ExpectedVisualizationRevision, buildableMap.MapType,
+                MapIndex: buildableMap.MapIndex, MapName: buildableMap.MapName, MapType: buildableMap.MapType);
+            MapDocumentMutationReceipt imported = MapTreeService.ImportRasterLayer(new(owner, rasterPath,
+                inspected.SourceRevision, mapType, projectRevision, inspected.SourceCanonicalPath));
+            buildableMap = buildableMap with { ExpectedVisualizationRevision = imported.VisualizationRevision };
+            projectMap = projectMap with { ExpectedVisualizationRevision = imported.VisualizationRevision };
+
+            CatalogTreeNode rasterNode = Flatten(MapTreeService.Load(buildableMap).Roots).Single(node =>
+                node.Locator is { NodeType: "MapLayer", MapType: var currentType } && currentType == mapType &&
+                node.AssetID is { } assetID && PathEquals(assetID, rasterPath));
+            MapTreeMutationResult hiddenRaster = MapTreeService.Perform(new MapTreeActionRequest(
+                buildableMap, "visibility", Node: rasterNode.Locator, Checked: false));
+            int[] nodePath = rasterNode.Locator?.NodePath
+                ?? throw new InvalidOperationException("The raster source node has no persisted tree path.");
+            string expectedHiddenID = $"vis-map-{buildableMap.MapIndex}-node-{string.Join('.', nodePath)}";
+            Check(hiddenRaster.HiddenLayerIDs.Contains(expectedHiddenID, StringComparer.Ordinal),
+                $"Hidden {mapType} visibility is returned using its exact .vis map-node identity.");
+            buildableMap = buildableMap with { ExpectedVisualizationRevision = hiddenRaster.VisualizationRevision };
+            projectMap = projectMap with { ExpectedVisualizationRevision = hiddenRaster.VisualizationRevision };
+
+            rasterNode = Flatten(MapTreeService.Load(buildableMap).Roots).Single(node =>
+                node.Locator is { NodeType: "MapLayer", MapType: var currentType } && currentType == mapType &&
+                node.AssetID is { } assetID && PathEquals(assetID, rasterPath));
+            byte[] beforeStaleRasterRemoval = File.ReadAllBytes(visualizationPath);
+            Expect<SourceFileChangedException>(() => MapTreeService.Perform(new MapTreeActionRequest(
+                buildableMap, "removeSourceNode", Node: rasterNode.Locator,
+                SourcePath: rasterPath, SourceRevision: new string('0', 64))));
+            Check(File.ReadAllBytes(visualizationPath).SequenceEqual(beforeStaleRasterRemoval),
+                $"A stale {mapType} source revision rejects removal without changing the .vis file.");
+
+            MapTreeMutationResult rasterRemoved = MapTreeService.Perform(new MapTreeActionRequest(
+                buildableMap, "removeSourceNode", Node: rasterNode.Locator,
+                SourcePath: rasterPath, SourceRevision: inspected.SourceRevision));
+            buildableMap = buildableMap with { ExpectedVisualizationRevision = rasterRemoved.VisualizationRevision };
+            projectMap = projectMap with { ExpectedVisualizationRevision = rasterRemoved.VisualizationRevision };
+            Check(!Flatten(MapTreeService.Load(buildableMap).Roots).Any(node =>
+                    node.Locator is { NodeType: "MapLayer", MapType: var currentType } && currentType == mapType &&
+                    node.AssetID is { } assetID && PathEquals(assetID, rasterPath)) &&
+                File.ReadAllBytes(rasterPath).SequenceEqual(originalRaster),
+                $"Removing {mapType} persists to .vis while retaining the original raster source file.");
+        }
+
+        VerifyRasterMapLayer("continuous.tif", DataType.GDT_Float32, 1, "SingleBandRasterMapLayer");
+        VerifyRasterMapLayer("rgb.tif", DataType.GDT_Byte, 3, "ImageRasterMapLayer");
+        VerifyRasterMapLayer("classes.tif", DataType.GDT_Int32, 1, "DiscreteRasterMapLayer");
+
+        string vrtDependency = Path.Combine(rasterDirectory, "vrt-dependency.tif");
+        CreateRaster(vrtDependency, DataType.GDT_Float32, 1);
+        string vrtPath = Path.Combine(rasterDirectory, "dependent.vrt");
+        GDALRaster.BuildVRT([vrtDependency], vrtPath);
+        MapRasterLayerInspectResult vrtInspection = MapRasterLayerService.Inspect(new(vrtPath));
+        var vrtOwner = new MapDocumentRequest(buildableMap.ProjectPath, buildableMap.ProjectXml,
+            buildableMap.ProjectXmlSHA, buildableMap.ExpectedVisualizationRevision, buildableMap.MapType,
+            MapIndex: buildableMap.MapIndex, MapName: buildableMap.MapName, MapType: buildableMap.MapType);
+        MapDocumentMutationReceipt vrtImported = MapTreeService.ImportRasterLayer(new(vrtOwner, vrtPath,
+            vrtInspection.SourceRevision, vrtInspection.MapLayerType, projectRevision,
+            vrtInspection.SourceCanonicalPath));
+        buildableMap = buildableMap with { ExpectedVisualizationRevision = vrtImported.VisualizationRevision };
+        projectMap = projectMap with { ExpectedVisualizationRevision = vrtImported.VisualizationRevision };
+        CatalogTreeNode vrtNode = Flatten(MapTreeService.Load(buildableMap).Roots).Single(node =>
+            node.Locator is { NodeType: "MapLayer", MapType: var currentType } &&
+            currentType == vrtInspection.MapLayerType && node.AssetID is { } assetID && PathEquals(assetID, vrtPath));
+        using (var update = Gdal.Open(vrtDependency, Access.GA_Update))
+        using (var band = update.GetRasterBand(1)) band.Fill(91, 0);
+        byte[] beforeStaleVrtRemoval = File.ReadAllBytes(visualizationPath);
+        Expect<SourceFileChangedException>(() => MapTreeService.Perform(new MapTreeActionRequest(
+            buildableMap, "removeSourceNode", Node: vrtNode.Locator,
+            SourcePath: vrtPath, SourceRevision: vrtInspection.SourceRevision)));
+        Check(File.ReadAllBytes(visualizationPath).SequenceEqual(beforeStaleVrtRemoval),
+            "A changed VRT dependency rejects removal using the original manifest without changing .vis.");
+        MapRasterLayerInspectResult currentVrt = MapRasterLayerService.Inspect(new(vrtPath));
+        byte[] currentVrtBytes = File.ReadAllBytes(vrtPath);
+        byte[] currentDependencyBytes = File.ReadAllBytes(vrtDependency);
+        MapTreeMutationResult vrtRemoved = MapTreeService.Perform(new MapTreeActionRequest(
+            buildableMap, "removeSourceNode", Node: vrtNode.Locator,
+            SourcePath: vrtPath, SourceRevision: currentVrt.SourceRevision));
+        buildableMap = buildableMap with { ExpectedVisualizationRevision = vrtRemoved.VisualizationRevision };
+        projectMap = projectMap with { ExpectedVisualizationRevision = vrtRemoved.VisualizationRevision };
+        Check(!Flatten(MapTreeService.Load(buildableMap).Roots).Any(node =>
+                node.Locator is { NodeType: "MapLayer", MapType: var currentType } &&
+                currentType == currentVrt.MapLayerType && node.AssetID is { } assetID && PathEquals(assetID, vrtPath)) &&
+            File.ReadAllBytes(vrtPath).SequenceEqual(currentVrtBytes) &&
+            File.ReadAllBytes(vrtDependency).SequenceEqual(currentDependencyBytes),
+            "Removing a VRT with its current dependency manifest persists to .vis and preserves the VRT and dependency files.");
+
         string savedVisualization = File.ReadAllText(visualizationPath);
         Check(savedVisualization.Contains("PreserveRoot", StringComparison.Ordinal)
             && savedVisualization.Contains("PreserveMap", StringComparison.Ordinal),
@@ -281,6 +383,18 @@ internal static class MapLayerActionChecks
             .SetAttributeValue("PreserveMap", "yes");
         visualization.Root.Add(new XElement("UnknownSection", new XAttribute("Keep", "yes")));
         visualization.Save(path, SaveOptions.DisableFormatting);
+    }
+
+    private static void CreateRaster(string path, DataType dataType, int bands)
+    {
+        using var driver = Gdal.GetDriverByName("GTiff");
+        using var raster = driver.Create(path, 8, 8, bands, dataType, []);
+        raster.SetGeoTransform([0, 1, 0, 8, 0, -1]);
+        for (int index = 1; index <= bands; index++)
+        {
+            using var band = raster.GetRasterBand(index);
+            band.Fill(dataType == DataType.GDT_Byte ? 128 : 7, 0);
+        }
     }
 
     private static void ExportAcceptanceFixture(string sourceRoot, string projectPath, string resultPath,

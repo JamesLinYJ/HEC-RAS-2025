@@ -51,7 +51,8 @@ public static class LinkedResultMapService
         // directory base; canonical paths are used only for identities.
         LinkedResultProfilesSnapshot linked = LinkedResultProfilesService.Read(
             new LinkedResultProfilesRequest(request.ProjectPath, request.ProjectXml,
-                request.ProjectRevision, request.Anchor, request.SelectedGroups, request.ProfileIndex));
+                request.ProjectRevision, request.Anchor, request.SelectedGroups, request.ProfileIndex,
+                request.CoreLayerContext));
         string normalizedProjectPath = Path.GetFullPath(request.ProjectPath);
         if (!PathComparer.Equals(SourceFilePaths.Canonical(linked.ProjectPath),
                 SourceFilePaths.Canonical(normalizedProjectPath)) ||
@@ -65,10 +66,10 @@ public static class LinkedResultMapService
         if (!string.Equals(projectRevision, request.ProjectRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
 
-        Project project = new(normalizedProjectPath);
+        Project project = CoreLayerImportService.OpenProjectWithMetadata(normalizedProjectPath,
+            ParseProjectXml(request.ProjectXml), request.CoreLayerContext);
         try
         {
-            project.ApplyEditorMetadata(ParseProjectXml(request.ProjectXml));
             var projectResults = project.Results.ToArray();
             var resultsByPath = new Dictionary<string, Result>(PathComparer);
             foreach (LinkedResultProfileFrame frame in linked.Frames)

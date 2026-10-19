@@ -129,11 +129,12 @@ public static class MapResultChartService
         // data bind only to files the Project was allowed to load.
         ResultSourceReadContext resultSourceReads = ResultSourceReadContext.Capture(projectPath,
             readLease?.ProtectedSourcePaths);
-        Project project = new(projectPath, sourcePath => readLease?.IsProtected(sourcePath) != true);
+        Project project = CoreLayerImportService.OpenProjectWithMetadata(projectPath,
+            ParseProjectXml(map.ProjectXml!), map.CoreLayerContext,
+            sourcePath => readLease?.IsProtected(sourcePath) != true);
         bool keepProject = false;
         try
         {
-            project.ApplyEditorMetadata(ParseProjectXml(map.ProjectXml!));
             MapTreeSnapshot tree = MapTreeService.Load(sourceMap);
             if (!string.Equals(tree.VisualizationRevision, visualizationRevision, StringComparison.OrdinalIgnoreCase))
                 throw new SourceFileChangedException();
@@ -846,6 +847,7 @@ public static class MapResultChartService
             projectRevision,
             projectXmlSHA,
             visualizationRevision,
+            coreLayerContext = map.CoreLayerContext?.IdentityToken,
             map.MapID,
             map.MapIndex,
             map.MapName,

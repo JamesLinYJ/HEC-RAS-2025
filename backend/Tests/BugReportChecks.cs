@@ -9,6 +9,45 @@ internal static class BugReportChecks
 {
     internal static void Run()
     {
+        string applicationLog = string.Concat(Enumerable.Repeat("backend log tail\n", 3_000));
+        string composedLog = BugReportService.ComposeErrorLog(applicationLog, "typed crash context");
+        string[] logSections = composedLog.Split('\n', 2);
+        XElement moduleInventory = XElement.Parse(logSections[0]);
+        Check(moduleInventory.Name == "Modules" &&
+              (string?)moduleInventory.Attribute("Scope") == "backend-process" &&
+              (string?)moduleInventory.Attribute("Architecture") ==
+                  System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(),
+            "The report log starts with a typed inventory for the current backend process and architecture");
+        Check(composedLog.Contains("Crash context: typed crash context", StringComparison.Ordinal) &&
+              composedLog.EndsWith("backend log tail\n", StringComparison.Ordinal) &&
+              Encoding.UTF8.GetByteCount(composedLog) <= BugReportService.MaximumLogBytes,
+            "The module inventory, crash context and UTF-8-safe application log tail share the existing report limit");
+        Check(moduleInventory.Elements("Module").All(module =>
+            {
+                string name = (string?)module.Attribute("Name") ?? string.Empty;
+                string? sha256 = (string?)module.Attribute("SHA256");
+                return !name.Contains('/') && !name.Contains('\\') &&
+                    (sha256 is null || (sha256.Length == 64 && sha256.All(Uri.IsHexDigit)));
+            }),
+            "Module entries contain basenames and full-content SHA-256 values, never absolute paths");
+
+        var backendAssembly = typeof(BugReportService).Assembly;
+        using (var backendAssemblyStream = new FileStream(backendAssembly.Location, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            string expectedAssemblyHash = Convert.ToHexString(SHA256.HashData(backendAssemblyStream));
+            Check(moduleInventory.Elements("Module").Any(module =>
+                    (string?)module.Attribute("Name") == Path.GetFileName(backendAssembly.Location) &&
+                    (string?)module.Attribute("Kind") == "managed" &&
+                    (string?)module.Attribute("SHA256") == expectedAssemblyHash),
+                "The loaded backend assembly is listed with its exact on-disk content SHA-256");
+            string? backendAssemblyDirectory = Path.GetDirectoryName(backendAssembly.Location);
+            Check(!composedLog.Contains(backendAssembly.Location, StringComparison.Ordinal) &&
+                  (string.IsNullOrEmpty(backendAssemblyDirectory) ||
+                   !moduleInventory.ToString(SaveOptions.DisableFormatting).Contains(backendAssemblyDirectory,
+                       StringComparison.Ordinal)),
+                "The uploaded module inventory does not include the backend assembly path");
+        }
+
         using var temporary = new TemporaryDirectory();
         string projectPath = Path.Combine(temporary.FullName, "Bug Report Project.ras");
         string geometryPath;

@@ -117,7 +117,7 @@ struct UnitNumberField: View {
     private var isStale: Bool { draft?.isStale == true }
     private var canEdit: Bool {
         isEnabled && session.loaded && session.canEdit && !session.isBusy && !session.loadingSelection
-            && !session.workspaceWriteLocked() && !isReadOnly
+            && !session.isWriteLocked && !isReadOnly
     }
     private var isReadOnly: Bool {
         switch owner {
@@ -140,7 +140,7 @@ struct UnitNumberField: View {
                         isFocused = false
                     }
                     .buttonStyle(.link)
-                    .disabled(session.workspaceWriteLocked())
+                    .disabled(session.isWriteLocked)
                 }
                 Text(L10n.text(OriginalUnitNumberInputIssue.staleNumber))
                     .font(.caption).foregroundStyle(.red)

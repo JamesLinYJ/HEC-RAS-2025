@@ -1,5 +1,20 @@
 import Foundation
 
+/// Re-playable owner reference for the exact source Tin stream record.
+public struct BackendStreamModeTinAsset: Decodable, Equatable, Hashable, Sendable {
+    public let sessionID: UUID
+    public let sequence: Int64
+    public let assetID: UUID
+    public let sha256: String
+
+    public init(sessionID: UUID, sequence: Int64, assetID: UUID, sha256: String) {
+        self.sessionID = sessionID
+        self.sequence = sequence
+        self.assetID = assetID
+        self.sha256 = sha256
+    }
+}
+
 /// Coordinates copied from one retained Geospatial.Core streamable object.
 public struct BackendStreamModeCoordinate: Decodable, Equatable, Hashable, Sendable {
     public let x: Double
@@ -28,13 +43,15 @@ public struct BackendStreamModeFrame: Decodable, Equatable, Sendable {
     public let hasM: Bool
     public let zFillValue: Double?
     public let mFillValue: Double?
+    public let tinAsset: BackendStreamModeTinAsset?
 
     public var id: Int64 { sequence }
 
     public init(sequence: Int64, objectType: String, coordinateCount: Int,
                 coordinates: [BackendStreamModeCoordinate], paths: [[Int]],
                 triangles: [[Int]], isClosed: Bool, hasZ: Bool = false, hasM: Bool = false,
-                zFillValue: Double? = nil, mFillValue: Double? = nil) {
+                zFillValue: Double? = nil, mFillValue: Double? = nil,
+                tinAsset: BackendStreamModeTinAsset? = nil) {
         self.sequence = sequence
         self.objectType = objectType
         self.coordinateCount = coordinateCount
@@ -46,5 +63,6 @@ public struct BackendStreamModeFrame: Decodable, Equatable, Sendable {
         self.hasM = hasM
         self.zFillValue = zFillValue
         self.mFillValue = mFillValue
+        self.tinAsset = tinAsset
     }
 }

@@ -8,7 +8,8 @@ using Ras.Layers;
 namespace Ras.Backend;
 
 public sealed record CreationRequest(string Kind, string ProjectPath, string ProjectXml,
-    Dictionary<string, string> Fields, string? Revision = null);
+    Dictionary<string, string> Fields, string? Revision = null,
+    CoreLayerRequestContext? CoreLayerContext = null);
 public sealed record CreationChoice(string Id, string Title);
 public sealed record CreationWindow(DateTimeOffset Start, DateTimeOffset End);
 public sealed record CreationInspection(string Revision, bool CanExecute, string? ValidationMessage,
@@ -118,10 +119,10 @@ public static class ModelCreationService
             this.request = request;
             Section = request.Kind switch { "newGeometry" => "Geometries", "newPlan" => "Plans", "newBoundary" => "Boundary Conditions", _ => throw new NotSupportedException("This tool is not connected to model creation.") };
             if (!Path.IsPathFullyQualified(request.ProjectPath)) throw new ArgumentException("Open a saved project before creating a model.");
-            Project = new Project(Path.GetFullPath(request.ProjectPath));
+            Project = CoreLayerImportService.OpenProject(Path.GetFullPath(request.ProjectPath),
+                request.ProjectXml, request.CoreLayerContext);
             try
             {
-                Project.ApplyEditorMetadata(XElement.Parse(request.ProjectXml));
                 Name = request.Kind switch { "newGeometry" => Field("NewGeometryControl", "GeometryName"), "newPlan" => Field("NewPlanControl", "PlanName"), _ => Field("NewBoundaryConditionControl", "BoundaryConditionName") };
                 string directory = request.Kind switch { "newGeometry" => Project.GeometriesDirectory, "newPlan" => Project.PlansDirectory, _ => Project.BoundaryConditionDirectory };
                 // Never combine an unvalidated user filename into a write path.

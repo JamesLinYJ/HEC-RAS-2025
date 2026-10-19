@@ -147,10 +147,20 @@ public static partial class ModelEditorAdapter
                 var state = JsonSerializer.Deserialize<BoundaryEditorState>(boundaryState, BackendJson.Options)!;
                 boundaryState = JsonSerializer.Serialize(state with { Revision = Revision(original) }, BackendJson.Options);
             }
+            CoreLayerRequestContext? committedCoreLayerContext = null;
+            if (request.CoreLayerContext is { } capturedCoreLayerContext)
+            {
+                string? committedProjectRevision = initialConditions is not null &&
+                    request.ProjectPath is { Length: > 0 } committedProjectPath
+                    ? Revision(committedProjectPath) : capturedCoreLayerContext.ProjectRevision;
+                committedCoreLayerContext = CoreLayerImportService.RebaseContext(
+                    capturedCoreLayerContext, committedProjectRevision, original, Revision(original));
+            }
             var result = await LoadAsync(request with
             {
                 SourceState = boundaryState,
-                ProjectXml = initialConditions?.CommittedProjectXml ?? request.ProjectXml
+                ProjectXml = initialConditions?.CommittedProjectXml ?? request.ProjectXml,
+                CoreLayerContext = committedCoreLayerContext
             });
             if (classificationSelection is { } index && result.Classification is { } data && index >= 0 && index < data.Inputs.Length)
             {
@@ -166,7 +176,8 @@ public static partial class ModelEditorAdapter
                 // unselected snapshot with a selected input ID.
                 var selectedModel = new ModelSaveRequest(request.AssetPath, request.Kind,
                     request.ProjectPath, result.Revision, [], [], SourceState: result.SourceState,
-                    ProjectXml: initialConditions?.CommittedProjectXml ?? request.ProjectXml);
+                    ProjectXml: initialConditions?.CommittedProjectXml ?? request.ProjectXml,
+                    CoreLayerContext: request.CoreLayerContext);
                 result = await TransformTerrainAsync(new(selectedModel, "selectInput", ItemId: id));
             }
             if (terrainCleanupWarning is not null && result.Terrain is { } cleanupData)
@@ -489,12 +500,22 @@ public static partial class ModelEditorAdapter
         public ObservableCoreLayer Observable { get; }
         public ModelContext(ModelRequest request, string? staging = null)
         {
-            project = request.ProjectPath != null ? new Project(request.ProjectPath) : Project.CreateInMemory();
+            if (request.ProjectPath is not null)
+                project = CoreLayerImportService.OpenProject(request.ProjectPath, request.ProjectXml,
+                    request.CoreLayerContext);
+            else
+            {
+                if (request.CoreLayerContext is { References.Length: > 0 })
+                    throw new ArgumentException("A session-only core-layer reference requires its saved project.");
+                project = Project.CreateInMemory();
+            }
             try
             {
-                if (request.ProjectXml != null) project.ApplyEditorMetadata(XElement.Parse(request.ProjectXml));
                 string source = Path.GetFullPath(request.AssetPath);
                 var original = CoreLayers().FirstOrDefault(layer => SourceFilePaths.SameSourceFile(layer.Filename, source));
+                if (request.CoreLayerContext is not null && request.ProjectPath is not null &&
+                    staging is null && original is null && request.Kind is ("Geometry" or "Boundary Conditions"))
+                    throw new ArgumentException("The Geometry or Boundary Condition is not part of this project session. Add an explicit session-only reference first.");
                 CoreLayerBase layer = staging == null ? original ?? OpenLayer(request.Kind, source) : OpenLayer(request.Kind, staging);
                 if (SupportedKind(layer) != request.Kind) throw new ArgumentException("The requested editor does not match the source model.");
                 if (original == null || staging != null)

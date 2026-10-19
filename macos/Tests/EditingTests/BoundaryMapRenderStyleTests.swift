@@ -180,6 +180,71 @@ struct BoundaryMapRenderStyleTests {
             "A context action on an unselected feature replaces only that layer's set and preserves other layer owners.")
     }
 
+    @Test @MainActor
+    func resultAttachedFaceCameraChangeRejectsPixelsFromThePreviousViewport() async throws {
+        let fixture = try BoundaryMapRenderStyleFixture()
+        defer { fixture.remove() }
+        let capture = try fixture.resultCapture(source: fixture.sourceA,
+            sourceRevision: fixture.sha("A"), visualizationRevision: fixture.sha("B"),
+            contextToken: "result-context")
+        let provider = DelayedAttachedFacesProvider()
+        let session = BoundaryMapSession(provider: provider)
+        await session.configure(captures: [capture])
+        let firstViewport = Self.viewport(minX: 0)
+        let secondViewport = Self.viewport(minX: 50)
+        await session.updateAttachedFacesViewport(firstViewport)
+        session.setShowsAttachedFaces(true, for: capture)
+        for _ in 0..<32 where provider.requests.count < 2 { await Task.yield() }
+        #expect(provider.requests.count == 2)
+        #expect(provider.requests[1].viewport == firstViewport.extent)
+        #expect(provider.requests[1].renderScale == firstViewport.renderScale)
+
+        let cameraChange = Task { await session.updateAttachedFacesViewport(secondViewport) }
+        for _ in 0..<32 where provider.requests.count < 3 { await Task.yield() }
+        #expect(provider.requests.count == 3)
+        #expect(provider.requests[2].viewport == secondViewport.extent)
+        provider.complete(at: 2)
+        await cameraChange.value
+        provider.complete(at: 1)
+        for _ in 0..<32 where !provider.finishedRequestIDs.contains(1) { await Task.yield() }
+
+        #expect(session.attachedFacesFrame(for: capture)?.viewport == secondViewport.extent)
+        #expect(session.attachedFacesImage(for: capture) != nil)
+        #expect(session.attachedFacesLoadingOwners.isEmpty)
+    }
+
+    @Test @MainActor
+    func disablingAttachedFacesCancelsThePendingResultRendererRequest() async throws {
+        let fixture = try BoundaryMapRenderStyleFixture()
+        defer { fixture.remove() }
+        let capture = try fixture.resultCapture(source: fixture.sourceA,
+            sourceRevision: fixture.sha("A"), visualizationRevision: fixture.sha("B"),
+            contextToken: "result-context")
+        let provider = DelayedAttachedFacesProvider()
+        let session = BoundaryMapSession(provider: provider)
+        await session.configure(captures: [capture])
+        let camera = Self.viewport(minX: 0)
+        await session.updateAttachedFacesViewport(camera)
+        session.setShowsAttachedFaces(true, for: capture)
+        for _ in 0..<32 where provider.requests.count < 2 { await Task.yield() }
+        #expect(provider.requests.count == 2)
+
+        session.setShowsAttachedFaces(false, for: capture)
+        provider.complete(at: 1)
+        for _ in 0..<32 where !provider.finishedRequestIDs.contains(1) { await Task.yield() }
+        for _ in 0..<8 { await Task.yield() }
+
+        #expect(!session.showsAttachedFaces(for: capture))
+        #expect(session.attachedFacesFrame(for: capture) == nil)
+        #expect(session.attachedFacesImage(for: capture) == nil)
+        #expect(!session.attachedFacesLoadingOwners.contains(BoundaryMapRenderOwnerIdentity.key(for: capture)))
+    }
+
+    private static func viewport(minX: Double) -> MapSourceRenderViewport {
+        MapSourceRenderViewport(extent: RasterMapViewExtent(minX: minX, minY: 0,
+            maxX: minX + 10, maxY: 10, pixelWidth: 16, pixelHeight: 8), renderScale: 0.75)
+    }
+
     private static func options(line: VectorStyleValues,
                                 vertex: VectorStyleValues) -> [String: VectorVisualSettingsOptions] {
         [
@@ -224,6 +289,83 @@ private final class FixtureBoundaryMapProvider: BoundaryMapProvider {
             resultOwner: capture.resultOwner?.receipt,
             status: capture.effectiveVisible ? "available" : "hidden",
             diagnostic: nil)
+    }
+}
+
+@MainActor
+private final class DelayedAttachedFacesProvider: BoundaryMapProvider {
+    struct Request {
+        let capture: BoundaryMapCapture
+        let contextToken: String?
+        let boundarySourceState: String?
+        let viewport: RasterMapViewExtent?
+        let renderScale: Double
+    }
+
+    private(set) var requests: [Request] = []
+    private(set) var finishedRequestIDs: Set<Int> = []
+    private var continuations: [Int: CheckedContinuation<BoundaryMapSnapshot, any Error>] = [:]
+
+    func load(_ capture: BoundaryMapCapture, boundarySourceState: String?,
+              contextToken: String?) async throws -> BoundaryMapSnapshot {
+        try await load(capture, boundarySourceState: boundarySourceState,
+            contextToken: contextToken, attachedFacesViewport: nil, renderScale: 1)
+    }
+
+    func load(_ capture: BoundaryMapCapture, boundarySourceState: String?,
+              contextToken: String?, attachedFacesViewport: RasterMapViewExtent?) async throws -> BoundaryMapSnapshot {
+        try await load(capture, boundarySourceState: boundarySourceState,
+            contextToken: contextToken, attachedFacesViewport: attachedFacesViewport, renderScale: 1)
+    }
+
+    func load(_ capture: BoundaryMapCapture, boundarySourceState: String?,
+              contextToken: String?, attachedFacesViewport: RasterMapViewExtent?,
+              renderScale: Double) async throws -> BoundaryMapSnapshot {
+        let requestIndex = requests.count
+        requests.append(Request(capture: capture, contextToken: contextToken,
+            boundarySourceState: boundarySourceState, viewport: attachedFacesViewport,
+            renderScale: renderScale))
+        if attachedFacesViewport != nil {
+            let response: BoundaryMapSnapshot = try await withCheckedThrowingContinuation {
+                continuations[requestIndex] = $0
+            }
+            finishedRequestIDs.insert(requestIndex)
+            return response
+        }
+        finishedRequestIDs.insert(requestIndex)
+        return snapshot(for: requests[requestIndex])
+    }
+
+    func complete(at requestIndex: Int) {
+        guard let continuation = continuations.removeValue(forKey: requestIndex) else { return }
+        continuation.resume(returning: snapshot(for: requests[requestIndex]))
+    }
+
+    private func snapshot(for request: Request) -> BoundaryMapSnapshot {
+        let capture = request.capture
+        let attached: MapSourceRasterFrame? = request.viewport.map { viewport in
+            MapSourceRasterFrame(viewport: viewport, width: viewport.pixelWidth, height: viewport.pixelHeight,
+                rgba: Data(repeating: 255, count: viewport.pixelWidth * viewport.pixelHeight * 4),
+                minX: viewport.minX, minY: viewport.minY, maxX: viewport.maxX, maxY: viewport.maxY,
+                labels: [])
+        }
+        return BoundaryMapSnapshot(
+            projectCanonicalPath: capture.map.projectPath,
+            projectRevision: String(repeating: "D", count: 64),
+            projectXmlSHA: capture.map.projectXmlSHA,
+            visualizationRevision: capture.map.expectedVisualizationRevision,
+            mapID: capture.map.mapID, mapIndex: capture.map.mapIndex,
+            mapName: capture.map.mapName, mapType: capture.map.mapType,
+            contextToken: request.contextToken ?? "attached-face-result-context",
+            boundaryNode: capture.boundaryNode, boundaryPath: capture.sourcePath,
+            boundaryRevision: capture.sourceRevision,
+            boundarySourceState: request.boundarySourceState ?? "attached-face-source-state",
+            boundaryChecked: capture.isChecked, boundaryEffectiveVisible: capture.effectiveVisible,
+            lines: [BoundaryMapLineData(id: "line-0", sourceOrdinal: 0, name: "Boundary line",
+                coordinates: [BoundaryMapCoordinateData(x: 1, y: 1), BoundaryMapCoordinateData(x: 9, y: 9)])],
+            resultOwner: capture.resultOwner?.receipt,
+            status: capture.effectiveVisible ? "available" : "hidden", diagnostic: nil,
+            attachedFaces: attached)
     }
 }
 

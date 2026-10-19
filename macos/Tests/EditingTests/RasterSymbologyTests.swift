@@ -13,10 +13,13 @@ private final class LiveRasterSources {
 private final class RasterSymbologyFixtureProvider: RasterSymbologyProvider {
     var badHistogram = false
     var deferredSelection = false
+    var snapshotAdditionalOptions: [RasterPlotOption] = []
+    private(set) var appliedAdditionalOptions: [RasterPlotOption]?
     private var completion: CheckedContinuation<RasterSymbologyDraft, any Error>?
     private var started: CheckedContinuation<Void, Never>?
     func snapshot(_ context: RasterSymbologyContext) async throws -> RasterSymbologySnapshot? {
-        .init(draft: makeDraft(name: context.assetID ?? ""), palettes: RasterPalette.defaults)
+        .init(draft: makeDraft(name: context.assetID ?? ""), palettes: RasterPalette.defaults,
+              additionalOptions: snapshotAdditionalOptions)
     }
     func makeDraft(name: String) -> RasterSymbologyDraft {
         .init(paletteID: "Depths", name: name, stops: [.init(color: "0000FFFF", value: 10), .init(color: "FFFFFFFF", value: 20), .init(color: "FF0000FF", value: 30)], valueSource: .manual, grayscale: false, isEditing: true, updateHistogramWithView: false, canComputeHistogram: true)
@@ -26,7 +29,10 @@ private final class RasterSymbologyFixtureProvider: RasterSymbologyProvider {
         return draft
     }
     func histogram(count: Int, forView: Bool, context: RasterSymbologyContext) async throws -> [Double] { badHistogram ? [1] : (0..<count).map(Double.init) }
-    func apply(_ draft: RasterSymbologyDraft, context: RasterSymbologyContext) async throws {}
+    func apply(_ draft: RasterSymbologyDraft, additionalOptions: [RasterPlotOption],
+               context: RasterSymbologyContext) async throws {
+        appliedAdditionalOptions = additionalOptions
+    }
     func reset(_ context: RasterSymbologyContext) async throws -> RasterSymbologySnapshot { try await snapshot(context)! }
     func savePalette(_ draft: RasterSymbologyDraft, name: String, context: RasterSymbologyContext) async throws -> [RasterPalette] { throw CocoaError(.fileWriteNoPermission) }
     func deletePalette(_ id: String, context: RasterSymbologyContext) async throws -> [RasterPalette] { [] }
@@ -45,11 +51,42 @@ struct RasterSymbologyTests {
             filename: "depth.tif", filenameRelative: "depth.tif", sourcePath: "/tmp/depth.tif",
             sourceMapID: mapID, sourceRevision: "source-sha")
     }
-    private func makeBackendClient(payload: String, marker: URL) -> BackendProcessClient {
+    private func makeHydratedGdbSource(mapID: UUID, visualizationRevision: String,
+                                       manifestRevision: String = String(repeating: "A", count: 64)) -> RasterMapSourceDescriptor {
+        let projectPath = "/tmp/Project.ras"
+        let projectXML = "<Project />"
+        let sourcePath = "/tmp/elevation.gdb"
+        let map = GdbRasterSymbologyMapCapture(projectPath: projectPath, projectXml: projectXML,
+            projectXmlSHA: "project-xml-sha", mapID: mapID.uuidString, mapIndex: 0,
+            mapName: "Hydro", mapType: "Project", expectedVisualizationRevision: visualizationRevision)
+        let node = GdbRasterSymbologyNodeCapture(rootName: "Map", nodeType: "MapLayer",
+            nodeName: "Elevation", nodePath: [0, 0], assetID: sourcePath,
+            mapType: "SingleBandRasterMapLayer", filename: "GDB:elevation.gdb:table=Elevation",
+            filenameRelative: "../elevation.gdb")
+        let source = GdbMapSourceIdentity(sourcePath: sourcePath, revision: manifestRevision,
+            files: [.init(relativePath: "a00000001.gdbtable", length: 128,
+                          revision: String(repeating: "B", count: 64))])
+        let context = GdbRasterSymbologyContext(map: map, node: node)
+        let identity = GdbRasterSymbologyIdentity(map: map, node: node, source: source)
+        return RasterMapSourceDescriptor(id: "vis-map-0-node-0.0", projectPath: projectPath,
+            visualizationPath: "/tmp/Project.vis", visualizationRevision: visualizationRevision,
+            mapIndex: 0, mapName: "Hydro", mapType: "Project", nodePath: [0, 0],
+            nodeName: "Elevation", mapLayerType: "SingleBandRasterMapLayer",
+            filename: node.filename, filenameRelative: node.filenameRelative, sourcePath: sourcePath,
+            sourceMapID: mapID, sourceRevision: manifestRevision,
+            gdbSourceContext: context, gdbSource: identity)
+    }
+    private func makeBackendClient(payload: String, marker: URL,
+                                   expectedMethod: String? = nil) -> BackendProcessClient {
         let encodedPayload = Data(payload.utf8).base64EncodedString()
+        let encodedMethod = Data((expectedMethod ?? "").utf8).base64EncodedString()
         let script = """
         import base64, json, os, sys, time
         request = json.load(sys.stdin)
+        expected_method = base64.b64decode("\(encodedMethod)").decode("utf-8")
+        if expected_method and request.get("method") != expected_method:
+            print(f"unexpected test route: {request.get('method')!r}", file=sys.stderr)
+            sys.exit(2)
         marker_path = sys.argv[-1]
         try:
             with open(marker_path, encoding="ascii") as marker:
@@ -71,6 +108,60 @@ struct RasterSymbologyTests {
         """
         return BackendProcessClient(executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
                                     arguments: ["-c", script, marker.path])
+    }
+
+    @Test @MainActor func ordinaryRasterLayerLoadsThroughManifestRoute() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("requests")
+        defer { releaseRequest(1, marker: marker) }
+        let mapID = UUID()
+        let source = makeSource(mapID: mapID)
+        let payload = """
+        {"previousVisualizationRevision":"old-vis","visualizationRevision":"old-vis","sourceRevision":"source-sha","raster":{"id":"\(source.id)","sourceMapID":"\(mapID.uuidString)","name":"Depth","width":1,"height":1,"rgba":"AAAAAA==","minX":0,"minY":0,"maxX":1,"maxY":1}}
+        """
+        let liveSources = LiveRasterSources([source])
+        let provider = BackendRasterSymbologyProvider(
+            client: makeBackendClient(payload: payload, marker: marker,
+                expectedMethod: "map.raster.layer.load"),
+            sources: { liveSources.values }, viewport: { _ in nil }, installLayer: { _ in },
+            acceptVisualization: { _, _ in })
+        let pending = Task { try await provider.loadMapLayerWithProperties(source) }
+        try await waitForRequestCount(1, marker: marker)
+        try signalRelease(1, marker: marker)
+        let loaded = try await pending.value
+        #expect(loaded.layer.id == source.id)
+        #expect(loaded.layer.sourceMapID == mapID)
+        #expect(loaded.sourceRevision == "source-sha")
+    }
+
+    @Test @MainActor func gdbRasterLayerLoadKeepsNestedIdentityRoute() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("requests")
+        defer { releaseRequest(1, marker: marker) }
+        let mapID = UUID()
+        let source = makeHydratedGdbSource(mapID: mapID, visualizationRevision: "old-vis")
+        let manifest = try #require(source.gdbSource?.source.revision)
+        let payload = """
+        {"previousVisualizationRevision":"old-vis","visualizationRevision":"old-vis","sourceRevision":"\(manifest)","snapshot":{"draft":{"paletteID":null,"name":"Elevation","stops":[{"id":"00000000-0000-0000-0000-000000000001","color":"000000FF","value":0},{"id":"00000000-0000-0000-0000-000000000002","color":"FFFFFFFF","value":1}],"valueSource":"Manual","grayscale":false,"isEditing":false,"updateHistogramWithView":false,"canComputeHistogram":true},"palettes":[],"surfaceFillValues":[0,1],"plotOptions":[]},"raster":{"id":"\(source.id)","sourceMapID":"\(mapID.uuidString)","name":"Elevation","width":1,"height":1,"rgba":"AAAAAA==","minX":0,"minY":0,"maxX":1,"maxY":1}}
+        """
+        let liveSources = LiveRasterSources([source])
+        let provider = BackendRasterSymbologyProvider(
+            client: makeBackendClient(payload: payload, marker: marker,
+                expectedMethod: "rasterMap.load"),
+            sources: { liveSources.values }, viewport: { _ in nil },
+            projectXML: { "<Project />" }, installLayer: { _ in },
+            acceptVisualization: { _, _ in })
+        let pending = Task { try await provider.loadMapLayerWithProperties(source) }
+        try await waitForRequestCount(1, marker: marker)
+        try signalRelease(1, marker: marker)
+        let loaded = try await pending.value
+        #expect(loaded.layer.id == source.id)
+        #expect(loaded.layer.sourceMapID == mapID)
+        #expect(loaded.sourceRevision == nil)
     }
     private func waitForRequestCount(_ count: Int, marker: URL) async throws {
         let clock = ContinuousClock()
@@ -124,6 +215,22 @@ struct RasterSymbologyTests {
         #expect(await session.save(name: "Custom", provider: provider) == false)
         #expect(session.draft == beforeSave)
     }
+
+    @Test @MainActor func applyForwardsEditedTransientPlotOptions() async throws {
+        let provider = RasterSymbologyFixtureProvider(), session = RasterSymbologySession()
+        provider.snapshotAdditionalOptions = [
+            .init(id: "ShowStrokeVertices", title: "Show stroke vertices", isBoolean: true,
+                  value: "false", choices: [], isEnabled: true, description: nil)
+        ]
+        await session.load(context: .init(projectSessionID: UUID(), mapID: UUID(), assetID: "raster"),
+                           provider: provider)
+        session.setAdditional("ShowStrokeVertices", value: "true")
+
+        #expect(await session.apply(provider: provider))
+        #expect(provider.appliedAdditionalOptions?.count == 1)
+        #expect(provider.appliedAdditionalOptions?.first?.id == "ShowStrokeVertices")
+        #expect(provider.appliedAdditionalOptions?.first?.value == "true")
+    }
     @Test @MainActor func latePaletteSelectionCannotReplaceNewLayerDraft() async throws {
         let provider = RasterSymbologyFixtureProvider(), session = RasterSymbologySession()
         let project = UUID(), map = UUID()
@@ -161,7 +268,7 @@ struct RasterSymbologyTests {
             updateHistogramWithView: false, canComputeHistogram: true)
 
         var rejectedCode: String?
-        do { try await provider.apply(draft, context: context) }
+        do { try await provider.apply(draft, additionalOptions: [], context: context) }
         catch let error as BackendServiceError { rejectedCode = error.code }
         catch { rejectedCode = "unexpected" }
         #expect(rejectedCode == "notFound")
@@ -223,12 +330,15 @@ struct RasterSymbologyTests {
         {"previousVisualizationRevision":"old-vis","visualizationRevision":"new-vis","sourceRevision":"source-sha","palettes":[]}
         """
         let client = makeBackendClient(payload: payload, marker: marker)
-        let mapID = UUID()
+        let mapID = MapState.projectMapID
         let source = makeSource(mapID: mapID)
+        let liveSources = LiveRasterSources([source])
         let provider = BackendRasterSymbologyProvider(
             client: client,
-            sources: { [source] }, viewport: { _ in nil }, installLayer: { _ in },
-            acceptVisualization: { _, _ in })
+            sources: { liveSources.values }, viewport: { _ in nil }, installLayer: { _ in },
+            acceptVisualization: { _, newRevision in
+                liveSources.values = [source.updating(visualizationRevision: newRevision)]
+            })
         var mutationStates: [Bool] = []
         provider.onMutationRunningChanged = { mutationStates.append($0) }
         let context = RasterSymbologyContext(projectSessionID: UUID(), mapID: mapID, assetID: source.id)
@@ -251,5 +361,94 @@ struct RasterSymbologyTests {
         _ = try await first.value
         #expect(mutationStates == [true, false])
         #expect((try Data(contentsOf: marker)).count == 1)
+        #expect(liveSources.values.first?.visualizationRevision == "new-vis")
+    }
+
+    @Test @MainActor func gdbMutationAcceptsOnlyTheCommittedVisualizationRevisionRebase() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("requests")
+        defer { releaseRequest(1, marker: marker) }
+        let mapID = UUID()
+        let source = makeHydratedGdbSource(mapID: mapID, visualizationRevision: "old-vis")
+        let manifest = try #require(source.gdbSource?.source.revision)
+        let payload = """
+        {"previousVisualizationRevision":"old-vis","visualizationRevision":"new-vis","sourceRevision":"\(manifest)","raster":{"id":"\(source.id)","sourceMapID":"\(mapID.uuidString)","name":"Elevation","width":1,"height":1,"rgba":"AAAAAA==","minX":0,"minY":0,"maxX":1,"maxY":1}}
+        """
+        let liveSources = LiveRasterSources([source])
+        var installedLayer: MapRasterLayer?
+        var acceptedRevision: String?
+        let provider = BackendRasterSymbologyProvider(
+            client: makeBackendClient(payload: payload, marker: marker),
+            sources: { liveSources.values }, viewport: { _ in nil },
+            projectXML: { "<Project />" }, installLayer: { installedLayer = $0 },
+            acceptVisualization: { oldRevision, newRevision in
+                acceptedRevision = oldRevision + ">" + newRevision
+                // The owning Store rebuilds the visible descriptor after accepting
+                // the .vis write, rebasing only the nested map's expected revision.
+                liveSources.values = [source.updating(visualizationRevision: newRevision)]
+            })
+        let context = RasterSymbologyContext(projectSessionID: UUID(), mapID: mapID, assetID: source.id)
+        let draft = RasterSymbologyDraft(paletteID: nil, name: "Elevation",
+            stops: [.init(color: "000000FF", value: 0), .init(color: "FFFFFFFF", value: 1)],
+            valueSource: .manual, grayscale: false, isEditing: true,
+            updateHistogramWithView: false, canComputeHistogram: true)
+
+        let mutation = Task { try await provider.apply(draft, additionalOptions: [], context: context) }
+        try await waitForRequestCount(1, marker: marker)
+        try signalRelease(1, marker: marker)
+        try await mutation.value
+
+        #expect(acceptedRevision == "old-vis>new-vis")
+        #expect(installedLayer?.id == source.id)
+        #expect(installedLayer?.sourceMapID == mapID)
+        #expect(liveSources.values.first?.visualizationRevision == "new-vis")
+        #expect(liveSources.values.first?.gdbSource?.map.expectedVisualizationRevision == "new-vis")
+        #expect(liveSources.values.first?.gdbSource?.source == source.gdbSource?.source)
+    }
+
+    @Test @MainActor func gdbMutationStillRejectsAChangedDirectoryManifestAfterAccept() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("requests")
+        defer { releaseRequest(1, marker: marker) }
+        let mapID = UUID()
+        let source = makeHydratedGdbSource(mapID: mapID, visualizationRevision: "old-vis")
+        let manifest = try #require(source.gdbSource?.source.revision)
+        let payload = """
+        {"previousVisualizationRevision":"old-vis","visualizationRevision":"new-vis","sourceRevision":"\(manifest)","raster":{"id":"\(source.id)","sourceMapID":"\(mapID.uuidString)","name":"Elevation","width":1,"height":1,"rgba":"AAAAAA==","minX":0,"minY":0,"maxX":1,"maxY":1}}
+        """
+        let liveSources = LiveRasterSources([source])
+        var installedLayer: MapRasterLayer?
+        let changedManifest = String(repeating: "C", count: 64)
+        let provider = BackendRasterSymbologyProvider(
+            client: makeBackendClient(payload: payload, marker: marker),
+            sources: { liveSources.values }, viewport: { _ in nil },
+            projectXML: { "<Project />" }, installLayer: { installedLayer = $0 },
+            acceptVisualization: { _, newRevision in
+                liveSources.values = [self.makeHydratedGdbSource(mapID: mapID,
+                    visualizationRevision: newRevision, manifestRevision: changedManifest)]
+            })
+        let context = RasterSymbologyContext(projectSessionID: UUID(), mapID: mapID, assetID: source.id)
+        let draft = RasterSymbologyDraft(paletteID: nil, name: "Elevation",
+            stops: [.init(color: "000000FF", value: 0), .init(color: "FFFFFFFF", value: 1)],
+            valueSource: .manual, grayscale: false, isEditing: true,
+            updateHistogramWithView: false, canComputeHistogram: true)
+
+        let mutation = Task { try await provider.apply(draft, additionalOptions: [], context: context) }
+        try await waitForRequestCount(1, marker: marker)
+        try signalRelease(1, marker: marker)
+        do {
+            try await mutation.value
+            Issue.record("A committed raster response was installed after its GDB manifest changed.")
+        } catch let error as BackendServiceError {
+            #expect(error.code == "notFound")
+        } catch {
+            Issue.record("Unexpected error while rejecting a GDB response with a changed manifest: \(error)")
+        }
+        #expect(installedLayer == nil)
+        #expect(liveSources.values.first?.gdbSource?.source.revision == changedManifest)
     }
 }

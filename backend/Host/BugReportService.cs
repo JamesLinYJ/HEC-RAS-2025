@@ -1,6 +1,9 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -26,6 +29,10 @@ public static class BugReportService
     private const int MaximumSummaryCharacters = 100;
     private const int MaximumDescriptionCharacters = 3_000;
     private const int MaximumProjectXmlBytes = 8 * 1024 * 1024;
+    private const int MaximumModuleInventoryBytes = 12 * 1024;
+    private const int MaximumCapturedModuleCandidates = 256;
+    private const int MaximumModuleNameCharacters = 160;
+    private const int MaximumModuleVersionCharacters = 80;
     private const string LinkID = "ras-2025-bugreports";
     private const string KnownIssuesLinkID = "ras-2025-docs-knownissues";
     private const string ReportAPIKey = "ras010_65fd3e26933b";
@@ -406,22 +413,252 @@ public static class BugReportService
         return png || jpeg;
     }
 
-    private static string ComposeErrorLog(string errorLog, string? crashContext)
+    internal static string ComposeErrorLog(string errorLog, string? crashContext)
     {
-        if (string.IsNullOrWhiteSpace(crashContext)) return errorLog;
-        byte[] contextBytes = Encoding.UTF8.GetBytes("Crash context: " + crashContext.Trim() + "\n");
-        if (contextBytes.Length >= MaximumLogBytes)
-            return Encoding.UTF8.GetString(contextBytes, contextBytes.Length - MaximumLogBytes, MaximumLogBytes);
-
+        byte[] moduleBytes = Encoding.UTF8.GetBytes(SafeCaptureModuleInventoryXml() + "\n");
+        byte[] contextBytes = string.IsNullOrWhiteSpace(crashContext)
+            ? []
+            : Encoding.UTF8.GetBytes("Crash context: " + crashContext.Trim() + "\n");
+        contextBytes = Utf8Tail(contextBytes, Math.Max(0, MaximumLogBytes - moduleBytes.Length));
         byte[] logBytes = Encoding.UTF8.GetBytes(errorLog);
-        int maximumTailBytes = MaximumLogBytes - contextBytes.Length;
-        int start = Math.Max(0, logBytes.Length - maximumTailBytes);
-        while (start < logBytes.Length && (logBytes[start] & 0xc0) == 0x80) start++;
-        byte[] result = new byte[contextBytes.Length + logBytes.Length - start];
-        Buffer.BlockCopy(contextBytes, 0, result, 0, contextBytes.Length);
-        Buffer.BlockCopy(logBytes, start, result, contextBytes.Length, logBytes.Length - start);
+        int maximumTailBytes = Math.Max(0, MaximumLogBytes - moduleBytes.Length - contextBytes.Length);
+        byte[] logTail = Utf8Tail(logBytes, maximumTailBytes);
+        byte[] result = new byte[moduleBytes.Length + contextBytes.Length + logTail.Length];
+        Buffer.BlockCopy(moduleBytes, 0, result, 0, moduleBytes.Length);
+        Buffer.BlockCopy(contextBytes, 0, result, moduleBytes.Length, contextBytes.Length);
+        Buffer.BlockCopy(logTail, 0, result, moduleBytes.Length + contextBytes.Length, logTail.Length);
         return Encoding.UTF8.GetString(result);
     }
+
+    private static string CaptureModuleInventoryXml()
+    {
+        var candidates = new List<RuntimeModuleCandidate>();
+        var candidateKeys = new HashSet<string>(StringComparer.Ordinal);
+        int managedEnumerationFailures = 0;
+        bool nativeEnumerationUnavailable = false;
+
+        void AddCandidate(string path, string fallbackName, string fallbackVersion, string kind, bool fileBacked)
+        {
+            string identity = kind + "\0" + (fileBacked ? path : fallbackName + "\0" + fallbackVersion);
+            if (candidateKeys.Add(identity))
+                candidates.Add(new RuntimeModuleCandidate(path, fallbackName, fallbackVersion, kind, fileBacked));
+        }
+
+        try
+        {
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    AssemblyName assemblyName = assembly.GetName();
+                    string name = assemblyName.Name ?? "unknown-managed-module";
+                    string version = assemblyName.Version?.ToString() ?? string.Empty;
+                    string location;
+                    try { location = assembly.Location; }
+                    catch (NotSupportedException) { location = string.Empty; }
+                    AddCandidate(location, name, version, "managed", !string.IsNullOrWhiteSpace(location));
+                }
+                catch (Exception error) when (IsAssemblyMetadataFailure(error))
+                {
+                    managedEnumerationFailures++;
+                }
+            }
+        }
+        catch (Exception error) when (IsAssemblyMetadataFailure(error))
+        {
+            managedEnumerationFailures++;
+        }
+
+        try
+        {
+            using Process process = Process.GetCurrentProcess();
+            foreach (ProcessModule module in process.Modules)
+            {
+                string path = module.FileName ?? string.Empty;
+                string name = module.ModuleName ?? string.Empty;
+                AddCandidate(path, name, string.Empty, "native", !string.IsNullOrWhiteSpace(path));
+            }
+        }
+        catch (Exception error) when (IsNativeModuleEnumerationFailure(error))
+        {
+            nativeEnumerationUnavailable = true;
+        }
+
+        RuntimeModuleCandidate[] orderedCandidates = candidates
+            .OrderBy(candidate => ModuleBaseName(candidate.Path, candidate.FallbackName), StringComparer.OrdinalIgnoreCase)
+            .ThenBy(candidate => candidate.Kind, StringComparer.Ordinal)
+            .ThenBy(candidate => candidate.Path, StringComparer.Ordinal)
+            .ToArray();
+        int omittedCandidateCount = Math.Max(0, orderedCandidates.Length - MaximumCapturedModuleCandidates);
+        var records = new List<RuntimeModuleRecord>(Math.Min(orderedCandidates.Length, MaximumCapturedModuleCandidates));
+        var fileDetailsCache = new Dictionary<string, ModuleFileDetails>(PathComparer);
+        foreach (RuntimeModuleCandidate candidate in orderedCandidates.Take(MaximumCapturedModuleCandidates))
+        {
+            string name = SafeModuleText(ModuleBaseName(candidate.Path, candidate.FallbackName), MaximumModuleNameCharacters);
+            string version = SafeModuleText(candidate.FallbackVersion, MaximumModuleVersionCharacters);
+            string sha256 = string.Empty;
+            string hashStatus = string.Empty;
+            if (!candidate.FileBacked)
+            {
+                hashStatus = "not-file-backed";
+            }
+            else
+            {
+                ModuleFileDetails details;
+                if (fileDetailsCache.TryGetValue(candidate.Path, out ModuleFileDetails? cached) && cached is not null)
+                {
+                    details = cached;
+                }
+                else
+                {
+                    details = ReadModuleFileDetails(candidate.Path, version);
+                    fileDetailsCache[candidate.Path] = details;
+                }
+                version = SafeModuleText(details.Version, MaximumModuleVersionCharacters);
+                sha256 = details.Sha256;
+                hashStatus = details.HashStatus;
+            }
+
+            records.Add(new RuntimeModuleRecord(name, version, sha256, candidate.Kind, hashStatus));
+        }
+
+        RuntimeModuleRecord[] uniqueRecords = records
+            .DistinctBy(record => (record.Name, record.Version, record.Sha256, record.Kind, record.HashStatus))
+            .OrderBy(record => record.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(record => record.Kind, StringComparer.Ordinal)
+            .ThenBy(record => record.Version, StringComparer.Ordinal)
+            .ToArray();
+        int hashFailureCount = uniqueRecords.Count(record => record.HashStatus == "unavailable");
+        int nonFileBackedCount = uniqueRecords.Count(record => record.HashStatus == "not-file-backed");
+        var root = new XElement("Modules",
+            new XAttribute("Scope", "backend-process"),
+            new XAttribute("Architecture", RuntimeInformation.ProcessArchitecture.ToString()),
+            new XAttribute("OmittedCount", omittedCandidateCount));
+        foreach (RuntimeModuleRecord record in uniqueRecords)
+        {
+            var element = new XElement("Module",
+                new XAttribute("Name", record.Name),
+                new XAttribute("Version", record.Version),
+                new XAttribute("Kind", record.Kind));
+            if (record.Sha256.Length == 64)
+                element.Add(new XAttribute("SHA256", record.Sha256));
+            else
+                element.Add(new XAttribute("HashStatus", record.HashStatus));
+            root.Add(element);
+        }
+        if (managedEnumerationFailures > 0)
+            root.Add(new XElement("ScanFailure", new XAttribute("Source", "managed"),
+                new XAttribute("Code", "assembly-metadata-unavailable"),
+                new XAttribute("Count", managedEnumerationFailures)));
+        if (nativeEnumerationUnavailable)
+            root.Add(new XElement("ScanFailure", new XAttribute("Source", "native"),
+                new XAttribute("Code", "module-enumeration-unavailable")));
+        if (hashFailureCount > 0)
+            root.Add(new XElement("ScanFailure", new XAttribute("Source", "hash"),
+                new XAttribute("Code", "module-content-unavailable"),
+                new XAttribute("Count", hashFailureCount)));
+        if (nonFileBackedCount > 0)
+            root.Add(new XElement("ScanSummary", new XAttribute("Source", "managed"),
+                new XAttribute("Code", "dynamic-or-memory-only-assembly"),
+                new XAttribute("Count", nonFileBackedCount)));
+
+        XElement[] moduleElements = root.Elements("Module").ToArray();
+        int nextRemoval = moduleElements.Length - 1;
+        string xml = root.ToString(SaveOptions.DisableFormatting);
+        while (Encoding.UTF8.GetByteCount(xml) > MaximumModuleInventoryBytes && nextRemoval >= 0)
+        {
+            moduleElements[nextRemoval--].Remove();
+            omittedCandidateCount++;
+            root.SetAttributeValue("OmittedCount", omittedCandidateCount);
+            xml = root.ToString(SaveOptions.DisableFormatting);
+        }
+        return Encoding.UTF8.GetByteCount(xml) <= MaximumModuleInventoryBytes
+            ? xml
+            : new XElement("Modules",
+                new XAttribute("Scope", "backend-process"),
+                new XAttribute("Architecture", RuntimeInformation.ProcessArchitecture.ToString()),
+                new XAttribute("OmittedCount", omittedCandidateCount),
+                new XElement("ScanFailure", new XAttribute("Source", "inventory"),
+                    new XAttribute("Code", "inventory-size-limit")))
+                .ToString(SaveOptions.DisableFormatting);
+    }
+
+    private static string SafeCaptureModuleInventoryXml()
+    {
+        try { return CaptureModuleInventoryXml(); }
+        catch (Exception error) when (error is not OutOfMemoryException and not StackOverflowException)
+        {
+            return new XElement("Modules",
+                new XAttribute("Scope", "backend-process"),
+                new XAttribute("Architecture", RuntimeInformation.ProcessArchitecture.ToString()),
+                new XAttribute("OmittedCount", 0),
+                new XElement("ScanFailure", new XAttribute("Source", "inventory"),
+                    new XAttribute("Code", "collection-unavailable")))
+                .ToString(SaveOptions.DisableFormatting);
+        }
+    }
+
+    private static ModuleFileDetails ReadModuleFileDetails(string path, string fallbackVersion)
+    {
+        string version = fallbackVersion;
+        try
+        {
+            string? fileVersion = FileVersionInfo.GetVersionInfo(path).FileVersion;
+            if (!string.IsNullOrWhiteSpace(fileVersion)) version = fileVersion;
+        }
+        catch (Exception error) when (IsModuleFileFailure(error)) { }
+
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            return new ModuleFileDetails(version, Convert.ToHexString(SHA256.HashData(stream)), string.Empty);
+        }
+        catch (Exception error) when (IsModuleFileFailure(error))
+        {
+            return new ModuleFileDetails(version, string.Empty, "unavailable");
+        }
+    }
+
+    private static string ModuleBaseName(string path, string fallbackName)
+    {
+        string source = string.IsNullOrWhiteSpace(path) ? fallbackName : path;
+        int separator = Math.Max(source.LastIndexOf('/'), source.LastIndexOf('\\'));
+        return SafeModuleText(separator >= 0 ? source[(separator + 1)..] : source, MaximumModuleNameCharacters);
+    }
+
+    private static string SafeModuleText(string value, int maximumCharacters)
+    {
+        string safe = new(value.Select(character => char.IsControl(character) ? '_' : character).ToArray());
+        safe = safe.Trim();
+        return safe.Length <= maximumCharacters ? safe : safe[..maximumCharacters];
+    }
+
+    private static byte[] Utf8Tail(byte[] value, int maximumBytes)
+    {
+        if (maximumBytes <= 0 || value.Length == 0) return [];
+        int start = Math.Max(0, value.Length - maximumBytes);
+        while (start < value.Length && (value[start] & 0xc0) == 0x80) start++;
+        return value.AsSpan(start).ToArray();
+    }
+
+    private static bool IsModuleFileFailure(Exception error) =>
+        error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException
+            or System.Security.SecurityException or System.ComponentModel.Win32Exception;
+
+    private static bool IsAssemblyMetadataFailure(Exception error) =>
+        error is IOException or UnauthorizedAccessException or NotSupportedException or BadImageFormatException
+            or System.Security.SecurityException;
+
+    private static bool IsNativeModuleEnumerationFailure(Exception error) =>
+        error is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException
+            or System.ComponentModel.Win32Exception;
+
+    private sealed record RuntimeModuleCandidate(string Path, string FallbackName, string FallbackVersion,
+        string Kind, bool FileBacked);
+    private sealed record RuntimeModuleRecord(string Name, string Version, string Sha256, string Kind,
+        string HashStatus);
+    private sealed record ModuleFileDetails(string Version, string Sha256, string HashStatus);
 
     private static string ReadRevision(string path)
     {

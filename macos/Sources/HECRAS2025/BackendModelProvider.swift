@@ -5,11 +5,16 @@ import RASWorkspaceCore
 final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
     let client: BackendProcessClient
     private(set) var project: ProjectDocument?
+    private var coreLayerContextProvider: @MainActor () -> CoreLayerRequestContext? = { nil }
     init(client: BackendProcessClient? = nil) {
         self.client = client ?? BackendProcessClient(executableURL: Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/Backend/HECRASBackend"))
     }
     func setProject(_ document: ProjectDocument?) { project = document }
+    func setCoreLayerContextProvider(_ provider: @escaping @MainActor () -> CoreLayerRequestContext?) {
+        coreLayerContextProvider = provider
+    }
+    func captureCoreLayerContext() -> CoreLayerRequestContext? { coreLayerContextProvider() }
     var supportsProjectContextRefresh: Bool { true }
     func refreshProjectContext(_ asset: ProjectAsset, edits: EditorEdits) async throws -> EditorContextRefresh {
         struct Response: Decodable, Sendable { let baseline: ModelSnapshot; let draft: ModelSnapshot }
@@ -32,7 +37,11 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
                 resultPath: asset.url, projectPath: projectURL, projectXML: project.editorXML, revision: nil)
             return snapshot.editorSnapshot
         }
-        let result = try await client.request("model.load", parameters: ModelRequest(assetPath: asset.url.path, kind: kind.rawValue, projectPath: project?.url?.path, projectXml: project?.editorXML), as: ModelSnapshot.self)
+        let capturedContext = captureCoreLayerContext()
+        let request = ModelRequest(assetPath: asset.url.path, kind: kind.rawValue,
+            projectPath: project?.url?.path, projectXml: project?.editorXML,
+            coreLayerContext: capturedContext)
+        let result = try await client.request("model.load", parameters: request, as: ModelSnapshot.self)
         return try result.editorSnapshot
     }
     func save(_ asset: ProjectAsset, changes: EditorEdits) async throws {
@@ -166,7 +175,8 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
             throw BackendServiceError(code: "sourceChanged", message: "Terrain import cancellation no longer matches the active model.")
         }
         let model = ModelRequest(assetPath: request.model.assetPath, kind: request.model.kind,
-            projectPath: request.model.projectPath, projectXml: request.model.projectXml)
+            projectPath: request.model.projectPath, projectXml: request.model.projectXml,
+            coreLayerContext: request.model.coreLayerContext)
         return try await client.request("model.terrainInputImportCancel",
             parameters: Request(model: model, draftToken: request.draftToken, batchToken: request.batchToken, operationID: operationID),
             as: TerrainInputImportCancelReceipt.self)
@@ -177,13 +187,15 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
             let kind: String
             let projectPath: String?
             let projectXml: String?
+            let coreLayerContext: CoreLayerRequestContext?
         }
         struct Request: Encodable, Sendable { let model: ModelRequest; let draftToken: String }
         guard let kind = ModelEditorKind.allCases.first(where: { $0.section == asset.section }) else {
             throw BackendServiceError(code: "unsupported", message: "Terrain input cleanup is unavailable for this model.")
         }
         let model = ModelRequest(assetPath: asset.url.path, kind: kind.rawValue,
-            projectPath: project?.url?.path, projectXml: project?.editorXML)
+            projectPath: project?.url?.path, projectXml: project?.editorXML,
+            coreLayerContext: captureCoreLayerContext())
         return try await client.request("model.terrainInputImportDiscard",
             parameters: Request(model: model, draftToken: draftToken), as: Bool.self)
     }
@@ -193,13 +205,15 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
             let kind: String
             let projectPath: String?
             let projectXml: String?
+            let coreLayerContext: CoreLayerRequestContext?
         }
         struct Request: Encodable, Sendable { let model: ModelRequest; let draftToken: String; let batchToken: String }
         guard asset.section == .terrains else {
             throw BackendServiceError(code: "unsupported", message: "Terrain import batch cleanup is unavailable for this model.")
         }
         let model = ModelRequest(assetPath: asset.url.path, kind: ModelEditorKind.terrain.rawValue,
-            projectPath: project?.url?.path, projectXml: project?.editorXML)
+            projectPath: project?.url?.path, projectXml: project?.editorXML,
+            coreLayerContext: captureCoreLayerContext())
         return try await client.request("model.terrainInputImportDiscardBatch",
             parameters: Request(model: model, draftToken: draftToken, batchToken: batchToken), as: Bool.self)
     }
@@ -236,7 +250,8 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
             sourceState: changes.sourceState, rows: changes.rows.mapValues { $0.map(BackendModelRow.init) }, samples: changes.samples.mapValues { $0.map(BackendModelSample.init) },
             planTimeWindowEdits: changes.planTimeWindowEdits, geometryTopologyState: changes.geometryTopologyState,
             geometryMeshState: changes.geometryMeshState, geometryCulvertState: changes.geometryCulvertState,
-            tableSelections: changes.tableSelections, changedCells: changes.changedCells)
+            tableSelections: changes.tableSelections, changedCells: changes.changedCells,
+            coreLayerContext: captureCoreLayerContext())
     }
     func perform(_ asset: ProjectAsset, action: EditorAction) async throws -> EditorSnapshot {
         throw BackendServiceError(code: "unsupported", message: "This model action is not yet connected to the source backend.")
@@ -244,6 +259,7 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
     private struct ModelRequest: Encodable, Sendable {
         let assetPath: String; let kind: String; let projectPath: String?
         let projectXml: String?
+        let coreLayerContext: CoreLayerRequestContext?
     }
     struct ModelSaveRequest: Encodable, Sendable {
         let assetPath: String; let kind: String; let projectPath: String?
@@ -258,6 +274,7 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
         let geometryCulvertState: String?
         var tableSelections: [String: [String]] = [:]
         var changedCells: [String: [EditorChangedCell]] = [:]
+        var coreLayerContext: CoreLayerRequestContext? = nil
     }
     struct ImageData: Codable, Sendable {
         let id: String; let name: String; let data: Data

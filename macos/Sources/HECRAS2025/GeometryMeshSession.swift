@@ -11,6 +11,18 @@ struct GeometryMeshParentSaveCapture: Sendable {
     let sourceRevision: String?
 }
 
+/// Exact source owner handed to the map plot renderer. Both draft payloads are
+/// captured from the loaded child session and remain ephemeral render inputs.
+struct GeometryMeshPlotOwnerCapture: Hashable, Sendable {
+    let model: GeometryMeshModelRequest
+    let sourceRevision: String
+    let meshDraftState: String
+    let topologyDraftState: String?
+    let meshDraftSHA256: String
+    let topologyDraftSHA256: String
+    let ownerIdentity: String
+}
+
 /// Owns mesh, flow-area and patch-sizing edits until the parent geometry save.
 /// Mesh generation is replayed in the parent's staged HDF context; this child
 /// never publishes a source file on its own.
@@ -164,6 +176,35 @@ final class GeometryMeshSession: ObservableObject {
               provider.modelRequest(for: asset) == model,
               provider.currentTopologyDraftState() == loadedTopologyDraftState else { return nil }
         return current.revision
+    }
+
+    /// Captures the current map-render owner only when its saved source SHA and
+    /// both parent-owned draft contexts still match the loaded Geometry child.
+    func plotRenderingOwnerCapture(for sourcePath: String,
+                                  expectedRevision: String) -> GeometryMeshPlotOwnerCapture? {
+        guard !isLoading, !isEditing, !isGeneratingMesh, !isComputingPropertyTables,
+              !isScanningDegreeErrors, !isSavingDiagnosticsPreferences,
+              !parentSaveInProgress,
+              let asset = currentAsset, let model = currentModel, let current = snapshot,
+              expectedSourceRevision == expectedRevision,
+              current.revision == expectedRevision,
+              SourceFilePaths.canonical(asset.url)
+                == SourceFilePaths.canonical(URL(fileURLWithPath: sourcePath)),
+              SourceFilePaths.canonical(URL(fileURLWithPath: model.assetPath))
+                == SourceFilePaths.canonical(URL(fileURLWithPath: sourcePath)),
+              provider.modelRequest(for: asset) == model else { return nil }
+        let topologyState = provider.currentTopologyDraftState()
+        guard topologyState == loadedTopologyDraftState,
+              !current.draftState.isEmpty else { return nil }
+        let meshDraftSHA256 = Self.hash(current.draftState)
+        let topologyDraftSHA256 = Self.hash(topologyState ?? "")
+        let ownerIdentity = [SourceFilePaths.canonical(asset.url), model.kind,
+            model.projectPath ?? "", Self.hash(model.projectXml ?? ""), current.revision,
+            meshDraftSHA256, topologyDraftSHA256].joined(separator: "|")
+        return GeometryMeshPlotOwnerCapture(model: model, sourceRevision: current.revision,
+            meshDraftState: current.draftState, topologyDraftState: topologyState,
+            meshDraftSHA256: meshDraftSHA256, topologyDraftSHA256: topologyDraftSHA256,
+            ownerIdentity: ownerIdentity)
     }
 
     var flowAreas: [GeometryMeshFlowAreaRow] { snapshot?.flowAreas ?? [] }

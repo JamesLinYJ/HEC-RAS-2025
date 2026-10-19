@@ -181,6 +181,7 @@ final class ProjectGeometryMapSession: ObservableObject {
     private var viewportTask: Task<Void, Never>?
     private var generation: UInt64 = 0
     private var flowAreaVisibilitySuppressions: Set<FlowAreaVisibilitySuppression> = []
+    private var geometryPlotSessions: [String: GeometryMeshPlotSession] = [:]
 
     var canRefreshSources: Bool { isConfigured && map != nil && provider != nil }
     var visiblePoints: [MapPoint] { sources.flatMap(\.visiblePoints) }
@@ -204,17 +205,62 @@ final class ProjectGeometryMapSession: ObservableObject {
         sources.contains { $0.snapshot == nil || $0.error != nil || $0.hasNextPage }
     }
 
+    /// Returns the runtime-only plot owner for one current Geometry capture.
+    /// An unavailable result is inert; stale details views cannot create a
+    /// renderer after their map owner has been retired.
+    func geometryPlotSession(for captureIdentity: String) -> GeometryMeshPlotSession {
+        guard isConfigured,
+              sources.contains(where: { $0.capture.identity == captureIdentity }) else {
+            return .retiredSession
+        }
+        if let existing = geometryPlotSessions[captureIdentity] { return existing }
+        let plotSession = GeometryMeshPlotSession(owner: self, captureIdentity: captureIdentity)
+        plotSession.onChange = { [weak self] in
+            guard let self, self.geometryPlotSessions[captureIdentity] === plotSession else { return }
+            self.renderRevision &+= 1
+        }
+        geometryPlotSessions[captureIdentity] = plotSession
+        return plotSession
+    }
+
+    /// Confirms that both the current map lease and source snapshot still
+    /// match the capture before a backend request or reply is accepted.
+    func ownsPlotSnapshot(_ source: ProjectGeometryMapSourceState) -> Bool {
+        guard isConfigured,
+              mapWorkflowIdentity == source.capture.mapWorkflowIdentity,
+              let map,
+              map.mapID == source.capture.mapID.uuidString,
+              map.projectPath == source.capture.map.projectPath,
+              map.projectXmlSHA.caseInsensitiveCompare(source.capture.map.projectXmlSHA) == .orderedSame,
+              let current = sources.first(where: { $0.capture.identity == source.capture.identity }),
+              current.capture == source.capture,
+              let currentSnapshot = current.snapshot,
+              let snapshot = source.snapshot else { return false }
+        return currentSnapshot.contextToken == snapshot.contextToken
+            && currentSnapshot.mapID == snapshot.mapID
+            && currentSnapshot.projectRevision == snapshot.projectRevision
+            && currentSnapshot.projectXmlSHA?.caseInsensitiveCompare(snapshot.projectXmlSHA ?? "") == .orderedSame
+            && currentSnapshot.visualizationRevision == snapshot.visualizationRevision
+            && currentSnapshot.geometryNode == snapshot.geometryNode
+            && currentSnapshot.geometryCanonicalPath == snapshot.geometryCanonicalPath
+            && currentSnapshot.geometryRevision == snapshot.geometryRevision
+    }
+
     func configure(map: MapTreeMapIdentity, workflowIdentity: String,
                    captures: [ProjectGeometryMapCapture],
                    provider: any ProjectGeometryMapProvider,
                    preflightDiagnostics: [String] = [],
                    isCurrent: @escaping @MainActor () -> Bool) async {
-        if self.mapWorkflowIdentity == workflowIdentity, isConfigured {
+        let requestedCaptureIdentities = Set(captures.map(\.identity))
+        let loadedCaptureIdentities = Set(sources.map { $0.capture.identity })
+        if self.mapWorkflowIdentity == workflowIdentity, isConfigured,
+           requestedCaptureIdentities == loadedCaptureIdentities {
             // Completed source pages remain in the MapState. An interrupted or
             // failed automatic drain resumes on re-entry unless the user paused it.
             if !isLoading && !isPaused && canContinuePaging { startPaging(clearTokens: false) }
             return
         }
+        retireGeometryPlotSessions()
         cancel()
         self.map = map
         self.mapWorkflowIdentity = workflowIdentity
@@ -238,6 +284,7 @@ final class ProjectGeometryMapSession: ObservableObject {
     }
 
     func invalidate() {
+        retireGeometryPlotSessions()
         cancel()
         isConfigured = false
         map = nil
@@ -259,6 +306,7 @@ final class ProjectGeometryMapSession: ObservableObject {
     }
 
     func reportConfigurationError(_ message: String) {
+        retireGeometryPlotSessions()
         cancel()
         map = nil
         mapWorkflowIdentity = nil
@@ -282,6 +330,12 @@ final class ProjectGeometryMapSession: ObservableObject {
         viewportTask = nil
         isLoading = false
         for index in sources.indices { sources[index].isLoading = false }
+    }
+
+    private func retireGeometryPlotSessions() {
+        let sessions = Array(geometryPlotSessions.values)
+        geometryPlotSessions.removeAll()
+        for plotSession in sessions { plotSession.retire() }
     }
 
     func refresh() async {

@@ -927,6 +927,14 @@ final class GeometryTopologySession: ObservableObject {
         await submit(.init(operation: "createTag", featureKind: featureKind, featureIDs: [], tagName: name, tagType: type))
     }
 
+    @discardableResult
+    func editMetadataColumn(operation: GeometryTopologyMetadataColumnOperation,
+                            featureKind: GeometryTopologyMetadataColumnKind,
+                            fieldID: String, value: String? = nil) async -> Bool {
+        await submit(.init(operation: operation.rawValue, featureKind: featureKind.rawValue,
+            featureIDs: [], fieldID: fieldID, value: value))
+    }
+
     func setTag(featureKind: String, featureIDs: [Int], name: String, value: String) async {
         await submit(.init(operation: "setTag", featureKind: featureKind, featureIDs: featureIDs, tagName: name, tagValue: value))
     }
@@ -1083,6 +1091,89 @@ final class GeometryTopologySession: ObservableObject {
             self.error = error.localizedDescription
             didLoad = false
         }
+    }
+
+    /// Reads real Shapefile features against this exact parent topology draft.
+    /// The source reader returns coordinates in the project's world space.
+    func inspectVectorImport(paths: [String]) async throws -> GeometryVectorImportInspection {
+        guard canMutateTopology, !parentSaveInProgress,
+              let capture = toolRequestCapture() else {
+            throw GeometryVectorImportSessionError.parentUnavailable
+        }
+        guard !paths.isEmpty, Set(paths).count == paths.count else {
+            throw GeometryVectorImportSessionError.invalidSelection
+        }
+        isEditing = true
+        error = nil
+        defer { if capture.loadGeneration == loadGeneration { isEditing = false } }
+
+        let request = GeometryVectorImportInspectRequest(model: capture.model,
+            revision: capture.sourceRevision, draftState: capture.draftState,
+            draftIdentity: capture.draftIdentity, paths: paths)
+        let inspection = try await provider.inspectVectorImport(request)
+        guard toolCaptureIsCurrent(capture), !Task.isCancelled else {
+            throw GeometryVectorImportSessionError.staleContext
+        }
+        guard inspection.revision == capture.sourceRevision,
+              inspection.draftIdentity == capture.draftIdentity,
+              Set(inspection.sources.map(\.path)).count == inspection.sources.count,
+              inspection.sources.allSatisfy({ source in
+                  source.family.family == "shapefile" && source.path == source.family.sourcePath
+                      && !source.path.isEmpty && source.featureCount == source.features.count
+                      && source.features.allSatisfy({ feature in
+                          ["polyline", "polygon"].contains(feature.geometryType)
+                              && feature.points.allSatisfy { $0.x.isFinite && $0.y.isFinite }
+                      })
+              }) else {
+            throw GeometryVectorImportSessionError.invalidResponse
+        }
+        return inspection
+    }
+
+    /// Re-reads the inspected file families, then records their actual
+    /// project-space coordinates as one replayable parent topology mutation.
+    @discardableResult
+    func applyVectorImport(_ inspection: GeometryVectorImportInspection,
+                           sourcePaths: [String], options: GeometryVectorImportOptions) async throws -> Bool {
+        guard canMutateTopology, !parentSaveInProgress,
+              let capture = toolRequestCapture() else {
+            throw GeometryVectorImportSessionError.parentUnavailable
+        }
+        guard !sourcePaths.isEmpty, Set(sourcePaths).count == sourcePaths.count,
+              inspection.revision == capture.sourceRevision,
+              inspection.draftIdentity == capture.draftIdentity,
+              toolCaptureIsCurrent(capture) else {
+            throw GeometryVectorImportSessionError.staleContext
+        }
+        let byPath = Dictionary(uniqueKeysWithValues: inspection.sources.map { ($0.path, $0) })
+        guard sourcePaths.allSatisfy({ byPath[$0] != nil }) else {
+            throw GeometryVectorImportSessionError.invalidSelection
+        }
+        let sources = sourcePaths.compactMap { path -> GeometryVectorImportSelectedSource? in
+            guard let source = byPath[path] else { return nil }
+            return GeometryVectorImportSelectedSource(path: source.path, family: source.family)
+        }
+
+        isEditing = true
+        error = nil
+        defer { if capture.loadGeneration == loadGeneration { isEditing = false } }
+        let request = GeometryVectorImportApplyRequest(model: capture.model,
+            revision: capture.sourceRevision, draftState: capture.draftState,
+            draftIdentity: capture.draftIdentity, sources: sources,
+            mode: options.mode.rawValue, mergeContiguousArcs: options.mergeContiguousArcs,
+            removeExternalArcs: options.removeExternalArcs)
+        let updated = try await provider.applyVectorImport(request)
+        guard toolCaptureIsCurrent(capture), !Task.isCancelled else {
+            throw GeometryVectorImportSessionError.staleContext
+        }
+        guard updated.revision == capture.sourceRevision, updated.isDirty,
+              updated.draftState != capture.draftState else {
+            throw GeometryVectorImportSessionError.invalidResponse
+        }
+        accept(updated)
+        invalidateToolQueriesAfterDraftChange()
+        onParentDraftChange(updated.isDirty)
+        return true
     }
 
     @discardableResult

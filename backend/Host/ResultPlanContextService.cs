@@ -8,7 +8,7 @@ using Ras.Layers.Results;
 namespace Ras.Backend;
 
 public sealed record ResultPlanContextRequest(string ProjectPath, string ProjectXml,
-    string ResultPath, string Revision);
+    string ResultPath, string Revision, CoreLayerRequestContext? CoreLayerContext = null);
 
 public sealed record ResultPlanPropertyItem(string Label, string Value, bool IsLocalizedValue = false);
 public sealed record ResultPlanPropertyGroup(string Title, ResultPlanPropertyItem[] Items);
@@ -34,7 +34,7 @@ public sealed record ResultPlanContextSnapshot(string ProjectPath, string Projec
 public static class ResultPlanContextService
 {
     public static ResultPlanContextSnapshot Inspect(string projectPath, string projectXml,
-        string resultPath, string revision)
+        string resultPath, string revision, CoreLayerRequestContext? coreLayerContext = null)
     {
         if (string.IsNullOrWhiteSpace(projectPath) || !Path.IsPathFullyQualified(projectPath))
             throw new ArgumentException("Open a saved project before linking its results.");
@@ -67,11 +67,10 @@ public static class ResultPlanContextService
         // Keep the caller's normalized, user-visible path as the Project base
         // so relative model/result references resolve from the same directory.
         // The physical canonical path above is for file identity and hashing only.
-        Project project = new(normalizedProjectPath);
+        Project project = CoreLayerImportService.OpenProjectWithMetadata(normalizedProjectPath,
+            metadata, coreLayerContext);
         try
         {
-            project.ApplyEditorMetadata(metadata);
-
             Result[] matchingAnchors = project.Results.Where(candidate =>
                 !string.IsNullOrWhiteSpace(candidate.Filename)
                 && SourceFilePaths.SameSourceFile(candidate.Filename, canonicalResultPath)).ToArray();

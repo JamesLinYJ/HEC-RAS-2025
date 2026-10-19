@@ -27,7 +27,8 @@ public sealed record MapDocumentRequest(
     string? InitialGeometryPath = null,
     string? InitialGeometryRevision = null,
     string? InitialPlanPath = null,
-    string? InitialPlanRevision = null);
+    string? InitialPlanRevision = null,
+    CoreLayerRequestContext? CoreLayerContext = null);
 
 public sealed record MapDocumentMutationReceipt(
     int MapIndex,
@@ -67,7 +68,10 @@ public sealed record MapTreeRequest(
     string MapType,
     string? ExpectedVisualizationRevision,
     MapTreeResultSelectionOverride[]? ResultSelectionOverrides = null,
-    MapResultComputeReadLease? ComputeReadLease = null);
+    MapResultComputeReadLease? ComputeReadLease = null,
+    string? ProjectSessionID = null,
+    CoreLayerReferenceCapture[]? ExternalCoreLayerReferences = null,
+    CoreLayerRequestContext? CoreLayerContext = null);
 
 public sealed record MapTreeResultSelectionOverride(
     string PlanAssetID,
@@ -115,7 +119,7 @@ public static partial class MapTreeService
     private static readonly HashSet<string> CheckableNodeTypes = new(StringComparer.Ordinal)
     {
         "Geometry", "Result", "MultiResult", "Terrain", "BoundaryCondition", "WindLayer",
-        "NValue", "Classification", "Feature", "MapLayer", "ConceptualMesh",
+        "NValue", "Classification", "Feature", "MapLayer", "GdbDataset", "GdbVectorLayer", "ConceptualMesh",
         "FlowAreaLayer", "CulvertBarrelLayer"
     };
     private static readonly HashSet<string> TransientTerrainInputSourceClasses = new(StringComparer.Ordinal)
@@ -158,7 +162,10 @@ public static partial class MapTreeService
             (hasInitialPlanPath && request.Kind != "Plan"))
             throw new ArgumentException("An initial Plan selection requires both its source path and revision and is available only for Plan maps.");
         using var context = Open(request.ProjectPath, request.ProjectXml, request.ProjectXmlSHA,
-            request.ExpectedVisualizationRevision, allowMissing: true);
+            request.ExpectedVisualizationRevision, allowMissing: true,
+            projectSessionID: request.CoreLayerContext?.ProjectSessionID,
+            externalCoreLayerReferences: request.CoreLayerContext?.References,
+            coreLayerContext: request.CoreLayerContext);
         XElement maps = EnsureMaps(context.Visualization.Root!);
         var currentMaps = maps.Elements("Map").ToArray();
         string name = request.Name is null ? NextMapName(currentMaps) : ValidateName(request.Name, "map");
@@ -200,7 +207,10 @@ public static partial class MapTreeService
             throw new ArgumentException("The saved map identity is incomplete.");
         string name = ValidateName(request.NewName ?? "", "map");
         using var context = Open(request.ProjectPath, request.ProjectXml, request.ProjectXmlSHA,
-            request.ExpectedVisualizationRevision, allowMissing: false);
+            request.ExpectedVisualizationRevision, allowMissing: false,
+            projectSessionID: request.CoreLayerContext?.ProjectSessionID,
+            externalCoreLayerReferences: request.CoreLayerContext?.References,
+            coreLayerContext: request.CoreLayerContext);
         XElement map = ResolveMap(context.Visualization, mapIndex, request.MapName, request.MapType);
         XElement[] maps = context.Visualization.Root!.Element("Maps")!.Elements("Map").ToArray();
         string previousName = request.MapName;
@@ -226,7 +236,10 @@ public static partial class MapTreeService
         if (request.MapIndex is not int mapIndex || request.MapName is null || request.MapType is null)
             throw new ArgumentException("The saved map identity is incomplete.");
         using var context = Open(request.ProjectPath, request.ProjectXml, request.ProjectXmlSHA,
-            request.ExpectedVisualizationRevision, allowMissing: false);
+            request.ExpectedVisualizationRevision, allowMissing: false,
+            projectSessionID: request.CoreLayerContext?.ProjectSessionID,
+            externalCoreLayerReferences: request.CoreLayerContext?.References,
+            coreLayerContext: request.CoreLayerContext);
         XElement mapsElement = context.Visualization.Root!.Element("Maps") ?? throw new SourceFileChangedException();
         XElement[] maps = mapsElement.Elements("Map").ToArray();
         XElement map = ResolveMap(context.Visualization, mapIndex, request.MapName, request.MapType);
@@ -257,7 +270,10 @@ public static partial class MapTreeService
         ArgumentNullException.ThrowIfNull(request.Map);
         MapDocumentRequest owner = request.Map;
         using var context = Open(owner.ProjectPath, owner.ProjectXml, owner.ProjectXmlSHA,
-            owner.ExpectedVisualizationRevision, allowMissing: owner.MapIndex is null);
+            owner.ExpectedVisualizationRevision, allowMissing: owner.MapIndex is null,
+            projectSessionID: owner.CoreLayerContext?.ProjectSessionID,
+            externalCoreLayerReferences: owner.CoreLayerContext?.References,
+            coreLayerContext: owner.CoreLayerContext);
         if (!context.ProjectRevision.Equals(request.ExpectedProjectRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
         VerifyImportSourceIdentity(request);
@@ -306,7 +322,10 @@ public static partial class MapTreeService
         ArgumentNullException.ThrowIfNull(request.ExpectedFamily);
         MapDocumentRequest owner = request.Map;
         using var context = Open(owner.ProjectPath, owner.ProjectXml, owner.ProjectXmlSHA,
-            owner.ExpectedVisualizationRevision, allowMissing: owner.MapIndex is null);
+            owner.ExpectedVisualizationRevision, allowMissing: owner.MapIndex is null,
+            projectSessionID: owner.CoreLayerContext?.ProjectSessionID,
+            externalCoreLayerReferences: owner.CoreLayerContext?.References,
+            coreLayerContext: owner.CoreLayerContext);
         if (!context.ProjectRevision.Equals(request.ExpectedProjectRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
 
@@ -359,7 +378,10 @@ public static partial class MapTreeService
             SourceFilePaths.Canonical(request.ProjectPath));
         MapTreeRequest scopedRequest = request with { ComputeReadLease = readLease?.Lease };
         using var context = Open(scopedRequest.ProjectPath, scopedRequest.ProjectXml, scopedRequest.ProjectXmlSHA,
-            scopedRequest.ExpectedVisualizationRevision, allowMissing: false);
+            scopedRequest.ExpectedVisualizationRevision, allowMissing: false,
+            projectSessionID: scopedRequest.ProjectSessionID,
+            externalCoreLayerReferences: scopedRequest.ExternalCoreLayerReferences,
+            coreLayerContext: scopedRequest.CoreLayerContext);
         XElement map = ResolveMap(context.Visualization, scopedRequest.MapIndex,
             scopedRequest.MapName, scopedRequest.MapType);
         var tree = BuildTree(scopedRequest, map);
@@ -373,7 +395,10 @@ public static partial class MapTreeService
         if (request.Map.ComputeReadLease is not null)
             throw new SourceFileChangedException();
         using var context = Open(request.Map.ProjectPath, request.Map.ProjectXml, request.Map.ProjectXmlSHA,
-            request.Map.ExpectedVisualizationRevision, allowMissing: false);
+            request.Map.ExpectedVisualizationRevision, allowMissing: false,
+            projectSessionID: request.Map.ProjectSessionID,
+            externalCoreLayerReferences: request.Map.ExternalCoreLayerReferences,
+            coreLayerContext: request.Map.CoreLayerContext);
         XElement map = ResolveMap(context.Visualization, request.Map.MapIndex, request.Map.MapName, request.Map.MapType);
         if (request.Map.ResultSelectionOverrides is { Length: > 0 })
             _ = BuildTree(request.Map, map);
@@ -387,6 +412,8 @@ public static partial class MapTreeService
             "focusGeometry" => FocusGeometry(context, map, request.SourcePath, request.SourceRevision),
             "focusPlan" => FocusPlan(context, request.Map, map, request.SourcePath, request.SourceRevision),
             "addGeometry" => AddGeometry(context, map, request.SourcePath, request.SourceRevision),
+            "addBoundaryCondition" => AddBoundaryCondition(context, request.Map, map,
+                request.SourcePath, request.SourceRevision),
             "addResult" => AddResult(context, request.Map, map, request.SourcePath, request.SourceRevision),
             "addGeoJSONVector" => AddGeoJSONVector(context, map, request.SourcePath, request.SourceRevision),
             "setResultMapType" => SetResultMapType(map, request.Name ?? ""),
@@ -402,8 +429,22 @@ public static partial class MapTreeService
         if (request.SourcePath is { Length: > 0 } sourcePath && request.SourceRevision is { Length: > 0 } sourceRevision)
         {
             string canonicalSource = CanonicalPath(sourcePath);
-            if (!File.Exists(canonicalSource) || !RevisionFile(canonicalSource).Equals(sourceRevision, StringComparison.OrdinalIgnoreCase))
+            bool isRasterMapLayerRemoval = request.Action == "removeSourceNode" &&
+                request.Node is { NodeType: "MapLayer", MapType: { } mapLayerType } &&
+                MapRasterLayerRendering.SupportedTypes.Contains(mapLayerType, StringComparer.Ordinal);
+            if (Directory.Exists(canonicalSource) &&
+                string.Equals(Path.GetExtension(canonicalSource), ".gdb", StringComparison.OrdinalIgnoreCase))
+            {
+                GdbMapSourceIdentity gdb = GdbMapSourceService.CaptureSource(canonicalSource);
+                if (!string.Equals(gdb.Revision, sourceRevision, StringComparison.OrdinalIgnoreCase))
+                    throw new SourceFileChangedException();
+            }
+            else if (!File.Exists(canonicalSource) || (isRasterMapLayerRemoval
+                         ? !MapRasterLayerSourceManifest.Matches(canonicalSource, sourceRevision)
+                         : !RevisionFile(canonicalSource).Equals(sourceRevision, StringComparison.OrdinalIgnoreCase)))
+            {
                 throw new SourceFileChangedException();
+            }
         }
         string newRevision = changed ? Commit(context) : context.PreviousVisualizationRevision!;
         MapTreeResultSelectionOverride[]? refreshedSelections = request.Map.ResultSelectionOverrides;
@@ -416,7 +457,10 @@ public static partial class MapTreeService
             ResultSelectionOverrides = refreshedSelections
         };
         using var refreshed = Open(refreshedRequest.ProjectPath, refreshedRequest.ProjectXml,
-            refreshedRequest.ProjectXmlSHA, refreshedRequest.ExpectedVisualizationRevision, allowMissing: false);
+            refreshedRequest.ProjectXmlSHA, refreshedRequest.ExpectedVisualizationRevision, allowMissing: false,
+            projectSessionID: refreshedRequest.ProjectSessionID,
+            externalCoreLayerReferences: refreshedRequest.ExternalCoreLayerReferences,
+            coreLayerContext: refreshedRequest.CoreLayerContext);
         XElement refreshedMap = ResolveMap(refreshed.Visualization, refreshedRequest.MapIndex,
             refreshedRequest.MapName, refreshedRequest.MapType);
         var tree = BuildTree(refreshedRequest, refreshedMap);
@@ -432,7 +476,10 @@ public static partial class MapTreeService
         ArgumentNullException.ThrowIfNull(locator);
         ArgumentNullException.ThrowIfNull(update);
         using var context = Open(request.ProjectPath, request.ProjectXml, request.ProjectXmlSHA,
-            request.ExpectedVisualizationRevision, allowMissing: false);
+            request.ExpectedVisualizationRevision, allowMissing: false,
+            projectSessionID: request.ProjectSessionID,
+            externalCoreLayerReferences: request.ExternalCoreLayerReferences,
+            coreLayerContext: request.CoreLayerContext);
         XElement map = ResolveMap(context.Visualization, request.MapIndex, request.MapName, request.MapType);
         var beforeTree = BuildTree(request, map);
         CatalogTreeNode target = FindExactNode(beforeTree.Roots, locator);
@@ -471,7 +518,10 @@ public static partial class MapTreeService
 
         var refreshedRequest = request with { ExpectedVisualizationRevision = newRevision };
         using var refreshed = Open(refreshedRequest.ProjectPath, refreshedRequest.ProjectXml,
-            refreshedRequest.ProjectXmlSHA, refreshedRequest.ExpectedVisualizationRevision, allowMissing: false);
+            refreshedRequest.ProjectXmlSHA, refreshedRequest.ExpectedVisualizationRevision, allowMissing: false,
+            projectSessionID: refreshedRequest.ProjectSessionID,
+            externalCoreLayerReferences: refreshedRequest.ExternalCoreLayerReferences,
+            coreLayerContext: refreshedRequest.CoreLayerContext);
         XElement refreshedMap = ResolveMap(refreshed.Visualization, refreshedRequest.MapIndex,
             refreshedRequest.MapName, refreshedRequest.MapType);
         var tree = BuildTree(refreshedRequest, refreshedMap);
@@ -708,7 +758,10 @@ public static partial class MapTreeService
                 if (locator.ParentPlanAssetID is not { Length: > 0 })
                 {
                     using var resultContext = Open(request.ProjectPath, request.ProjectXml,
-                        request.ProjectXmlSHA, request.ExpectedVisualizationRevision, allowMissing: false);
+                        request.ProjectXmlSHA, request.ExpectedVisualizationRevision, allowMissing: false,
+            projectSessionID: request.CoreLayerContext?.ProjectSessionID,
+            externalCoreLayerReferences: request.CoreLayerContext?.References,
+            coreLayerContext: request.CoreLayerContext);
                     ProjectResultIdentity selectedResult = ReadProjectResult(resultContext,
                         locator.ParentResultAssetID, locator.ParentResultRevision);
                     if (selectedResult.PlanAssetPath is null ||
@@ -766,7 +819,7 @@ public static partial class MapTreeService
             if (planResult.PlanName is null || planResult.PlanAssetPath is null || planResult.SamePlanNameCount != 1)
                 return false;
             string[] focusedPlanIDs = SerializedPlanAssetIDs(context.ProjectAliasPath, context.ProjectXml,
-                map, "Focused Plans");
+                map, "Focused Plans", context.CoreLayerContext);
             bool belongsToFocusedPlan = focusedPlanIDs.Any(assetID => PathEquals(assetID, planResult.PlanAssetPath));
             if (!belongsToFocusedPlan) return false;
 
@@ -800,7 +853,7 @@ public static partial class MapTreeService
             return !XNode.DeepEquals(before, map);
         }
         if (mapType is not ("Buildable" or "Geometry"))
-            throw new NotSupportedException("Only Buildable, Geometry and Plan maps accept source result updates.");
+            throw new NotSupportedException("Only Buildable and Geometry maps accept source result updates.");
         ProjectResultIdentity result = ReadProjectResult(context, sourcePath, sourceRevision);
         string nodeType = result.PlanName is null ? "Result" : "MultiResult";
         string nodeName = result.PlanName ?? result.Name;
@@ -915,9 +968,15 @@ public static partial class MapTreeService
         MapTreeResultSelectionOverride[]? resultSelectionOverrides = null)
     {
         CatalogTreeNode[] defaults = CatalogTreeService.LoadMapTreeDefaults(new CatalogTreeRequest(
-            context.ProjectAliasPath, context.ProjectXml, FocusedPlanIds: focusedPlanIDs), "Plan");
+            context.ProjectAliasPath, context.ProjectXml, FocusedPlanIds: focusedPlanIDs,
+            ProjectSessionID: context.ProjectSessionID,
+            ExternalCoreLayerReferences: context.ExternalCoreLayerReferences,
+            CoreLayerContext: context.CoreLayerContext), "Plan");
         CatalogTreeNode[] projectDefaults = CatalogTreeService.LoadMapTreeDefaults(new CatalogTreeRequest(
-            context.ProjectAliasPath, context.ProjectXml, "Project"), "Project");
+            context.ProjectAliasPath, context.ProjectXml, "Project",
+            ProjectSessionID: context.ProjectSessionID,
+            ExternalCoreLayerReferences: context.ExternalCoreLayerReferences,
+            CoreLayerContext: context.CoreLayerContext), "Project");
         CatalogTreeNode[] projectResults = Descendants(projectDefaults
             .Where(root => root.Name == "Results").SelectMany(root => root.Children ?? [])).ToArray();
         CatalogTreeNode[] resultCandidates = projectResults
@@ -931,13 +990,20 @@ public static partial class MapTreeService
         string? sourceRevision)
     {
         string mapType = (string?)map.Attribute("Type") ?? "";
-        if (mapType is not ("Buildable" or "Geometry"))
-            throw new NotSupportedException("Only Buildable and Geometry maps accept added Geometry entries.");
+        if (mapType is not ("Project" or "Buildable" or "Geometry" or "Plan"))
+            throw new NotSupportedException("The current map tree does not accept added Geometry entries.");
         ProjectGeometryIdentity geometry = ResolveProjectGeometry(context, sourcePath, sourceRevision);
         Dictionary<string, XElement>? associationStates = mapType == "Geometry"
             ? CaptureGeometryAssociationStates(context, map) : null;
-        GeometryMapRootElements roots = EnsureGeometryMapRoots(map);
-        XElement root = mapType == "Geometry" ? roots.Focused ?? throw new SourceFileChangedException() : roots.Layers;
+        XElement root = mapType switch
+        {
+            "Project" => EnsureUniqueRoot(EnsureTreeNodes(map), "Geometries"),
+            "Buildable" => EnsureGeometryMapRoots(map).Layers,
+            "Geometry" => EnsureGeometryMapRoots(map).Focused ?? throw new SourceFileChangedException(),
+            "Plan" => EnsurePlanMapRoots(map).Layers,
+            _ => throw new NotSupportedException("The current map tree does not accept added Geometry entries.")
+        };
+        XElement before = new(map);
         XElement[] matches = root.Descendants("Node")
             .Where(node => (string?)node.Attribute("Type") == "Geometry" &&
                 string.Equals((string?)node.Attribute("Name"), geometry.Name, StringComparison.Ordinal))
@@ -945,19 +1011,17 @@ public static partial class MapTreeService
         if (matches.Length > 1) throw new SourceFileChangedException();
         if (matches.Length == 1)
         {
-            if (mapType == "Buildable" && !ReadBool(matches[0], "IsChecked"))
-            {
-                matches[0].SetAttributeValue("IsChecked", true);
-                _ = ResolveProjectGeometry(context, geometry.AssetPath, geometry.Revision);
-                return true;
-            }
+            if (!ReadBool(matches[0], "IsChecked")) matches[0].SetAttributeValue("IsChecked", true);
+            if (mapType == "Geometry") SynchronizeGeometryMapRoots(context, map, associationStates);
             _ = ResolveProjectGeometry(context, geometry.AssetPath, geometry.Revision);
-            return false;
+            return !XNode.DeepEquals(before, map);
         }
 
         CatalogTreeNode defaultNode = ProjectGeometryDefault(context, mapType, geometry);
         XElement element = SerializeSourceDefault(defaultNode, existing: null, associationStates);
-        if (mapType == "Buildable") element.SetAttributeValue("IsChecked", true);
+        // GenericImports.TryImportH5FileAsync explicitly checks the returned
+        // Geometry node for every map type after RasTreeVMV2.AddGeometry.
+        element.SetAttributeValue("IsChecked", true);
         root.Add(element);
         if (mapType == "Geometry") SynchronizeGeometryMapRoots(context, map, associationStates);
         _ = ResolveProjectGeometry(context, geometry.AssetPath, geometry.Revision);
@@ -969,16 +1033,69 @@ public static partial class MapTreeService
     {
         string[] geometryIDs = [geometry.AssetPath];
         CatalogTreeNode[] defaults = CatalogTreeService.LoadMapTreeDefaults(new CatalogTreeRequest(
-            context.ProjectAliasPath, context.ProjectXml, FocusedGeometryIds: geometryIDs), mapType);
+            context.ProjectAliasPath, context.ProjectXml, FocusedGeometryIds: geometryIDs,
+            ProjectSessionID: context.ProjectSessionID,
+            ExternalCoreLayerReferences: context.ExternalCoreLayerReferences,
+            CoreLayerContext: context.CoreLayerContext), mapType);
         string rootName = mapType switch
         {
+            "Project" => "Geometries",
             "Geometry" => "Focused Geometries",
-            "Buildable" => "Layers",
+            "Buildable" or "Plan" => "Layers",
             _ => throw new NotSupportedException("The requested map type does not own Geometry rows.")
         };
         CatalogTreeNode[] matches = Descendants(defaults.Single(root => root.Name == rootName).Children ?? [])
             .Where(node => SourceNodeType(node.SourceClass) == "Geometry" &&
                 node.AssetID is { } path && PathEquals(path, geometry.AssetPath))
+            .ToArray();
+        return matches.Length == 1 ? matches[0] : throw new SourceFileChangedException();
+    }
+
+    private static bool AddBoundaryCondition(OperationContext context, MapTreeRequest request, XElement map,
+        string? sourcePath, string? sourceRevision)
+    {
+        string mapType = (string?)map.Attribute("Type") ?? "";
+        if (mapType is not ("Project" or "Buildable" or "Geometry" or "Plan"))
+            throw new NotSupportedException("The current map tree does not accept added Boundary Condition entries.");
+
+        ProjectBoundaryConditionIdentity boundary = ResolveProjectBoundaryCondition(context, sourcePath,
+            sourceRevision);
+        string rootName = mapType == "Project" ? "Boundary Conditions" : "Layers";
+        if (mapType == "Geometry") _ = EnsureGeometryMapRoots(map);
+        else if (mapType == "Plan") _ = EnsurePlanMapRoots(map);
+        XElement root = EnsureUniqueRoot(EnsureTreeNodes(map), rootName);
+        XElement before = new(map);
+        XElement[] matches = root.Descendants("Node")
+            .Where(node => (string?)node.Attribute("Type") == "BoundaryCondition" &&
+                string.Equals((string?)node.Attribute("Name"), boundary.Name, StringComparison.Ordinal))
+            .ToArray();
+        if (matches.Length > 1) throw new SourceFileChangedException();
+        if (matches.Length == 0)
+        {
+            CatalogTreeNode sourceDefault = ProjectBoundaryConditionDefault(context, mapType, boundary);
+            root.Add(SerializeSourceDefault(sourceDefault, existing: null, associationStates: null));
+        }
+
+        // The retained AddReference call does not set BoundaryCondition.IsChecked;
+        // preserve its default state instead of forcing Geometry's visibility rule.
+        _ = ResolveProjectBoundaryCondition(context, boundary.AssetPath, boundary.Revision);
+        return !XNode.DeepEquals(before, map);
+    }
+
+    private static CatalogTreeNode ProjectBoundaryConditionDefault(OperationContext context, string mapType,
+        ProjectBoundaryConditionIdentity boundary)
+    {
+        string[] boundaryIDs = mapType == "Project" ? [] : [boundary.AssetPath];
+        CatalogTreeNode[] defaults = CatalogTreeService.LoadMapTreeDefaults(new CatalogTreeRequest(
+            context.ProjectAliasPath, context.ProjectXml, FocusedBoundaryConditionIds: boundaryIDs,
+            ProjectSessionID: context.ProjectSessionID,
+            ExternalCoreLayerReferences: context.ExternalCoreLayerReferences,
+            CoreLayerContext: context.CoreLayerContext), mapType);
+        string rootName = mapType == "Project" ? "Boundary Conditions" : "Layers";
+        CatalogTreeNode[] matches = Descendants(defaults.Single(root => root.Name == rootName).Children ?? [])
+            .Where(node => SourceNodeType(node.SourceClass) == "BoundaryCondition" &&
+                node.AssetID is { } path && PathEquals(path, boundary.AssetPath) &&
+                string.Equals(node.Name, boundary.Name, StringComparison.Ordinal))
             .ToArray();
         return matches.Length == 1 ? matches[0] : throw new SourceFileChangedException();
     }
@@ -1288,12 +1405,20 @@ public static partial class MapTreeService
             case "MapLayer":
             {
                 string mapType = (string?)node.Attribute("MapType") ?? "";
-                bool isRaster = mapType == "SingleBandRasterMapLayer";
+                bool isRaster = MapRasterLayerRendering.SupportedTypes.Contains(mapType, StringComparer.Ordinal);
                 if (!isRaster && !SupportedGeoJsonVectorTypes.Contains(mapType))
                     throw new NotSupportedException("This source map layer type does not support removal through this action.");
+                if (isRaster && node.Parent is { } rasterParent &&
+                    (string?)rasterParent.Attribute("Type") == "GdbDataset")
+                {
+                    VerifyGdbRasterTreeNode(mapRequest, locator, node, rasterParent,
+                        sourcePath, sourceRevision);
+                    node.Remove();
+                    return true;
+                }
                 string projectDirectory = Path.GetDirectoryName(context.ProjectAliasPath)!;
                 string expectedPath = isRaster
-                    ? ResolveRasterMapSource(context, sourcePath, sourceRevision)
+                    ? ResolveRasterMapLayerSource(context, sourcePath, sourceRevision)
                     : ResolveGeoJSONSource(context, sourcePath, sourceRevision);
                 string? serializedPath = ResolveMapLayerPath(projectDirectory,
                     (string?)node.Attribute("FilenameRelative"), (string?)node.Attribute("Filename"));
@@ -1301,6 +1426,45 @@ public static partial class MapTreeService
                     !PathEquals(locator.AssetID ?? expectedPath, expectedPath) ||
                     locator.MapType != mapType)
                     throw new SourceFileChangedException();
+                break;
+            }
+            case "GdbDataset":
+            case "GdbVectorLayer":
+            {
+                if (locator.MapType != locator.NodeType ||
+                    locator.NodeType is not ("GdbDataset" or "GdbVectorLayer"))
+                    throw new SourceFileChangedException();
+                GdbMapSourceIdentity source = GdbMapSourceService.CaptureSource(
+                    sourcePath ?? throw new ArgumentException("The selected GDB source path is missing."));
+                if (sourceRevision is null ||
+                    !string.Equals(source.Revision, sourceRevision, StringComparison.OrdinalIgnoreCase) ||
+                    locator.AssetID is not { Length: > 0 } assetID || !PathEquals(assetID, source.SourcePath) ||
+                    !PathEquals(ResolveGdbMapLayerPath(Path.GetDirectoryName(context.ProjectAliasPath)!,
+                            (string?)node.Attribute("FilenameRelative"), (string?)node.Attribute("Filename")) ?? "",
+                        source.SourcePath))
+                    throw new SourceFileChangedException();
+                if (locator.NodeType == "GdbVectorLayer")
+                {
+                    MapSourceNodeLocation location = MapSourceIdentity.ResolvePersistedGdbNode(mapRequest, locator);
+                    if (!PathEquals(location.SourcePath, source.SourcePath) ||
+                        !string.Equals(location.GdbVectorType, (string?)node.Attribute("GdbVectorType"), StringComparison.Ordinal))
+                        throw new SourceFileChangedException();
+
+                    GdbMapCatalogResponse catalog = GdbMapSourceService.Catalog(
+                        new(source.SourcePath, source.Revision));
+                    GdbMapLayerDescriptor[] layers = catalog.Layers.Where(layer =>
+                        string.Equals(layer.Name, location.GdbLayerName, StringComparison.Ordinal)).ToArray();
+                    if (!SameGdbSource(source, catalog.Source) || layers.Length != 1 ||
+                        !string.Equals(layers[0].VectorType, location.GdbVectorType, StringComparison.Ordinal))
+                        throw new SourceFileChangedException();
+                }
+                else
+                {
+                    GdbMapCatalogResponse catalog = GdbMapSourceService.Catalog(
+                        new(source.SourcePath, source.Revision));
+                    if (!SameGdbSource(source, catalog.Source)) throw new SourceFileChangedException();
+                    VerifyGdbDatasetChildren(node, source, catalog);
+                }
                 break;
             }
             case "Result":
@@ -1341,11 +1505,10 @@ public static partial class MapTreeService
         string projectDirectory = Path.GetDirectoryName(context.ProjectAliasPath)!;
         string path = ResolveProjectOwnedFile(context, sourcePath, sourceRevision,
             Path.Combine(projectDirectory, "Results"), allowedExtensions: [".h5", ".hdf"]);
-        var project = new Project(context.ProjectAliasPath);
+        var project = CoreLayerImportService.OpenProject(context.ProjectAliasPath, context.ProjectXml,
+            context.CoreLayerContext);
         try
         {
-            if (context.ProjectXml is { } projectXml)
-                project.ApplyEditorMetadata(ParseXml(Encoding.UTF8.GetBytes(projectXml), MaximumProjectXmlBytes).Root!);
             Result[] matches = project.Results.Where(result =>
                 PathEquals(ProjectAssetPath(project, result.Filename), path)).ToArray();
             if (matches.Length != 1) throw new ArgumentException("The selected HDF file is not one unique Result owned by the current project.");
@@ -1427,11 +1590,10 @@ public static partial class MapTreeService
 
     private static bool IsExternalConnectionFile(OperationContext context, string canonicalPath)
     {
-        var project = new Project(context.ProjectAliasPath);
+        var project = CoreLayerImportService.OpenProject(context.ProjectAliasPath, context.ProjectXml,
+            context.CoreLayerContext);
         try
         {
-            if (context.ProjectXml is { } projectXml)
-                project.ApplyEditorMetadata(ParseXml(Encoding.UTF8.GetBytes(projectXml), MaximumProjectXmlBytes).Root!);
 
             foreach (ExternalConnectionBase connection in project.ConnectionSource.Connections)
             {
@@ -1480,6 +1642,7 @@ public static partial class MapTreeService
     private sealed record ProjectPlanIdentity(string Name, string AssetPath, string Revision);
 
     private sealed record ProjectGeometryIdentity(string Name, string AssetPath, string Revision);
+    private sealed record ProjectBoundaryConditionIdentity(string Name, string AssetPath, string Revision);
 
     private sealed record GeometryMapRootElements(XElement? Focused, XElement? Matching, XElement Layers);
     private sealed record PlanMapRootElements(XElement Focused, XElement Matching, XElement Layers);
@@ -1545,11 +1708,10 @@ public static partial class MapTreeService
         if (!actualRevision.Equals(sourceRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
 
-        var project = new Project(context.ProjectAliasPath);
+        var project = CoreLayerImportService.OpenProject(context.ProjectAliasPath, context.ProjectXml,
+            context.CoreLayerContext);
         try
         {
-            if (context.ProjectXml is { } projectXml)
-                project.ApplyEditorMetadata(ParseXml(Encoding.UTF8.GetBytes(projectXml), MaximumProjectXmlBytes).Root!);
             Geometry[] matches = project.Geometries.Where(geometry =>
                 PathEquals(ProjectGeometryAssetPath(project, geometry.Filename), displayPath)).ToArray();
             if (matches.Length != 1)
@@ -1560,6 +1722,46 @@ public static partial class MapTreeService
                     string.Equals(geometry.Name, selected.Name, StringComparison.Ordinal)) != 1)
                 throw new NotSupportedException("The current project has Geometry sources with the same serialized name; the saved map cannot distinguish them safely.");
             string assetPath = ProjectGeometryAssetPath(project, selected.Filename);
+            if (!PathEquals(assetPath, displayPath) ||
+                !RevisionFile(CanonicalPath(assetPath)).Equals(sourceRevision, StringComparison.OrdinalIgnoreCase))
+                throw new SourceFileChangedException();
+            return new(selected.Name, assetPath, sourceRevision);
+        }
+        finally
+        {
+            DisposeProject(project);
+        }
+    }
+
+    private static ProjectBoundaryConditionIdentity ResolveProjectBoundaryCondition(OperationContext context,
+        string? sourcePath, string? sourceRevision)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath) || !Path.IsPathFullyQualified(sourcePath))
+            throw new ArgumentException("The selected Boundary Condition source must use an absolute path.");
+        if (string.IsNullOrWhiteSpace(sourceRevision))
+            throw new ArgumentException("The selected Boundary Condition source revision is required.");
+
+        string displayPath = Path.GetFullPath(sourcePath);
+        string canonicalPath = CanonicalPath(displayPath);
+        if (!File.Exists(canonicalPath))
+            throw new FileNotFoundException("The selected Boundary Condition source was not found.", displayPath);
+        if (!RevisionFile(canonicalPath).Equals(sourceRevision, StringComparison.OrdinalIgnoreCase))
+            throw new SourceFileChangedException();
+
+        var project = CoreLayerImportService.OpenProject(context.ProjectAliasPath, context.ProjectXml,
+            context.CoreLayerContext);
+        try
+        {
+            BoundaryCondition[] matches = project.BoundaryConditions.Where(condition =>
+                PathEquals(ProjectAssetPath(project, condition.Filename), displayPath)).ToArray();
+            if (matches.Length != 1)
+                throw new ArgumentException("The selected source file is not one unique Boundary Condition owned by the current project session.");
+
+            BoundaryCondition selected = matches[0];
+            if (project.BoundaryConditions.Count(condition =>
+                    string.Equals(condition.Name, selected.Name, StringComparison.Ordinal)) != 1)
+                throw new NotSupportedException("The current project has Boundary Conditions with the same serialized name; the saved map cannot distinguish them safely.");
+            string assetPath = ProjectAssetPath(project, selected.Filename);
             if (!PathEquals(assetPath, displayPath) ||
                 !RevisionFile(CanonicalPath(assetPath)).Equals(sourceRevision, StringComparison.OrdinalIgnoreCase))
                 throw new SourceFileChangedException();
@@ -1585,11 +1787,10 @@ public static partial class MapTreeService
         if (!RevisionFile(canonicalPath).Equals(sourceRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
 
-        var project = new Project(context.ProjectAliasPath);
+        var project = CoreLayerImportService.OpenProject(context.ProjectAliasPath, context.ProjectXml,
+            context.CoreLayerContext);
         try
         {
-            if (context.ProjectXml is { } projectXml)
-                project.ApplyEditorMetadata(ParseXml(Encoding.UTF8.GetBytes(projectXml), MaximumProjectXmlBytes).Root!);
             Plan[] matches = project.Plans.Where(plan =>
                 PathEquals(ProjectPlanAssetPath(project, plan.Filename), displayPath)).ToArray();
             if (matches.Length != 1)
@@ -1613,11 +1814,10 @@ public static partial class MapTreeService
     private static ProjectPlanIdentity ResolveProjectPlanByName(OperationContext context, string name)
     {
         if (string.IsNullOrWhiteSpace(name)) throw new SourceFileChangedException();
-        var project = new Project(context.ProjectAliasPath);
+        var project = CoreLayerImportService.OpenProject(context.ProjectAliasPath, context.ProjectXml,
+            context.CoreLayerContext);
         try
         {
-            if (context.ProjectXml is { } projectXml)
-                project.ApplyEditorMetadata(ParseXml(Encoding.UTF8.GetBytes(projectXml), MaximumProjectXmlBytes).Root!);
             Plan[] matches = project.Plans.Where(plan => string.Equals(plan.Name, name, StringComparison.Ordinal)).ToArray();
             if (matches.Length != 1) throw new SourceFileChangedException();
             string assetPath = ProjectPlanAssetPath(project, matches[0].Filename);
@@ -1637,7 +1837,7 @@ public static partial class MapTreeService
     }
 
     private static string[] SerializedPlanAssetIDs(string projectPath, string? projectXml,
-        XElement map, string rootName)
+        XElement map, string rootName, CoreLayerRequestContext? coreLayerContext = null)
     {
         XElement nodes = map.Element("Tree")?.Element("Nodes") ?? new XElement("Nodes");
         XElement[] roots = nodes.Elements("Node").Where(node =>
@@ -1650,11 +1850,10 @@ public static partial class MapTreeService
         if (names.Any(string.IsNullOrWhiteSpace) || names.Distinct(StringComparer.Ordinal).Count() != names.Length)
             throw new SourceFileChangedException();
 
-        var project = new Project(Path.GetFullPath(projectPath));
+        var project = CoreLayerImportService.OpenProject(Path.GetFullPath(projectPath), projectXml,
+            coreLayerContext);
         try
         {
-            if (projectXml is { } xml)
-                project.ApplyEditorMetadata(ParseXml(Encoding.UTF8.GetBytes(xml), MaximumProjectXmlBytes).Root!);
             var result = new List<string>(names.Length);
             foreach (string name in names)
             {
@@ -1677,7 +1876,12 @@ public static partial class MapTreeService
     }
 
     private static string[] SerializedGeometryAssetIDs(MapTreeRequest request, XElement map, string rootName)
-        => SerializedGeometryAssetIDs(request.ProjectPath, request.ProjectXml, map, rootName);
+        => SerializedGeometryAssetIDs(request.ProjectPath, request.ProjectXml, map, rootName,
+            request.ProjectSessionID, request.ExternalCoreLayerReferences, request.CoreLayerContext);
+
+    private static string[] SerializedGeometryAssetIDs(OperationContext context, XElement map, string rootName)
+        => SerializedGeometryAssetIDs(context.ProjectAliasPath, context.ProjectXml, map, rootName,
+            context.ProjectSessionID, context.ExternalCoreLayerReferences, context.CoreLayerContext);
 
     private static string[] SerializedBoundaryConditionAssetIDs(MapTreeRequest request, XElement map,
         string rootName)
@@ -1695,11 +1899,10 @@ public static partial class MapTreeService
         if (names.Any(string.IsNullOrWhiteSpace) || names.Distinct(StringComparer.Ordinal).Count() != names.Length)
             throw new SourceFileChangedException();
 
-        var project = new Project(Path.GetFullPath(request.ProjectPath));
+        var project = CoreLayerImportService.OpenProject(request.ProjectPath, request.ProjectXml,
+            request.CoreLayerContext);
         try
         {
-            if (request.ProjectXml is { } projectXml)
-                project.ApplyEditorMetadata(ParseXml(Encoding.UTF8.GetBytes(projectXml), MaximumProjectXmlBytes).Root!);
             var result = new List<string>(names.Length);
             foreach (string name in names)
             {
@@ -1718,7 +1921,9 @@ public static partial class MapTreeService
     }
 
     private static string[] SerializedGeometryAssetIDs(string projectPath, string? projectXml,
-        XElement map, string rootName)
+        XElement map, string rootName, string? projectSessionID = null,
+        CoreLayerReferenceCapture[]? externalCoreLayerReferences = null,
+        CoreLayerRequestContext? coreLayerContext = null)
     {
         XElement nodes = map.Element("Tree")?.Element("Nodes") ?? new XElement("Nodes");
         XElement[] roots = nodes.Elements("Node").Where(node =>
@@ -1734,11 +1939,10 @@ public static partial class MapTreeService
         if (names.Distinct(StringComparer.Ordinal).Count() != names.Length)
             throw new SourceFileChangedException();
 
-        var project = new Project(Path.GetFullPath(projectPath));
+        var project = CoreLayerImportService.OpenProject(Path.GetFullPath(projectPath), projectXml,
+            coreLayerContext);
         try
         {
-            if (projectXml is { } xml)
-                project.ApplyEditorMetadata(ParseXml(Encoding.UTF8.GetBytes(xml), MaximumProjectXmlBytes).Root!);
             var result = new List<string>(names.Length);
             foreach (string name in names)
             {
@@ -1768,10 +1972,12 @@ public static partial class MapTreeService
 
     private static Dictionary<string, XElement> CaptureGeometryAssociationStates(OperationContext context, XElement map)
     {
-        string[] focusedIDs = SerializedGeometryAssetIDs(context.ProjectAliasPath, context.ProjectXml,
-            map, "Focused Geometries");
+        string[] focusedIDs = SerializedGeometryAssetIDs(context, map, "Focused Geometries");
         CatalogTreeNode[] defaults = CatalogTreeService.LoadMapTreeDefaults(new CatalogTreeRequest(
-            context.ProjectAliasPath, context.ProjectXml, FocusedGeometryIds: focusedIDs), "Geometry");
+            context.ProjectAliasPath, context.ProjectXml, FocusedGeometryIds: focusedIDs,
+            ProjectSessionID: context.ProjectSessionID,
+            ExternalCoreLayerReferences: context.ExternalCoreLayerReferences,
+            CoreLayerContext: context.CoreLayerContext), "Geometry");
         var states = new Dictionary<string, XElement>(StringComparer.Ordinal);
         CatalogTreeNode focusedRoot = defaults.Single(node => node.Name == "Focused Geometries");
         XElement? focusedElement = FindUniqueRoot(map, "Focused Geometries");
@@ -1820,7 +2026,7 @@ public static partial class MapTreeService
         MapTreeRequest? request = null)
     {
         string[] focusedIDs = SerializedPlanAssetIDs(context.ProjectAliasPath, context.ProjectXml,
-            map, "Focused Plans");
+            map, "Focused Plans", context.CoreLayerContext);
         CatalogTreeNode[] defaults = PreparedPlanDefaults(context, focusedIDs, request?.ResultSelectionOverrides);
         var states = new Dictionary<string, XElement>(StringComparer.Ordinal);
         CatalogTreeNode focusedRoot = defaults.Single(node => node.Name == "Focused Plans");
@@ -1871,7 +2077,7 @@ public static partial class MapTreeService
     {
         PlanMapRootElements roots = EnsurePlanMapRoots(map);
         string[] focusedIDs = SerializedPlanAssetIDs(context.ProjectAliasPath, context.ProjectXml,
-            map, "Focused Plans");
+            map, "Focused Plans", context.CoreLayerContext);
         CatalogTreeNode[] defaults = PreparedPlanDefaults(context, focusedIDs, resultSelectionOverrides);
         CatalogTreeNode focusedDefault = defaults.Single(node => node.Name == "Focused Plans");
         foreach (CatalogTreeNode plan in focusedDefault.Children ?? [])
@@ -1927,10 +2133,12 @@ public static partial class MapTreeService
         GeometryMapRootElements roots = EnsureGeometryMapRoots(map);
         XElement focused = roots.Focused ?? throw new SourceFileChangedException();
         XElement matching = roots.Matching ?? throw new SourceFileChangedException();
-        string[] focusedIDs = SerializedGeometryAssetIDs(context.ProjectAliasPath, context.ProjectXml,
-            map, "Focused Geometries");
+        string[] focusedIDs = SerializedGeometryAssetIDs(context, map, "Focused Geometries");
         CatalogTreeNode[] defaults = CatalogTreeService.LoadMapTreeDefaults(new CatalogTreeRequest(
-            context.ProjectAliasPath, context.ProjectXml, FocusedGeometryIds: focusedIDs), "Geometry");
+            context.ProjectAliasPath, context.ProjectXml, FocusedGeometryIds: focusedIDs,
+            ProjectSessionID: context.ProjectSessionID,
+            ExternalCoreLayerReferences: context.ExternalCoreLayerReferences,
+            CoreLayerContext: context.CoreLayerContext), "Geometry");
         CatalogTreeNode defaultFocused = defaults.Single(node => node.Name == "Focused Geometries");
         foreach (CatalogTreeNode geometry in defaultFocused.Children ?? [])
         {
@@ -1983,21 +2191,29 @@ public static partial class MapTreeService
         {
             "Buildable" => SerializedGeometryAssetIDs(request, map, "Layers"),
             "Geometry" => SerializedGeometryAssetIDs(request, map, "Focused Geometries"),
+            "Plan" => SerializedGeometryAssetIDs(request, map, "Layers"),
             _ => []
         };
         string[] focusedPlanIDs = request.MapType == "Plan"
-            ? SerializedPlanAssetIDs(request.ProjectPath, request.ProjectXml, map, "Focused Plans")
+            ? SerializedPlanAssetIDs(request.ProjectPath, request.ProjectXml, map, "Focused Plans",
+                request.CoreLayerContext)
             : [];
         string[] focusedBoundaryConditionIDs = request.MapType is "Buildable" or "Geometry" or "Plan"
             ? SerializedBoundaryConditionAssetIDs(request, map, "Layers")
             : [];
         var defaults = CatalogTreeService.LoadMapTreeDefaults(new CatalogTreeRequest(
             request.ProjectPath, request.ProjectXml, FocusedGeometryIds: focusedGeometryIDs,
-            FocusedPlanIds: focusedPlanIDs, FocusedBoundaryConditionIds: focusedBoundaryConditionIDs), request.MapType,
+            FocusedPlanIds: focusedPlanIDs, FocusedBoundaryConditionIds: focusedBoundaryConditionIDs,
+            ProjectSessionID: request.ProjectSessionID,
+            ExternalCoreLayerReferences: request.ExternalCoreLayerReferences,
+            CoreLayerContext: request.CoreLayerContext), request.MapType,
             request.ComputeReadLease?.ProtectedSourcePaths);
         CatalogTreeNode[] resultSourceRoots = request.MapType == "Project" ? defaults :
             CatalogTreeService.LoadMapTreeDefaults(new CatalogTreeRequest(
-                request.ProjectPath, request.ProjectXml, "Project"), "Project",
+                request.ProjectPath, request.ProjectXml, "Project",
+                ProjectSessionID: request.ProjectSessionID,
+                ExternalCoreLayerReferences: request.ExternalCoreLayerReferences,
+            CoreLayerContext: request.CoreLayerContext), "Project",
                 request.ComputeReadLease?.ProtectedSourcePaths);
         CatalogTreeNode[] projectResultNodes = Descendants(resultSourceRoots
             .Where(root => root.Name == "Results").SelectMany(root => root.Children ?? [])).ToArray();
@@ -2221,7 +2437,7 @@ public static partial class MapTreeService
             if (node.Locator is { NodeType: "MapLayer", NodePath: { Length: > 0 } path } locator &&
                 node.Checked == "unchecked")
             {
-                if (locator.MapType == "SingleBandRasterMapLayer")
+                if (MapRasterLayerRendering.SupportedTypes.Contains(locator.MapType ?? "", StringComparer.Ordinal))
                     hidden.Add($"vis-map-{mapIndex}-node-{string.Join('.', path)}");
                 else if (locator.MapType is "PointsVector" or "PolylinesVector" or "PolygonsVector" &&
                          node.AssetID is { Length: > 0 } assetID)
@@ -2437,7 +2653,13 @@ public static partial class MapTreeService
             CatalogTreeNode? node;
             if (type == "MapLayer")
             {
-                node = BuildMapLayerNode(element, id, rootName, path, projectDirectory);
+                node = (string?)element.Parent?.Attribute("Type") == "GdbDataset"
+                    ? BuildGdbRasterMapNode(element, id, rootName, path, projectDirectory)
+                    : BuildMapLayerNode(element, id, rootName, path, projectDirectory);
+            }
+            else if (type is "GdbDataset" or "GdbVectorLayer")
+            {
+                node = BuildGdbMapNode(element, id, rootName, path, projectDirectory);
             }
             else
             {
@@ -2525,9 +2747,10 @@ public static partial class MapTreeService
             AddState(element, nodeID, defaultExpanded: false, expanded, ref selected);
             CatalogTreeNodeLocator locator = new(rootName, type, name, path,
                 isBoundaryConditionChild ? parentBoundaryCondition!.AssetID : node.AssetID,
-                type == "MapLayer" ? (string?)element.Attribute("MapType") : null,
-                type == "MapLayer" ? (string?)element.Attribute("Filename") : null,
-                type == "MapLayer" ? (string?)element.Attribute("FilenameRelative") : null,
+                type == "MapLayer" ? (string?)element.Attribute("MapType") :
+                    type == "GdbVectorLayer" ? "GdbVectorLayer" : type == "GdbDataset" ? "GdbDataset" : null,
+                type is "MapLayer" or "GdbDataset" or "GdbVectorLayer" ? (string?)element.Attribute("Filename") : null,
+                type is "MapLayer" or "GdbDataset" or "GdbVectorLayer" ? (string?)element.Attribute("FilenameRelative") : null,
                 isGeometryChild ? parentGeometry!.AssetID : null,
                 isGeometryChild ? parentGeometry!.NodePath : null,
                 isGeometryChild ? parentGeometry!.Name : null,
@@ -2547,7 +2770,8 @@ public static partial class MapTreeService
                 ParentBoundaryConditionNodeName: isBoundaryConditionChild
                     ? parentBoundaryCondition!.Name : null);
             bool supported = CheckableNodeTypes.Contains(type) &&
-                (type != "MapLayer" || (string?)element.Attribute("MapType") is string mapType && SupportedMapLayerTypes.Contains(mapType));
+                (type != "MapLayer" || (string?)element.Attribute("MapType") is string mapType && SupportedMapLayerTypes.Contains(mapType)) &&
+                (type is not ("GdbDataset" or "GdbVectorLayer") || node.Checked is not null);
             CatalogTreeProperty[] serializedProperties = element.Attributes()
                 .Where(attribute => attribute.Name != "Type" && attribute.Name != "Name")
                 .Select(attribute => new CatalogTreeProperty("Source/" + attribute.Name.LocalName,
@@ -2568,7 +2792,8 @@ public static partial class MapTreeService
                     ? (ReadBool(element, "IsChecked") ? "checked" : "unchecked") : null,
                 IsPinned = ReadBool(element, "IsPinned"),
                 CanPin = false,
-                CanMove = MovableNodeTypes.Contains(type),
+                CanMove = MovableNodeTypes.Contains(type) &&
+                    !(type == "MapLayer" && (string?)element.Parent?.Attribute("Type") == "GdbDataset"),
                 CanRename = false,
                 Locator = locator
             });
@@ -2662,6 +2887,57 @@ public static partial class MapTreeService
             DiagnosticSourceIdentity: diagnostics?.SourceIdentity,
             DiagnosticSourceRevision: diagnostics?.SourceRevision,
             DiagnosticReadError: diagnostics?.ReadError);
+    }
+
+    private static CatalogTreeNode BuildGdbMapNode(XElement element, string id, string rootName, int[] path,
+        string projectDirectory)
+    {
+        string type = (string?)element.Attribute("Type") ?? "";
+        string name = (string?)element.Attribute("Name") ?? "";
+        string? filename = (string?)element.Attribute("Filename");
+        string? relative = (string?)element.Attribute("FilenameRelative");
+        string? resolved = ResolveGdbMapLayerPath(projectDirectory, relative, filename);
+        string? assetID = resolved is null ? null : CanonicalPath(resolved);
+        bool isDataset = type == "GdbDataset";
+        bool valid = assetID is not null &&
+            string.Equals(Path.GetExtension(assetID), ".gdb", StringComparison.OrdinalIgnoreCase);
+        string? layerName = (string?)element.Attribute("GdbLayerName");
+        string? vectorType = (string?)element.Attribute("GdbVectorType");
+        if (type == "GdbVectorLayer")
+        {
+            XElement? parent = element.Parent;
+            valid &= parent is not null && (string?)parent.Attribute("Type") == "GdbDataset" &&
+                string.Equals((string?)parent.Attribute("Filename"), filename, StringComparison.Ordinal) &&
+                string.Equals((string?)parent.Attribute("FilenameRelative"), relative, StringComparison.Ordinal) &&
+                !string.IsNullOrWhiteSpace(layerName) &&
+                Enum.TryParse(vectorType, ignoreCase: false, out Geospatial.GDALAssist.VectorType parsedType) &&
+                parsedType is not (Geospatial.GDALAssist.VectorType.None or Geospatial.GDALAssist.VectorType.Unknown);
+        }
+        else if (!isDataset)
+        {
+            valid = false;
+        }
+
+        var properties = element.Attributes().Where(attribute => attribute.Name != "Type" && attribute.Name != "Name")
+            .Select(attribute => new CatalogTreeProperty("Source/" + attribute.Name.LocalName,
+                attribute.Name.LocalName, attribute.Value)).ToArray();
+        return new CatalogTreeNode(id,
+            isDataset ? "GdbDatasetVisualContext" : "GdbVectorLayerVisualContext", name,
+            AssetID: assetID, Properties: properties,
+            Checked: valid ? (ReadBool(element, "IsChecked") ? "checked" : "unchecked") : null,
+            IsPinned: ReadBool(element, "IsPinned"), CanMove: false,
+            Locator: new CatalogTreeNodeLocator(rootName, type, name, path, assetID,
+                MapType: isDataset ? "GdbDataset" : "GdbVectorLayer",
+                Filename: filename, FilenameRelative: relative));
+    }
+
+    private static string? ResolveGdbMapLayerPath(string projectDirectory, string? relative, string? filename)
+    {
+        string? candidate = !string.IsNullOrWhiteSpace(relative)
+            ? ResolvePath(projectDirectory, relative) : null;
+        if (candidate is not null && Directory.Exists(candidate)) return candidate;
+        candidate = !string.IsNullOrWhiteSpace(filename) ? ResolvePath(projectDirectory, filename) : null;
+        return candidate is not null && Directory.Exists(candidate) ? candidate : null;
     }
 
     private static bool IsVectorMapLayerType(string mapType) =>
@@ -2911,6 +3187,18 @@ public static partial class MapTreeService
             throw new NotSupportedException("Visibility is unavailable for this source tree node.");
         if (locator.NodeType == "MapLayer" && (locator.MapType is null || !SupportedMapLayerTypes.Contains(locator.MapType)))
             throw new NotSupportedException("Visibility is unavailable for this unsupported map layer type.");
+        if (checkedValue && locator.NodeType == "MapLayer" &&
+            locator.MapType == "SingleBandRasterMapLayer" && locator.NodePath is { Length: >= 2 })
+        {
+            XElement? serialized = ResolveNode(map, locator, required: false);
+            if ((string?)serialized?.Parent?.Attribute("Type") == "GdbDataset")
+            {
+                CatalogTreeNode exact = FindExactNode(BuildTree(mapRequest, map).Roots, locator);
+                if (exact.Checked is null)
+                    throw new NotSupportedException(exact.DiagnosticReadError ??
+                        "The selected GDB raster subdataset is not available for map rendering.");
+            }
+        }
         if (locator.NodeType != "MapLayer")
             return SetSourceVisibility(mapRequest, map, locator, checkedValue);
         XElement? node = ResolveNode(map, locator, required: false);
@@ -3023,7 +3311,10 @@ public static partial class MapTreeService
             string.IsNullOrWhiteSpace(locator.ParentResultRevision))
             throw new SourceFileChangedException();
         OperationContext context = Open(request.ProjectPath, request.ProjectXml, request.ProjectXmlSHA,
-            request.ExpectedVisualizationRevision, allowMissing: false);
+            request.ExpectedVisualizationRevision, allowMissing: false,
+            projectSessionID: request.CoreLayerContext?.ProjectSessionID,
+            externalCoreLayerReferences: request.CoreLayerContext?.References,
+            coreLayerContext: request.CoreLayerContext);
         try
         {
             ProjectResultIdentity result = ReadProjectResult(context, locator.ParentResultAssetID,
@@ -3059,7 +3350,10 @@ public static partial class MapTreeService
         string[] focusedIDs = mapRequest.MapType == "Project" ? [] :
             SerializedGeometryAssetIDs(mapRequest, map, rootName);
         CatalogTreeNode[] defaults = CatalogTreeService.LoadMapTreeDefaults(new CatalogTreeRequest(
-            mapRequest.ProjectPath, mapRequest.ProjectXml, FocusedGeometryIds: focusedIDs), mapRequest.MapType);
+            mapRequest.ProjectPath, mapRequest.ProjectXml, FocusedGeometryIds: focusedIDs,
+            ProjectSessionID: mapRequest.ProjectSessionID,
+            ExternalCoreLayerReferences: mapRequest.ExternalCoreLayerReferences,
+            CoreLayerContext: mapRequest.CoreLayerContext), mapRequest.MapType);
         CatalogTreeNode[] owners = Descendants(defaults)
             .Where(node => SourceNodeType(node.SourceClass) == "Geometry" &&
                 node.Name == locator.ParentGeometryNodeName &&
@@ -3385,7 +3679,9 @@ public static partial class MapTreeService
     }
 
     private static OperationContext Open(string projectPath, string? projectXml, string? projectXmlSHA,
-        string? expectedVisualizationRevision, bool allowMissing)
+        string? expectedVisualizationRevision, bool allowMissing, string? projectSessionID = null,
+        CoreLayerReferenceCapture[]? externalCoreLayerReferences = null,
+        CoreLayerRequestContext? coreLayerContext = null)
     {
         if (string.IsNullOrWhiteSpace(projectPath)) throw new ArgumentException("The project path is required.");
         string projectAliasPath = Path.GetFullPath(projectPath);
@@ -3393,6 +3689,22 @@ public static partial class MapTreeService
         if (!Path.GetExtension(projectAliasPath).Equals(".ras", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("The map tree requires a saved HEC-RAS project file.");
         if (!File.Exists(canonicalProject)) throw new FileNotFoundException("The current project file was not found.", canonicalProject);
+        if (coreLayerContext is not null)
+        {
+            CoreLayerImportService.ValidateContext(coreLayerContext, canonicalProject);
+            if (projectSessionID is not null &&
+                !string.Equals(projectSessionID, coreLayerContext.ProjectSessionID, StringComparison.Ordinal))
+                throw new SourceFileChangedException();
+            if (externalCoreLayerReferences is { Length: > 0 } legacyReferences &&
+                !legacyReferences.SequenceEqual(coreLayerContext.References))
+                throw new SourceFileChangedException();
+            projectSessionID = coreLayerContext.ProjectSessionID;
+            externalCoreLayerReferences = coreLayerContext.References;
+        }
+        else if (externalCoreLayerReferences is { Length: > 0 })
+        {
+            throw new SourceFileChangedException();
+        }
         ValidateProjectXml(projectXml, projectXmlSHA);
         string diskProjectRevision = RevisionFile(canonicalProject);
         string visualizationAliasPath = Path.ChangeExtension(projectAliasPath, ".vis");
@@ -3414,7 +3726,8 @@ public static partial class MapTreeService
             if (visualization.Root?.Name != "Ras") throw new InvalidDataException("The visualization file has an invalid Ras root element.");
         }
         return new OperationContext(projectAliasPath, canonicalProject, visualizationAliasPath,
-            visualizationPath, diskProjectRevision, previousRevision, projectXml, visualization);
+            visualizationPath, diskProjectRevision, previousRevision, projectXml, visualization,
+            projectSessionID, externalCoreLayerReferences, coreLayerContext);
     }
 
     private static void ValidateProjectXml(string? projectXml, string? projectXmlSHA)
@@ -3522,7 +3835,9 @@ public static partial class MapTreeService
 
     private sealed class OperationContext(string projectAliasPath, string projectPath, string visualizationAliasPath,
         string visualizationPath, string projectRevision, string? previousVisualizationRevision, string? projectXml,
-        XDocument visualization) : IDisposable
+        XDocument visualization, string? projectSessionID,
+        CoreLayerReferenceCapture[]? externalCoreLayerReferences,
+        CoreLayerRequestContext? coreLayerContext) : IDisposable
     {
         public string ProjectAliasPath { get; } = projectAliasPath;
         public string ProjectPath { get; } = projectPath;
@@ -3532,6 +3847,9 @@ public static partial class MapTreeService
         public string? PreviousVisualizationRevision { get; } = previousVisualizationRevision;
         public string? ProjectXml { get; } = projectXml;
         public XDocument Visualization { get; } = visualization;
+        public string? ProjectSessionID { get; } = projectSessionID;
+        public CoreLayerReferenceCapture[]? ExternalCoreLayerReferences { get; } = externalCoreLayerReferences;
+        public CoreLayerRequestContext? CoreLayerContext { get; } = coreLayerContext;
         public void Dispose() { }
     }
 }

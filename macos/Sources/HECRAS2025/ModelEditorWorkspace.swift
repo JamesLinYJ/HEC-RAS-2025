@@ -16,6 +16,7 @@ struct ModelEditorWorkspace: View {
     @State private var pendingEditorToolRequestID: UUID?
     @State private var pendingPlanDiagnosticNavigationTaskID: UUID?
     @State private var showModelChange = false
+    @State private var confirmsCoreLayerDraftReload = false
     @State private var spatialTarget: SpatialBoundaryLayer?
     @State private var editorToolImportPresentation: EditorToolImportPresentation?
     @State private var editorToolPresentationIssue: String?
@@ -46,7 +47,8 @@ struct ModelEditorWorkspace: View {
                     } label: { Label("Compute", systemImage: "play.fill") }
                     .disabled(!session.loaded || !session.availableOperations.contains(.compute)
                         || session.planCompute?.isAvailable != true || session.isBusy
-                        || session.hasIncompleteEditorInput || session.planCompute?.isInspecting == true)
+                        || session.hasIncompleteEditorInput || session.planCompute?.isInspecting == true
+                        || session.hasCoreLayerReferenceConflict)
                     Menu {
                         Button("Export Plan") { openTool(.planExport) }
                         Divider()
@@ -89,11 +91,30 @@ struct ModelEditorWorkspace: View {
                         editorToolImportPresentation = .initialConditions(requestID: UUID(), consumesHandoff: false)
                     }
                     .disabled(!session.loaded || !session.canEdit || session.isBusy || selectedAsset == nil
+                        || session.hasCoreLayerReferenceConflict
                         || store.initialConditionsProvider == nil || store.isRunningProjectTool)
                 }
                 Button { Task { await session.save(selectedAsset) } } label: { Label("Save", systemImage: "square.and.arrow.down") }
                     .disabled(!session.canSave)
             }.padding(12)
+            if let conflict = session.coreLayerReferenceConflict {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("External Core Layer Conflict").font(.headline)
+                        Text(conflict).fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    Button("Discard Draft and Reload…") { confirmsCoreLayerDraftReload = true }
+                        .tint(.red)
+                        .disabled(selectedAsset == nil)
+                }
+                .padding(12)
+                .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+            }
             Divider()
             HSplitView {
                 List(kind.pages, selection: $selectedPage) { page in
@@ -117,7 +138,8 @@ struct ModelEditorWorkspace: View {
                         spatialTarget: $spatialTarget, navigate: { selectedPage = $0 },
                         isDetached: isDetached,
                         geometryChoices: kind == .geometry ? assets : [], selectGeometry: chooseAsset)
-                        .disabled(store.isRunningPlanCompute && !(kind == .plan && page.id == "Compute"))
+                        .disabled(session.hasCoreLayerReferenceConflict
+                            || (store.isRunningPlanCompute && !(kind == .plan && page.id == "Compute")))
                 }.frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -231,27 +253,48 @@ struct ModelEditorWorkspace: View {
             }
         }
         .alert("Save changes to this model?", isPresented: $showModelChange) {
-            Button("Save") {
-                Task {
-                    let targetID = pendingAssetID
-                    let requestID = pendingEditorToolRequestID
-                    let projectID = store.projectSessionID
-                    let sourceID = session.modelAssetID
-                    let saved = await session.save(selectedAsset)
-                    guard store.projectSessionID == projectID, session.modelAssetID == sourceID,
-                          pendingAssetID == targetID, pendingEditorToolRequestID == requestID else { return }
-                    pendingAssetID = nil
-                    pendingEditorToolRequestID = nil
-                    if saved, !session.hasUnsavedEditorChanges {
-                        assetID = targetID
-                    } else if let requestID, store.editorToolPresentationRequest?.id == requestID {
-                        setEditorToolPresentationIssue(
-                            "The current model could not be saved. Resolve its pending input or error, then retry.",
-                            requestID: requestID)
+            if !session.hasCoreLayerReferenceConflict {
+                Button("Save") {
+                    Task {
+                        let targetID = pendingAssetID
+                        let requestID = pendingEditorToolRequestID
+                        let projectID = store.projectSessionID
+                        let sourceID = session.modelAssetID
+                        let saved = await session.save(selectedAsset)
+                        guard store.projectSessionID == projectID, session.modelAssetID == sourceID,
+                              pendingAssetID == targetID, pendingEditorToolRequestID == requestID else { return }
+                        pendingAssetID = nil
+                        pendingEditorToolRequestID = nil
+                        if saved, !session.hasUnsavedEditorChanges {
+                            assetID = targetID
+                        } else if let requestID, store.editorToolPresentationRequest?.id == requestID {
+                            setEditorToolPresentationIssue(
+                                "The current model could not be saved. Resolve its pending input or error, then retry.",
+                                requestID: requestID)
+                        }
                     }
                 }
             }
             Button("Discard", role: .destructive) {
+                if session.hasCoreLayerReferenceConflict {
+                    let targetID = pendingAssetID
+                    if let targetID {
+                        guard let target = assets.first(where: { $0.id == targetID }) else { return }
+                        assetID = targetID
+                        pendingAssetID = nil
+                        pendingEditorToolRequestID = nil
+                        Task { await session.load(target, kind: kind) }
+                    } else {
+                        assetID = nil
+                        pendingAssetID = nil
+                        pendingEditorToolRequestID = nil
+                        Task {
+                            await session.load(nil, kind: kind)
+                            session.clearCoreLayerReferenceConflictAfterExplicitDiscard()
+                        }
+                    }
+                    return
+                }
                 session.discardEdits()
                 guard !session.hasUnsavedEditorChanges else { return }
                 assetID = pendingAssetID; pendingAssetID = nil; pendingEditorToolRequestID = nil
@@ -269,6 +312,16 @@ struct ModelEditorWorkspace: View {
         .alert("HEC-RAS 2025", isPresented: Binding(get: { session.error != nil }, set: { if !$0 { session.error = nil } })) {
             Button("OK") { session.error = nil }
         } message: { Text(session.error ?? "") }
+        .confirmationDialog("Reload This Model from Its Current Source?", isPresented: $confirmsCoreLayerDraftReload,
+                            titleVisibility: .visible) {
+            Button("Discard Draft and Reload", role: .destructive) {
+                guard let selectedAsset else { return }
+                Task { await session.load(selectedAsset, kind: kind) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The current editor draft will be discarded. The project session has a new capture for this source, so reloading adopts that source and clears the conflict.")
+        }
     }
     private func chooseAsset(_ id: String?) {
         guard id != assetID, !session.isBusy else { return }
@@ -512,6 +565,10 @@ struct ModelEditorWorkspace: View {
             }
             selectedPage = ModelEditorKind.surface.pages.first?.id
             editorToolImportPresentation = .classification(requestID: request.id)
+        case .spatialImport:
+            selectedPage = "Spatial"
+            editorToolImportPresentation = .spatialBoundary(requestID: request.id,
+                assetID: request.assetID, layerID: request.spatialLayerID)
         case .griddedImport:
             let layers = availableGriddedLayers
             if let requestedLayerID = request.spatialLayerID {
@@ -541,7 +598,7 @@ struct ModelEditorWorkspace: View {
             }
             // The feature metadata view owns tag sheet presentation and
             // consumes this exact request after it accepts the request.
-        case .topology, .topologyRecipe, .arcPoints, .tagFilter:
+        case .topology, .topologyRecipe, .arcPoints, .tagFilter, .vectorImport:
             guard kind == .geometry,
                   let destination = request.geometryEditorDestination else { return }
             selectedPage = destination.pageID
@@ -560,8 +617,8 @@ struct ModelEditorWorkspace: View {
         switch action {
         case .terrainImport: .terrain
         case .classificationImport: .surface
-        case .griddedImport, .initialConditions: .boundaryCondition
-        case .tagCreate, .tagEdit, .topology, .topologyRecipe, .arcPoints, .tagFilter: .geometry
+        case .griddedImport, .initialConditions, .spatialImport: .boundaryCondition
+        case .tagCreate, .tagEdit, .topology, .topologyRecipe, .arcPoints, .tagFilter, .vectorImport: .geometry
         default: nil
         }
     }
@@ -980,7 +1037,7 @@ struct ModelTablePage: View {
         })
     }
     private var displayedRows: [EditorRow] {
-        let rows = (session.rows[page.id] ?? []).filter { row in
+        let rows = tableRows.filter { row in
             if expressionMode { return expressionFilter.matchingRowIDs?.contains(row.id) ?? true }
             return filter.isEmpty || columns.filter { $0.filterable != false && (filterColumnID == nil || $0.id == filterColumnID) }
                 .contains { (row.values[$0.id] ?? "").localizedCaseInsensitiveContains(filter) }
@@ -1002,20 +1059,51 @@ struct ModelTablePage: View {
         }
     }
     private var columns: [SourceTableColumn] {
-        if let presentation = session.tablePresentations[page.id] { return presentation.columns.filter { $0.visible != false } }
-        if page.title == "Arc Points" {
-            return [SourceTableColumn(id: "Type", title: "Type", sourceType: "string", readOnly: true),
+        let baseColumns: [SourceTableColumn]
+        if let presentation = session.tablePresentations[page.id] {
+            baseColumns = presentation.columns.filter { $0.visible != false }
+        } else if page.title == "Arc Points" {
+            baseColumns = [SourceTableColumn(id: "Type", title: "Type", sourceType: "string", readOnly: true),
                 SourceTableColumn(id: "X", title: "X", sourceType: "double"), SourceTableColumn(id: "Y", title: "Y", sourceType: "double")]
+        } else {
+            baseColumns = SourceEditorLibrary.shared.tables.first { $0.id == tableID }?.columns ?? []
         }
-        return SourceEditorLibrary.shared.tables.first { $0.id == tableID }?.columns ?? []
+        let existingIDs = Set(baseColumns.map { $0.id.lowercased() })
+        return baseColumns + topologyManagedColumns.filter { !existingIDs.contains($0.id.lowercased()) }
+    }
+    private var topologyManagedColumns: [SourceTableColumn] {
+        guard let featureKind = topologyFeatureKind,
+              let topology = session.geometryTopology,
+              topology.snapshot != nil else { return [] }
+        return topology.table(for: featureKind).columns.filter { $0.isUserDefined == true }.map { column in
+            SourceTableColumn(id: column.id, title: column.title, sourceType: column.sourceType,
+                readOnly: true, filterable: true, titleIsUserData: true)
+        }
+    }
+    private var tableRows: [EditorRow] {
+        let rows = session.rows[page.id] ?? []
+        guard let featureKind = topologyFeatureKind,
+              let topology = session.geometryTopology,
+              topology.snapshot != nil else { return rows }
+        let topologyRows = Dictionary(uniqueKeysWithValues: topology.table(for: featureKind).rows.map { ($0.fid, $0) })
+        return rows.map { row in
+            guard let rawFID = row.values["FID"],
+                  let fid = Int(rawFID.trimmingCharacters(in: .whitespacesAndNewlines)),
+                  let topologyRow = topologyRows[fid] else { return row }
+            var merged = row
+            for column in topologyManagedColumns {
+                merged.values[column.id] = topologyRow.values[column.id] ?? ""
+            }
+            return merged
+        }
     }
     private var presentation: EditorTablePresentation? { session.tablePresentations[page.id] }
     private var filterCapture: TableFilterCapture {
         TableFilterCapture(owner: [store.projectSessionID.uuidString, session.id.uuidString,
             session.modelAssetID ?? "", session.sourceFileRevision ?? "", page.id].joined(separator: "|"),
-            columns: (presentation?.columns ?? columns).map { .init(id: $0.id, name: $0.title, sourceType: $0.sourceType,
+            columns: columns.map { .init(id: $0.id, name: $0.title, sourceType: $0.sourceType,
                 filterable: $0.filterable != false) },
-            rows: (session.rows[page.id] ?? []).map { .init(id: $0.id, values: $0.values) })
+            rows: tableRows.map { .init(id: $0.id, values: $0.values) })
     }
     private var selection: Set<String> { presentation?.selection?.rowIDs ?? localSelection }
     private var tableSelection: Binding<Set<String>> {
@@ -1063,7 +1151,13 @@ struct ModelTablePage: View {
                             .frame(maxWidth: 230)
                     }
                     Spacer()
-                    if presentation?.canAddColumns == true || presentation?.renameableColumnIDs.isEmpty == false {
+                    if let featureKind = topologyFeatureKind,
+                       let columnKind = GeometryTopologyMetadataColumnKind(rawValue: featureKind),
+                       let topology = session.geometryTopology {
+                        GeometryTopologyMetadataColumnMenu(featureKind: columnKind,
+                            columns: topology.table(for: featureKind).columns, session: topology,
+                            openGlobalTool: { kind, column in openColumnTool(kind, column: column) })
+                    } else if presentation?.canAddColumns == true || presentation?.renameableColumnIDs.isEmpty == false {
                         Menu("Columns") {
                             Button("Add Column") { openColumnTool(.addAttribute, column: nil) }.disabled(presentation?.canAddColumns != true)
                             Menu("Rename Column") {
@@ -1086,7 +1180,7 @@ struct ModelTablePage: View {
                     rows: displayedRows,
                     columns: columns,
                     selectionRowIDs: session.rows[page.id]?.map(\.id) ?? [],
-                    selectionColumnIDs: (presentation?.columns ?? columns).map(\.id),
+                    selectionColumnIDs: columns.map(\.id),
                     selection: $gridCellSelection,
                     rowSelection: tableSelection,
                     initialWidth: { $0.width.flatMap { $0 > 0 && $0.isFinite ? CGFloat($0) : nil } ?? 130 },
@@ -1123,12 +1217,12 @@ struct ModelTablePage: View {
                                     }
                                 }
                                 if column.sortable != false || column.filterable != false { Divider() }
-                                if presentation?.renameableColumnIDs.contains(column.id) == true {
+                                if topologyFeatureKind == nil && presentation?.renameableColumnIDs.contains(column.id) == true {
                                     Button("Rename Column") { openColumnTool(.renameAttribute, column: column.id) }
                                         .disabled(!session.canEdit || session.isBusy)
                                     Divider()
                                 }
-                                if presentation?.canAddColumns == true {
+                                if topologyFeatureKind == nil && presentation?.canAddColumns == true {
                                     Button("Add Column") { openColumnTool(.addAttribute, column: nil) }
                                         .disabled(!session.canEdit || session.isBusy)
                                     Divider()
@@ -1237,7 +1331,7 @@ struct ModelTablePage: View {
     }
     private func openColumnTool(_ kind: ToolKind, column: String?) {
         guard let assetID = session.modelAssetID else { return }
-        store.activeAttributeToolContext = .init(modelAssetID: assetID, tableID: page.id, columnID: column)
+        store.activeAttributeToolContext = .init(modelAssetID: assetID, tableID: page.id, projectSessionID: store.projectSessionID, parentEditorSessionID: session.id, columnID: column)
         store.activeTool = kind
     }
     private func copySelection() {

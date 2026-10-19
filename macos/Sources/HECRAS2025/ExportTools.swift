@@ -63,10 +63,19 @@ struct ExportToolContent: View {
                     Text("Reference by absolute path").tag("0"); Text("Copy to project").tag("1")
                 }
             }
-            if state.presentation.uploadAvailable {
-                Section("Model Repository Upload") {
-                    field("EnableUpload").disabled(!zipped)
-                    if zipped && editor.fields["PlanExporterControl/EnableUpload"] == "true" { field("ModelId") }
+            Section("Model Repository Upload") {
+                field("EnableUpload").disabled(!zipped || !state.presentation.uploadAvailable)
+                if !zipped {
+                    Text(L10n.text("Model repository upload requires a ZIP export."))
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if !state.presentation.uploadAvailable {
+                    Text(L10n.text("Configure and authenticate developer S3 credentials in Settings before uploading a plan ZIP."))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if zipped && editor.fields["PlanExporterControl/EnableUpload"] == "true" {
+                    field("ModelId")
+                    Text(L10n.text("Enter a model ID before uploading the plan ZIP."))
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             if let source = state.presentation.planExport {

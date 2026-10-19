@@ -403,7 +403,8 @@ public static partial class ModelEditorAdapter
     }
 
     private static ModelRequest ToModelRequest(GeometryMeshModelRequest model) =>
-        new(model.AssetPath, model.Kind, model.ProjectPath, model.ProjectXml);
+        new(model.AssetPath, model.Kind, model.ProjectPath, model.ProjectXml,
+            CoreLayerContext: model.CoreLayerContext);
 
     private static void VerifyGeometryMeshModel(GeometryMeshModelRequest model)
     {

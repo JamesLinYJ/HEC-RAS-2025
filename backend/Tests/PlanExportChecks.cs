@@ -15,7 +15,7 @@ using Utility.Units;
 
 internal static class PlanExportChecks
 {
-    internal static void Run()
+    internal static async Task Run()
     {
         using var temporary = new TemporaryDirectory();
         string sourceDirectory = Path.Combine(temporary.FullName, "source");
@@ -98,7 +98,9 @@ internal static class PlanExportChecks
         CheckRaster(clipped, expectedCellSize: .5, expectClipped: true);
         var resampled = Export(Request("全幅重采样", cell: 2));
         CheckRaster(resampled, expectedCellSize: 2, expectClipped: false);
-        var zipped = Export(Request("完整导出.zip", zip: true));
+        var uploadSessionID = Guid.NewGuid().ToString();
+        var zipped = Export(Request("完整导出.zip", zip: true) with { ProjectSessionID = uploadSessionID });
+        await PlanModelUploadChecks.VerifyCommittedReceipt(zipped);
         using (var archive = ZipFile.OpenRead(zipped.OutputPath))
         {
             Check(archive.Entries.Any(item => item.FullName == "原工程/原工程.ras") && archive.Entries.All(item => !item.FullName.Contains('\\')), "ZIP entries have a stable project root and portable separators");

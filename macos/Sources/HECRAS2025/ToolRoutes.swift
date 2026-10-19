@@ -7,9 +7,9 @@ struct ToolRoute: View {
     let kind: ToolKind
     var body: some View {
         switch kind {
-        case .testingViewer, .testingPOI, .testingRunner:
+        case .testingViewer, .testingPOI, .testingRunner, .poiImport:
             ToolServiceDialog(isAvailable: store.testingProvider != nil) {
-                TestingWorkspace(store: store, initialPage: kind)
+                TestingWorkspace(store: store, initialPage: kind == .poiImport ? .testingPOI : kind)
             }
         case .testingProjectUpload, .testingGeometryUpload:
             ToolServiceDialog(isAvailable: store.testingUploadProvider != nil) {
@@ -24,11 +24,23 @@ struct ToolRoute: View {
                         .frame(minWidth: 500, minHeight: 390)
                 }
             }
+        case .addAttribute, .renameAttribute:
+            GeometryTopologyMetadataColumnToolRoute(store: store, kind: kind, context: store.activeAttributeToolContext)
+        case .rasterLayerImport: RasterLayerImportView(store: store)
+        case .vectorLayerImport: VectorLayerImportRouteView(store: store, initialMapID: store.lastActiveMapID)
         case .rasterSymbology: RasterSymbologyView(store: store)
-        case .vectorSymbology: VectorSymbologyView(store: store)
+        case .rasterExport: RasterRGBExportToolView(store: store)
+        case .depthExport: DepthShapefileExportToolView(store: store)
+        case .newShapefile: NewShapefileRoute(store: store, mapID: store.lastActiveMapID)
+        case .rasterCalculator:
+            let mapID = store.lastActiveMapID
+            RasterCalculatorWorkspace(store: store, mapID: mapID,
+                viewport: { store.existingMapState(for: mapID)?.resultViewport })
+        case .vectorSymbology, .vectorLabels: VectorSymbologyView(store: store)
         case .reprojection: ReprojectionWorkspace(store: store)
         case .wilcock: WilcockWorkspace(store: store)
         case .credentials: CredentialsSettingsView(store: store)
+        case .coreImport: CoreLayerReferenceManagerView(store: store)
         case .nldImport:
             ToolServiceDialog(isAvailable: store.featureQueryProvider != nil) {
                 FeatureQueryView(store: store, kind: .nld)
@@ -47,7 +59,7 @@ struct ToolRoute: View {
             }
         case .newPayload: PayloadCreationRoute(store: store, session: store.primaryEditorSession(.boundaryCondition))
         case .terrainImport, .classificationImport, .initialConditions, .tagCreate, .tagEdit,
-             .topology, .topologyRecipe, .arcPoints, .tagFilter:
+             .topology, .topologyRecipe, .arcPoints, .tagFilter, .vectorImport, .spatialImport:
             TypedEditorToolRoute(store: store, action: kind)
         case .griddedImport:
             if store.activeSpatialImportLayerID != nil {
@@ -59,11 +71,9 @@ struct ToolRoute: View {
             }
         case .contours, .hillshade:
             TypedRasterStyleToolRoute(store: store, action: kind, mapID: store.lastActiveMapID)
-        case .newGeometry, .newPlan, .newBoundary, .newShapefile,
-             .rasterLayerImport, .vectorImport, .vectorLayerImport, .spatialImport,
-             .planExport, .rasterExport, .depthExport, .geoprocessing, .vectorLabels,
-             .crossSection, .unitCalculator, .addAttribute,
-             .renameAttribute, .backgroundMaps, .poiImport, .coreImport, .reportIssue, .rasterCalculator:
+        case .newGeometry, .newPlan, .newBoundary,
+             .planExport, .geoprocessing,
+             .crossSection, .unitCalculator, .backgroundMaps, .reportIssue:
             DataToolSheet(store: store, kind: kind).id(kind.id)
         }
     }

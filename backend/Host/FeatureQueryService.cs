@@ -90,7 +90,8 @@ public static class FeatureQueryService
         MapTreeRequest mapRequest = request.Map ?? throw new ArgumentException("The feature query map is missing.");
         MapSourceMapCapture capture = MapSourceIdentity.CaptureMap(mapRequest);
         MapTreeSnapshot tree = MapTreeService.Load(mapRequest);
-        using ProjectScope scope = OpenProjectScope(mapRequest.ProjectPath, mapRequest.ProjectXml);
+        using ProjectScope scope = OpenProjectScope(mapRequest.ProjectPath, mapRequest.ProjectXml,
+            mapRequest.CoreLayerContext);
         Project project = scope.Project;
         FeatureQueryPolygonSource[] sources = BuildPolygonSourceChoices(tree.Roots, project).ToArray();
         MapSourceIdentity.VerifyMap(mapRequest, capture);
@@ -134,7 +135,8 @@ public static class FeatureQueryService
 
         MapSourceMapCapture mapCapture = MapSourceIdentity.CaptureMap(mapRequest);
         MapTreeSnapshot tree = MapTreeService.Load(mapRequest);
-        using ProjectScope scope = OpenProjectScope(mapRequest.ProjectPath, mapRequest.ProjectXml);
+        using ProjectScope scope = OpenProjectScope(mapRequest.ProjectPath, mapRequest.ProjectXml,
+            mapRequest.CoreLayerContext);
         Project project = scope.Project;
         Projection projection = project.Projection
             ?? throw new InvalidOperationException("The current project has no usable coordinate projection.");
@@ -361,7 +363,8 @@ public static class FeatureQueryService
         if (manifest.PolygonSourceFamily is { } polygonFamily)
             MapSourceIdentity.VerifyFamily(polygonFamily);
 
-        using ProjectScope scope = OpenProjectScope(mapRequest.ProjectPath, mapRequest.ProjectXml);
+        using ProjectScope scope = OpenProjectScope(mapRequest.ProjectPath, mapRequest.ProjectXml,
+            mapRequest.CoreLayerContext);
         Project project = scope.Project;
         Projection projection = project.Projection
             ?? throw new InvalidOperationException("The current project has no usable coordinate projection.");
@@ -737,23 +740,13 @@ public static class FeatureQueryService
         return "geometry-perimeter:" + key;
     }
 
-    private static Project OpenProject(string projectPath, string? projectXml)
-    {
-        var project = new Project(Path.GetFullPath(projectPath));
-        try
-        {
-            if (!string.IsNullOrWhiteSpace(projectXml)) project.ApplyEditorMetadata(XElement.Parse(projectXml));
-            return project;
-        }
-        catch
-        {
-            DisposeProject(project);
-            throw;
-        }
-    }
+    private static Project OpenProject(string projectPath, string? projectXml,
+        CoreLayerRequestContext? coreLayerContext) =>
+        CoreLayerImportService.OpenProject(Path.GetFullPath(projectPath), projectXml, coreLayerContext);
 
-    private static ProjectScope OpenProjectScope(string projectPath, string? projectXml) =>
-        new(OpenProject(projectPath, projectXml));
+    private static ProjectScope OpenProjectScope(string projectPath, string? projectXml,
+        CoreLayerRequestContext? coreLayerContext) =>
+        new(OpenProject(projectPath, projectXml, coreLayerContext));
 
     private static void DisposeProject(Project project)
     {

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import RASWorkspaceCore
 
@@ -10,17 +11,47 @@ struct VectorSymbologyLayerSource {
     let defaults: [String: VectorStyleValues]
 }
 
+private enum VectorPlotExpectedSource {
+    case geoJSON
+    case shapefile(MapSourceFamilyCapture)
+    case geodatabase
+
+    var family: MapSourceFamilyCapture? {
+        if case .shapefile(let family) = self { return family }
+        return nil
+    }
+}
+
+struct VectorPlotRenderFailure: Identifiable, Equatable, Sendable {
+    let layerID: String
+    let layerName: String
+    let message: String
+    var id: String { layerID }
+}
+
 /// Owns the two retained vector-style scopes: app-wide defaults and exact
 /// persisted MapLayer settings. Attribute-table rules are only rendered when
 /// both the retained reader and the native feature layer prove the same row
 /// ordinal for every rendered source feature.
 @MainActor
-final class WorkspaceVectorSymbologyProvider: VectorSymbologyProvider {
+final class WorkspaceVectorSymbologyProvider: ObservableObject, VectorSymbologyProvider {
     private weak var store: WorkspaceStore?
     private let preferences: GlobalVectorStylePreferences
     private let client: BackendProcessClient?
     private var refreshGenerations: [UUID: UInt64] = [:]
     private var effectiveSettings: [EffectiveSettingsOwner: EffectiveSettingsEntry] = [:]
+    private var plotGenerations: [UUID: UInt64] = [:]
+    private var transientPlotOptions: [VectorPlotOptionsOwner: [String: String]] = [:]
+    @Published private(set) var plotFrameCollections: [UUID: [String: VectorPlotRenderedLayer]] = [:]
+    @Published private(set) var plotFrameFailures: [UUID: [String: VectorPlotRenderFailure]] = [:]
+
+    private struct VectorPlotOptionsOwner: Hashable {
+        let projectSessionID: UUID
+        let mapID: UUID
+        let layerID: String
+        let sourcePath: String
+        let sourceRevision: String
+    }
 
     init(store: WorkspaceStore, preferences: GlobalVectorStylePreferences, client: BackendProcessClient?) {
         self.store = store
@@ -114,18 +145,26 @@ final class WorkspaceVectorSymbologyProvider: VectorSymbologyProvider {
                 conditionCapabilityReason: reason
             )
         }
-        return VectorSymbologySnapshot(options: options, additionalOptions: [], canEdit: true)
+        let plotOptions: [VectorPlotOption]
+        do {
+            plotOptions = try await inspectPlotOptions(context, source: source, store: store)
+        } catch {
+            // A broken/unsupported renderer must not prevent editing a valid
+            // persisted .vis style. Canvas keeps its native source draw until
+            // a later refresh can produce a source-rendered replacement.
+            plotOptions = []
+        }
+        return VectorSymbologySnapshot(options: options, additionalOptions: plotOptions, canEdit: true)
     }
 
     func apply(options: [VectorStyleOption], additionalOptions: [VectorPlotOption],
                context: VectorSymbologyContext) async throws -> MapUpdate {
         guard let store else { throw ProjectFileError.modifiedExternally }
-        guard additionalOptions.isEmpty else {
-            throw ProjectFileError.invalid("The vector symbology provider received unsupported additional options.")
-        }
         if context.scope == .global {
             guard context.projectSessionID == store.globalSymbologySessionID,
-                  context.mapID == MapState.projectMapID else { throw ProjectFileError.modifiedExternally }
+                  context.mapID == MapState.projectMapID, additionalOptions.isEmpty else {
+                throw ProjectFileError.modifiedExternally
+            }
             try applyGlobal(options, context: context, store: store)
             for state in store.loadedVectorStyleMapStates() {
                 await refresh(mapID: state.id)
@@ -143,6 +182,8 @@ final class WorkspaceVectorSymbologyProvider: VectorSymbologyProvider {
               Set(options.map(\.id)) == Set(definitionIDs) else {
             throw ProjectFileError.modifiedExternally
         }
+        let selectedPlotOptions = try await validatedPlotOptions(
+            additionalOptions, context: context, source: source, store: store)
         guard let capturedRevision = source.settings.revision,
               capturedRevision.caseInsensitiveCompare(context.visualizationRevision ?? "") == .orderedSame else {
             throw ProjectFileError.modifiedExternally
@@ -217,6 +258,10 @@ final class WorkspaceVectorSymbologyProvider: VectorSymbologyProvider {
         }
         try Task.checkCancellation()
         try store.commitVectorStyleOptions(persisted, context: context, defaults: source.defaults)
+        if let owner = plotOptionsOwner(context: context, layer: source.layer) {
+            transientPlotOptions[owner] = selectedPlotOptions
+        }
+        invalidatePlotFrames(mapID: context.mapID)
         await store.refreshVectorSymbologyContexts(mapID: context.mapID)
         await refresh(mapID: context.mapID)
         return styleOnlyUpdate(mapID: context.mapID, store: store)
@@ -232,6 +277,515 @@ final class WorkspaceVectorSymbologyProvider: VectorSymbologyProvider {
             await refresh(mapID: state.id)
         }
         return globalSnapshot()
+    }
+
+    func plotFrames(mapID: UUID) -> [String: VectorPlotRenderedLayer] {
+        plotFrameCollections[mapID] ?? [:]
+    }
+
+    func plotFailures(mapID: UUID) -> [VectorPlotRenderFailure] {
+        (plotFrameFailures[mapID] ?? [:]).values.sorted { $0.layerName < $1.layerName }
+    }
+
+    /// Produces source CPU-renderer replacements for the exact currently
+    /// visible persisted vector nodes. Missing or stale sources simply retain
+    /// their native Canvas draw; no transient frame is allowed to outlive its
+    /// map, viewport, source family, or visualization revision.
+    func refreshPlotFrames(mapID: UUID) async {
+        invalidatePlotFrames(mapID: mapID)
+        plotFrameFailures[mapID] = [:]
+        guard let store, let client,
+              let state = store.existingMapState(for: mapID),
+              store.loadedVectorStyleMapStates().contains(where: { $0 === state }),
+              let map = store.mapIdentityRequest(for: mapID),
+              let viewport = state.resultViewport,
+              Self.viewportIsSupported(viewport),
+              store.sourceMapTreeContext(mapID).resultSelectionError == nil else { return }
+
+        let canvasPixelSize = state.canvasPixelSize
+        let renderFactor = WorkspaceRenderScaling.shared.factor
+        guard canvasPixelSize.width.isFinite, canvasPixelSize.width > 0,
+              renderFactor.isFinite, renderFactor > 0 else { return }
+        let renderScale = renderFactor * Double(viewport.pixelWidth) / Double(canvasPixelSize.width)
+        guard renderScale.isFinite, renderScale > 0 else { return }
+
+        let generation = (plotGenerations[mapID] ?? 0) &+ 1
+        plotGenerations[mapID] = generation
+        let projectSessionID = store.projectSessionID
+        let workflow = store.mapSourceWorkflowIdentity(mapID)
+        let contexts = store.vectorSymbologyContexts(mapID: mapID)
+        let layers = state.visibleVectors(store.mapLayers)
+        let signatures = Self.layerSignature(layers)
+        let context = store.sourceMapTreeContext(mapID)
+        let mapRequest = VectorPlotMapRequest(
+            projectPath: map.projectPath,
+            projectXml: map.projectXml,
+            projectXmlSHA: map.projectXmlSHA,
+            mapID: map.mapID,
+            mapIndex: map.mapIndex,
+            mapName: map.mapName,
+            mapType: map.mapType,
+            expectedVisualizationRevision: map.expectedVisualizationRevision,
+            resultSelectionOverrides: context.resultSelectionOverrides,
+            coreLayerContext: map.coreLayerContext
+        )
+        var accepted: [String: VectorPlotRenderedLayer] = [:]
+
+        for layer in layers {
+            guard generation == plotGenerations[mapID], !Task.isCancelled,
+                  store.projectSessionID == projectSessionID,
+                  store.mapIdentityRequest(for: mapID) == map,
+                  store.mapSourceWorkflowIdentity(mapID) == workflow,
+                  state.resultViewport == viewport,
+                  state.canvasPixelSize == canvasPixelSize,
+                  WorkspaceRenderScaling.shared.factor == renderFactor,
+                  let sourceRevision = layer.sourceRevision,
+                  Self.isSHA256(sourceRevision),
+                  let identityContext = contexts.first(where: {
+                      $0.layerID == layer.id && $0.visualNode != nil && $0.specializedNode == nil
+                  }),
+                  contexts.filter({ $0.layerID == layer.id && $0.visualNode != nil && $0.specializedNode == nil }).count == 1,
+                  let identity = identityContext.visualNode,
+                  identity.mapIndex == map.mapIndex,
+                  identity.mapName == map.mapName,
+                  identity.mapType == map.mapType,
+                  identity.assetID == SourceFilePaths.canonical(layer.url),
+                  let locator = Self.locator(for: identity),
+                  let expectedSource = expectedSource(for: layer, identity: identity,
+                      mapID: mapID, store: store),
+                  identityContext.visualizationRevision?.caseInsensitiveCompare(map.expectedVisualizationRevision) == .orderedSame,
+                  state.vectors(store.mapLayers).contains(where: {
+                      $0.id == layer.id && SourceFilePaths.canonical($0.url) == identity.assetID
+                          && $0.sourceRevision?.caseInsensitiveCompare(sourceRevision) == .orderedSame
+                  }) else { continue }
+
+            let optionsOwner = VectorPlotOptionsOwner(projectSessionID: projectSessionID,
+                mapID: mapID, layerID: layer.id, sourcePath: SourceFilePaths.canonical(layer.url),
+                sourceRevision: sourceRevision.uppercased())
+            let requestedOptions = transientPlotOptions[optionsOwner] ?? [:]
+            do {
+                let optionRequest = VectorPlotOptionsRequest(map: mapRequest, node: locator,
+                    layerID: layer.id, expectedFamily: expectedSource.family, sourceRevision: sourceRevision,
+                    plotOptions: requestedOptions)
+                let inspected: VectorPlotOptionsResponse = try await client.request(
+                    "map.vector.plotOptions.inspect", parameters: optionRequest,
+                    as: VectorPlotOptionsResponse.self)
+                guard generation == plotGenerations[mapID], !Task.isCancelled,
+                      store.projectSessionID == projectSessionID,
+                      store.mapIdentityRequest(for: mapID) == map,
+                      store.mapSourceWorkflowIdentity(mapID) == workflow,
+                      state.resultViewport == viewport,
+                      state.canvasPixelSize == canvasPixelSize,
+                      WorkspaceRenderScaling.shared.factor == renderFactor,
+                      Self.layerSignature(state.visibleVectors(store.mapLayers)) == signatures,
+                      store.vectorSymbologyContexts(mapID: mapID) == contexts else { continue }
+                guard Self.responseMatches(inspected, mapID: mapID, layer: layer, map: map,
+                                      locator: locator, expectedOptions: requestedOptions) else {
+                    throw BackendServiceError(code: "plotOptionsIdentityMismatch",
+                        message: "The source renderer returned options for a different map layer or revision.")
+                }
+                let descriptors = inspected.plotOptions
+                let renderOptions = Self.enabledOptions(requestedOptions, descriptors: descriptors)
+                let styles = try plotStyles(identity: identity, source: identityContext,
+                    presentation: state.vectorStyles[layer.id])
+                let renderRequest = VectorPlotRenderRequest(map: mapRequest, node: locator,
+                    layerID: layer.id, expectedFamily: expectedSource.family, sourceRevision: sourceRevision,
+                    viewport: viewport, plotOptions: renderOptions, styles: styles,
+                    renderScale: renderScale)
+                let rendered: VectorPlotRenderResponse = try await client.request(
+                    "map.vector.plot.render", parameters: renderRequest,
+                    as: VectorPlotRenderResponse.self)
+                guard Self.responseMatches(rendered, mapID: mapID, layer: layer, map: map,
+                                      locator: locator, viewport: viewport,
+                                      expectedOptions: renderOptions,
+                                      expectedRenderScale: renderScale) else {
+                    throw BackendServiceError(code: "plotFrameIdentityMismatch",
+                        message: "The source renderer returned pixels for a different map layer, style, or viewport.")
+                }
+                guard rendered.pixelWidth == viewport.pixelWidth,
+                      rendered.pixelHeight == viewport.pixelHeight,
+                      rendered.rgba.count == viewport.pixelWidth * viewport.pixelHeight * 4,
+                      rendered.labels.allSatisfy(Self.validLabel) else {
+                    throw BackendServiceError(code: "invalidPlotFrame",
+                        message: "The source renderer returned an invalid pixel frame or label.")
+                }
+                guard generation == plotGenerations[mapID], !Task.isCancelled,
+                      store.projectSessionID == projectSessionID,
+                      store.mapIdentityRequest(for: mapID) == map,
+                      store.mapSourceWorkflowIdentity(mapID) == workflow,
+                      state.resultViewport == viewport,
+                      state.canvasPixelSize == canvasPixelSize,
+                      WorkspaceRenderScaling.shared.factor == renderFactor,
+                      Self.layerSignature(state.visibleVectors(store.mapLayers)) == signatures,
+                      store.vectorSymbologyContexts(mapID: mapID) == contexts else { continue }
+                accepted[layer.id] = try VectorPlotRenderedLayer(
+                    mapID: mapID, sourceLayerID: layer.id,
+                    sourceRevision: rendered.sourceRevision,
+                    visualizationRevision: rendered.visualizationRevision,
+                    viewport: MapVectorPlotViewport(viewport),
+                    pixelWidth: rendered.pixelWidth, pixelHeight: rendered.pixelHeight,
+                    rgba: rendered.rgba, labels: rendered.labels)
+            } catch {
+                // A failed source render is not a style-save failure. The
+                // previous frame was removed before this request, so Canvas
+                // safely draws the same source layer with native SwiftUI.
+                guard !requestedOptions.isEmpty,
+                      !Task.isCancelled,
+                      generation == plotGenerations[mapID],
+                      !Self.isStalePlotFailure(error),
+                      store.projectSessionID == projectSessionID,
+                      store.mapIdentityRequest(for: mapID) == map,
+                      store.mapSourceWorkflowIdentity(mapID) == workflow,
+                      state.resultViewport == viewport,
+                      state.canvasPixelSize == canvasPixelSize,
+                      WorkspaceRenderScaling.shared.factor == renderFactor,
+                      Self.layerSignature(state.visibleVectors(store.mapLayers)) == signatures,
+                      store.vectorSymbologyContexts(mapID: mapID) == contexts,
+                      state.vectors(store.mapLayers).contains(where: {
+                          $0.id == layer.id && $0.sourceRevision?.caseInsensitiveCompare(sourceRevision) == .orderedSame
+                      }) else { continue }
+                plotFrameFailures[mapID, default: [:]][layer.id] = VectorPlotRenderFailure(
+                    layerID: layer.id, layerName: layer.name,
+                    message: error.localizedDescription)
+                continue
+            }
+        }
+
+        guard generation == plotGenerations[mapID], !Task.isCancelled,
+              store.projectSessionID == projectSessionID,
+              store.existingMapState(for: mapID) === state,
+              store.mapIdentityRequest(for: mapID) == map,
+              store.mapSourceWorkflowIdentity(mapID) == workflow,
+              state.resultViewport == viewport,
+              state.canvasPixelSize == canvasPixelSize,
+              WorkspaceRenderScaling.shared.factor == renderFactor,
+              Self.layerSignature(state.visibleVectors(store.mapLayers)) == signatures,
+              store.vectorSymbologyContexts(mapID: mapID) == contexts else { return }
+        plotFrameCollections[mapID] = accepted
+    }
+
+    private static func isStalePlotFailure(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let projectError = error as? ProjectFileError,
+           case .modifiedExternally = projectError { return true }
+        if let service = error as? BackendServiceError {
+            return ["sourceChanged", "notFound", "cancelled", "canceled", "stale"].contains(service.code)
+        }
+        return false
+    }
+
+    private struct VectorPlotCapture {
+        let map: MapTreeMapIdentity
+        let requestMap: VectorPlotMapRequest
+        let locator: CatalogTreeNodeLocator
+        let family: MapSourceFamilyCapture?
+        let owner: VectorPlotOptionsOwner
+        let sourceRevision: String
+    }
+
+    private func inspectPlotOptions(_ context: VectorSymbologyContext,
+                                    source: VectorSymbologyLayerSource,
+                                    store: WorkspaceStore) async throws -> [VectorPlotOption] {
+        guard let client else { throw ProjectFileError.invalid(Self.unavailableConditionsReason) }
+        let capture = try plotCapture(context, source: source, store: store)
+        let workflow = store.mapSourceWorkflowIdentity(context.mapID)
+        let values = transientPlotOptions[capture.owner] ?? [:]
+        let response: VectorPlotOptionsResponse = try await client.request(
+            "map.vector.plotOptions.inspect",
+            parameters: VectorPlotOptionsRequest(map: capture.requestMap,
+                node: capture.locator, layerID: source.layer.id,
+                expectedFamily: capture.family, sourceRevision: capture.sourceRevision,
+                plotOptions: values),
+            as: VectorPlotOptionsResponse.self)
+        guard Self.responseMatches(response, mapID: context.mapID, layer: source.layer,
+                              map: capture.map, locator: capture.locator,
+                              expectedOptions: values),
+              store.projectSessionID == context.projectSessionID,
+              store.mapIdentityRequest(for: context.mapID) == capture.map,
+              store.mapSourceWorkflowIdentity(context.mapID) == workflow,
+              store.vectorSymbologyContexts(mapID: context.mapID).contains(context),
+              let current = try resolvedLayerSource(context, store: store),
+              current.settings.revision == source.settings.revision,
+              current.layer.sourceRevision == source.layer.sourceRevision else {
+            throw ProjectFileError.modifiedExternally
+        }
+        return try response.plotOptions.map { descriptor in
+            guard descriptor.kind == "bool" || descriptor.kind == "enum",
+                  descriptor.kind != "bool" || descriptor.enumValues.isEmpty,
+                  descriptor.kind != "enum" || !descriptor.enumValues.isEmpty,
+                  descriptor.kind != "enum" || descriptor.enumValues.contains(where: { $0.value == descriptor.value }) else {
+                throw ProjectFileError.invalid("The source vector renderer returned an unsupported PlotOption contract.")
+            }
+            return VectorPlotOption(id: descriptor.propertyName, title: descriptor.label,
+                isBoolean: descriptor.kind == "bool", value: descriptor.value,
+                choices: descriptor.enumValues.map {
+                    EditorChoice(id: $0.value, title: $0.label)
+                }, isEnabled: descriptor.isEnabled, description: descriptor.description)
+        }
+    }
+
+    private func validatedPlotOptions(_ submitted: [VectorPlotOption],
+                                     context: VectorSymbologyContext,
+                                     source: VectorSymbologyLayerSource,
+                                     store: WorkspaceStore) async throws -> [String: String] {
+        guard let client else {
+            if submitted.isEmpty { return [:] }
+            throw ProjectFileError.invalid("The retained vector PlotOption service is unavailable.")
+        }
+        let capture = try plotCapture(context, source: source, store: store)
+        guard Set(submitted.map(\.id)).count == submitted.count else {
+            throw ProjectFileError.invalid("Vector PlotOption properties must be unique.")
+        }
+        let previous = transientPlotOptions[capture.owner] ?? [:]
+        // A renderer-inspection failure hides these controls. Applying only
+        // the ordinary .vis editor must then preserve any last accepted
+        // transient values instead of silently resetting them.
+        if submitted.isEmpty { return previous }
+
+        let baseline: VectorPlotOptionsResponse = try await client.request(
+            "map.vector.plotOptions.inspect",
+            parameters: VectorPlotOptionsRequest(map: capture.requestMap,
+                node: capture.locator, layerID: source.layer.id,
+                expectedFamily: capture.family, sourceRevision: capture.sourceRevision,
+                plotOptions: previous),
+            as: VectorPlotOptionsResponse.self)
+        guard Self.responseMatches(baseline, mapID: context.mapID, layer: source.layer,
+                              map: capture.map, locator: capture.locator, expectedOptions: previous) else {
+            throw ProjectFileError.modifiedExternally
+        }
+        let descriptors = Dictionary(baseline.plotOptions.map { ($0.propertyName, $0) },
+                                     uniquingKeysWith: { first, _ in first })
+        guard descriptors.count == baseline.plotOptions.count,
+              Set(descriptors.keys) == Set(submitted.map(\.id)) else {
+            throw ProjectFileError.modifiedExternally
+        }
+        var valuesToApply: [String: String] = [:]
+        for option in submitted {
+            guard let descriptor = descriptors[option.id] else { throw ProjectFileError.modifiedExternally }
+            if descriptor.kind == "bool" {
+                guard option.isBoolean, option.choices.isEmpty,
+                      option.value == "true" || option.value == "false" else {
+                    throw ProjectFileError.invalid("A vector PlotOption value does not match its source type.")
+                }
+            } else if descriptor.kind == "enum" {
+                guard !option.isBoolean,
+                      descriptor.enumValues.contains(where: { $0.value == option.value }) else {
+                    throw ProjectFileError.invalid("A vector PlotOption value is not one of the source choices.")
+                }
+            } else {
+                throw ProjectFileError.invalid("The source vector renderer returned an unsupported PlotOption type.")
+            }
+            if descriptor.isEnabled {
+                valuesToApply[option.id] = option.value
+            } else if option.value != descriptor.value {
+                throw ProjectFileError.invalid("A disabled source PlotOption cannot be changed.")
+            }
+        }
+        let validated: VectorPlotOptionsResponse = try await client.request(
+            "map.vector.plotOptions.inspect",
+            parameters: VectorPlotOptionsRequest(map: capture.requestMap,
+                node: capture.locator, layerID: source.layer.id,
+                expectedFamily: capture.family, sourceRevision: capture.sourceRevision,
+                plotOptions: valuesToApply),
+            as: VectorPlotOptionsResponse.self)
+        guard Self.responseMatches(validated, mapID: context.mapID, layer: source.layer,
+                              map: capture.map, locator: capture.locator,
+                              expectedOptions: valuesToApply),
+              validated.plotOptions.allSatisfy({ descriptor in
+                  valuesToApply[descriptor.propertyName].map { $0 == descriptor.value } ?? true
+              }) else {
+            throw ProjectFileError.invalid("The source vector renderer rejected the selected PlotOption values.")
+        }
+        return valuesToApply
+    }
+
+    private func plotCapture(_ context: VectorSymbologyContext,
+                             source: VectorSymbologyLayerSource,
+                             store: WorkspaceStore) throws -> VectorPlotCapture {
+        guard context.scope == .layer, context.projectSessionID == store.projectSessionID,
+              source.context == context, source.layer.id == context.layerID,
+              source.layer.sourceMapID == context.mapID,
+              let identity = context.visualNode,
+              let sourceRevision = source.layer.sourceRevision,
+              Self.isSHA256(sourceRevision),
+              let map = store.mapIdentityRequest(for: context.mapID),
+              context.visualizationRevision?.caseInsensitiveCompare(map.expectedVisualizationRevision) == .orderedSame,
+              identity.mapIndex == map.mapIndex, identity.mapName == map.mapName,
+              identity.mapType == map.mapType,
+              identity.mapLayerType == "PointsVector" || identity.mapLayerType == "PolylinesVector"
+                  || identity.mapLayerType == "PolygonsVector" || identity.mapLayerType == "GdbVectorLayer",
+              identity.assetID == SourceFilePaths.canonical(source.layer.url),
+              let locator = Self.locator(for: identity) else {
+            throw ProjectFileError.modifiedExternally
+        }
+        let requestContext = store.sourceMapTreeContext(context.mapID)
+        guard requestContext.resultSelectionError == nil,
+              let projectPath = requestContext.projectURL?.standardizedFileURL.path else {
+            throw ProjectFileError.modifiedExternally
+        }
+        guard let expectedSource = expectedSource(for: source.layer, identity: identity,
+                                                  mapID: context.mapID, store: store) else {
+            throw ProjectFileError.invalid("The retained vector renderer does not support this source identity.")
+        }
+        let requestMap = VectorPlotMapRequest(projectPath: projectPath,
+            projectXml: map.projectXml, projectXmlSHA: map.projectXmlSHA,
+            mapID: map.mapID, mapIndex: map.mapIndex, mapName: map.mapName,
+            mapType: map.mapType, expectedVisualizationRevision: map.expectedVisualizationRevision,
+            resultSelectionOverrides: requestContext.resultSelectionOverrides,
+            coreLayerContext: map.coreLayerContext)
+        let owner = VectorPlotOptionsOwner(projectSessionID: context.projectSessionID,
+            mapID: context.mapID, layerID: source.layer.id,
+            sourcePath: SourceFilePaths.canonical(source.layer.url),
+            sourceRevision: sourceRevision.uppercased())
+        return VectorPlotCapture(map: map, requestMap: requestMap, locator: locator,
+            family: expectedSource.family, owner: owner, sourceRevision: sourceRevision)
+    }
+
+    private func expectedSource(for layer: MapVectorLayer, identity: VectorVisualNodeIdentity,
+                                mapID: UUID, store: WorkspaceStore) -> VectorPlotExpectedSource? {
+        guard let revision = layer.sourceRevision, Self.isSHA256(revision),
+              identity.assetID == SourceFilePaths.canonical(layer.url) else { return nil }
+        if identity.mapLayerType == "GdbVectorLayer" {
+            guard let layerName = identity.gdbLayerName, !layerName.isEmpty,
+                  let vectorType = identity.gdbVectorType,
+                  ["Point", "PointCollection", "Line", "LineCollection", "Polygon", "PolygonCollection"]
+                    .contains(vectorType),
+                  layer.url.pathExtension.lowercased() == "gdb" else { return nil }
+            return .geodatabase
+        }
+        switch layer.url.pathExtension.lowercased() {
+        case "shp":
+            guard let captured = store.sourceMapVectorFamilyCaptures[mapID]?[SourceFilePaths.canonical(layer.url)],
+                  captured.family == "shapefile",
+                  SourceFilePaths.canonical(URL(fileURLWithPath: captured.sourcePath))
+                    == SourceFilePaths.canonical(layer.url),
+                  Self.primaryRevision(captured)?.caseInsensitiveCompare(revision) == .orderedSame else {
+                return nil
+            }
+            return .shapefile(captured)
+        case "json", "geojson":
+            return .geoJSON
+        default:
+            return nil
+        }
+    }
+
+    private static func locator(for identity: VectorVisualNodeIdentity) -> CatalogTreeNodeLocator? {
+        let isSupportedNodeType = identity.mapLayerType == "GdbVectorLayer"
+            ? identity.nodeType == "GdbVectorLayer"
+            : identity.nodeType == "MapLayer"
+        guard let rootName = identity.rootName, !rootName.isEmpty,
+              !identity.nodePath.isEmpty, isSupportedNodeType,
+              let filename = identity.filename, !filename.isEmpty,
+              let filenameRelative = identity.filenameRelative, !filenameRelative.isEmpty,
+              let assetID = identity.assetID, !assetID.isEmpty else { return nil }
+        return CatalogTreeNodeLocator(rootName: rootName, nodeType: identity.nodeType,
+            nodeName: identity.nodeName, nodePath: identity.nodePath, assetID: assetID,
+            mapType: identity.mapLayerType, filename: filename, filenameRelative: filenameRelative)
+    }
+
+    private static func primaryRevision(_ family: MapSourceFamilyCapture) -> String? {
+        let sources = family.files.filter { $0.role == "source" }
+        guard sources.count == 1 else { return nil }
+        return sources[0].revision
+    }
+
+    private static func responseMatches(_ response: VectorPlotOptionsResponse,
+                                        mapID: UUID, layer: MapVectorLayer,
+                                        map: MapTreeMapIdentity,
+                                        locator: CatalogTreeNodeLocator,
+                                        expectedOptions: [String: String]) -> Bool {
+        guard response.mapID.caseInsensitiveCompare(mapID.uuidString) == .orderedSame,
+              response.layerID == layer.id,
+              response.sourcePath == SourceFilePaths.canonical(layer.url),
+              layer.sourceRevision?.caseInsensitiveCompare(response.sourceRevision) == .orderedSame,
+              response.visualizationRevision.caseInsensitiveCompare(map.expectedVisualizationRevision) == .orderedSame,
+              Set(response.plotOptions.map(\.propertyName)).count == response.plotOptions.count else { return false }
+        let descriptors = Dictionary(response.plotOptions.map { ($0.propertyName, $0) },
+                                     uniquingKeysWith: { first, _ in first })
+        return expectedOptions.allSatisfy { descriptors[$0.key]?.value == $0.value }
+            && (locator.nodeType == "MapLayer" || locator.nodeType == "GdbVectorLayer")
+    }
+
+    private static func responseMatches(_ response: VectorPlotRenderResponse,
+                                        mapID: UUID, layer: MapVectorLayer,
+                                        map: MapTreeMapIdentity,
+                                        locator: CatalogTreeNodeLocator,
+                                        viewport: RasterMapViewExtent,
+                                        expectedOptions: [String: String],
+                                        expectedRenderScale: Double) -> Bool {
+        guard response.mapID.caseInsensitiveCompare(mapID.uuidString) == .orderedSame,
+              response.layerID == layer.id,
+              response.sourcePath == SourceFilePaths.canonical(layer.url),
+              layer.sourceRevision?.caseInsensitiveCompare(response.sourceRevision) == .orderedSame,
+              response.visualizationRevision.caseInsensitiveCompare(map.expectedVisualizationRevision) == .orderedSame,
+              response.viewport == viewport,
+              response.renderScale == expectedRenderScale,
+              Set(response.plotOptions.map(\.propertyName)).count == response.plotOptions.count else { return false }
+        let descriptors = Dictionary(response.plotOptions.map { ($0.propertyName, $0) },
+                                     uniquingKeysWith: { first, _ in first })
+        return expectedOptions.allSatisfy { descriptors[$0.key]?.value == $0.value }
+            && (locator.nodeType == "MapLayer" || locator.nodeType == "GdbVectorLayer")
+    }
+
+    private func plotStyles(identity: VectorVisualNodeIdentity,
+                            source: VectorSymbologyContext,
+                            presentation: MapVectorStylePresentation?) throws -> [VectorPlotStyle] {
+        guard let store, let resolved = try resolvedLayerSource(source, store: store),
+              let definitions = identity.supportedStyleDefinitionIDs else {
+            throw ProjectFileError.modifiedExternally
+        }
+        return try definitions.map { definitionID in
+            guard let base = presentation?.base[definitionID]
+                    ?? resolved.settings.options[definitionID]?.values
+                    ?? resolved.defaults[definitionID] else {
+                throw ProjectFileError.modifiedExternally
+            }
+            let overrides = (presentation?.sourceFeatureOrdinalBindingVerified == true
+                ? presentation?.perSourceFeatureOverrides ?? [:] : [:])
+                .keys.sorted().compactMap { sourceIndex -> VectorPlotStyleOverride? in
+                    guard let value = presentation?.perSourceFeatureOverrides[sourceIndex]?[definitionID] else { return nil }
+                    return VectorPlotStyleOverride(sourceFeatureIndex: sourceIndex, values: value)
+                }
+            return VectorPlotStyle(definitionID: definitionID, base: base, sourceOverrides: overrides)
+        }
+    }
+
+    private func plotOptionsOwner(context: VectorSymbologyContext,
+                                  layer: MapVectorLayer) -> VectorPlotOptionsOwner? {
+        guard let revision = layer.sourceRevision, Self.isSHA256(revision) else { return nil }
+        return VectorPlotOptionsOwner(projectSessionID: context.projectSessionID,
+            mapID: context.mapID, layerID: layer.id,
+            sourcePath: SourceFilePaths.canonical(layer.url), sourceRevision: revision.uppercased())
+    }
+
+    private func invalidatePlotFrames(mapID: UUID) {
+        plotGenerations[mapID] = (plotGenerations[mapID] ?? 0) &+ 1
+        if plotFrameCollections[mapID] != nil { plotFrameCollections[mapID] = nil }
+        if plotFrameFailures[mapID] != nil { plotFrameFailures[mapID] = [:] }
+    }
+
+    private static func enabledOptions(_ values: [String: String],
+                                       descriptors: [VectorPlotOptionPayload]) -> [String: String] {
+        let enabled = Set(descriptors.filter(\.isEnabled).map(\.propertyName))
+        return values.filter { enabled.contains($0.key) }
+    }
+
+    private static func validLabel(_ label: MapVectorPlotLabel) -> Bool {
+        !label.text.isEmpty && label.point.x.isFinite && label.point.y.isFinite
+            && label.polyline.allSatisfy { $0.x.isFinite && $0.y.isFinite }
+    }
+
+    private static func viewportIsSupported(_ viewport: RasterMapViewExtent) -> Bool {
+        viewport.minX.isFinite && viewport.minY.isFinite && viewport.maxX.isFinite && viewport.maxY.isFinite
+            && viewport.minX < viewport.maxX && viewport.minY < viewport.maxY
+            && viewport.pixelWidth > 0 && viewport.pixelHeight > 0
+            && viewport.pixelWidth <= 4096 && viewport.pixelHeight <= 4096
+            && viewport.pixelWidth <= 2_097_152 / viewport.pixelHeight
+    }
+
+    private static func isSHA256(_ value: String) -> Bool {
+        value.count == 64 && value.allSatisfy { $0.isHexDigit }
     }
 
     private func resolvedLayerSource(_ context: VectorSymbologyContext,
@@ -282,6 +836,10 @@ final class WorkspaceVectorSymbologyProvider: VectorSymbologyProvider {
     /// source files, draft geometry, selection, or map history.
     func refresh(mapID: UUID) async {
         guard let store else { return }
+        // `.vis` and global-default revisions are separate from source SHA.
+        // Remove a frame before any asynchronous style recomputation so a
+        // previous render cannot remain visible under newly effective colors.
+        invalidatePlotFrames(mapID: mapID)
         let generation = (refreshGenerations[mapID] ?? 0) &+ 1
         refreshGenerations[mapID] = generation
         guard let state = store.loadedVectorStyleMapStates().first(where: { $0.id == mapID }) else { return }
@@ -449,6 +1007,7 @@ final class WorkspaceVectorSymbologyProvider: VectorSymbologyProvider {
             preserveInteractionState: true
         )
         store.installMapUpdate(update, mapID: mapID)
+        await refreshPlotFrames(mapID: mapID)
     }
 
     private func globalSnapshot() -> VectorSymbologySnapshot {

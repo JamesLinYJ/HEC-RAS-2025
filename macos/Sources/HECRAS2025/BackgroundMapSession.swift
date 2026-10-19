@@ -27,7 +27,7 @@ struct BackgroundMapViewport: Codable, Equatable, Sendable {
     let pixelHeight: Int
 }
 
-struct BackgroundMapRenderRequest: Codable, Sendable {
+struct BackgroundMapRenderRequest: Codable, Equatable, Sendable {
     let requestID: String
     let mapID: String
     let projectSessionID: String
@@ -152,7 +152,12 @@ struct BackgroundMapSnapshot: Sendable {
 @MainActor
 final class BackgroundMapSession: ObservableObject {
     @Published var settings = BackgroundMapSettings() {
-        didSet { if oldValue != settings { scheduleRender() } }
+        didSet {
+            if oldValue != settings {
+                cancelHoveredTileJSON()
+                scheduleRender()
+            }
+        }
     }
     @Published private(set) var snapshot: BackgroundMapSnapshot?
     @Published private(set) var styles: [BackgroundMapStyle] = []
@@ -166,8 +171,11 @@ final class BackgroundMapSession: ObservableObject {
 
     private let client: BackendProcessClient
     private let renderRequest: @MainActor (BackgroundMapRenderRequest) async throws -> BackgroundMapRenderResult
+    private let tileJSONProvider: BackgroundMapTileJsonProvider
     private var renderTask: Task<Void, Never>?
+    private var tileJSONTask: Task<BackgroundMapTileJsonResult, any Error>?
     private var generation: UInt64 = 0
+    private var tileJSONGeneration: UInt64 = 0
     private var renderNeedsRefresh = false
     private var viewportContext: ViewportContext?
     private var stylesTask: Task<Void, Never>?
@@ -186,13 +194,116 @@ final class BackgroundMapSession: ObservableObject {
     }
 
     init(client: BackendProcessClient? = nil,
-         renderRequest: (@MainActor (BackgroundMapRenderRequest) async throws -> BackgroundMapRenderResult)? = nil) {
+         renderRequest: (@MainActor (BackgroundMapRenderRequest) async throws -> BackgroundMapRenderResult)? = nil,
+         tileJSONRequest: (@MainActor (BackgroundMapTileJsonRequest) async throws -> BackgroundMapTileJsonResult)? = nil) {
         let resolvedClient = client ?? BackendProcessClient(executableURL: Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/Backend/HECRASBackend"))
         self.client = resolvedClient
         self.renderRequest = renderRequest ?? { request in
             try await resolvedClient.request("map.background.render", parameters: request)
         }
+        if let tileJSONRequest {
+            self.tileJSONProvider = BackgroundMapTileJsonProvider(request: tileJSONRequest)
+        } else {
+            self.tileJSONProvider = BackgroundMapTileJsonProvider(client: resolvedClient)
+        }
+    }
+
+    var canCopyHoveredTileJSON: Bool {
+        guard settings.areBackgroundMapsOn, settings.isOpenStreetMapOn,
+              let viewportContext else { return false }
+        return !viewportContext.projectionType.isEmpty && !viewportContext.projectionValue.isEmpty
+    }
+
+    func matchesContext(mapID: UUID, projectSessionID: UUID, projectionType: String,
+                        projectionValue: String, viewport: BackgroundMapViewport,
+                        worldUnitsPerPixel: Double, settings expectedSettings: BackgroundMapSettings) -> Bool {
+        guard let viewportContext else { return false }
+        return viewportContext.mapID == mapID.uuidString
+            && viewportContext.projectSessionID == projectSessionID.uuidString
+            && viewportContext.projectionType == projectionType
+            && viewportContext.projectionValue == projectionValue
+            && viewportContext.viewport == viewport
+            && viewportContext.worldUnitsPerPixel == worldUnitsPerPixel
+            && settings == expectedSettings
+    }
+
+    /// Fetches the real hovered OSM vector tile and copies its protobuf JSON
+    /// only if the map/source/viewport capture is still current on return.
+    @discardableResult
+    func copyHoveredTileJSON(at clickedWorldPoint: BackgroundMapCoordinate,
+                             writeClipboard: @MainActor (String) -> Void) async throws
+        -> BackgroundMapTileJsonResult {
+        guard let capturedContext = viewportContext else {
+            throw BackgroundMapTileJSONError.viewportUnavailable
+        }
+        guard clickedWorldPoint.x.isFinite, clickedWorldPoint.y.isFinite,
+              clickedWorldPoint.x >= capturedContext.viewport.minX,
+              clickedWorldPoint.x <= capturedContext.viewport.maxX,
+              clickedWorldPoint.y >= capturedContext.viewport.minY,
+              clickedWorldPoint.y <= capturedContext.viewport.maxY else {
+            throw BackgroundMapTileJSONError.invalidClickedPoint
+        }
+
+        cancelHoveredTileJSON()
+        let capturedGeneration = tileJSONGeneration
+        let capturedSettings = settings
+        let capture = BackgroundMapRenderRequest(requestID: UUID().uuidString,
+            mapID: capturedContext.mapID, projectSessionID: capturedContext.projectSessionID,
+            projectionType: capturedContext.projectionType, projectionValue: capturedContext.projectionValue,
+            viewport: capturedContext.viewport, worldUnitsPerPixel: capturedContext.worldUnitsPerPixel,
+            settings: capturedSettings)
+        let request = BackgroundMapTileJsonRequest(capture: capture, clickedWorldPoint: clickedWorldPoint)
+        let provider = tileJSONProvider
+        let requestTask = Task { try await provider.load(request) }
+        tileJSONTask = requestTask
+        defer {
+            if tileJSONGeneration == capturedGeneration { tileJSONTask = nil }
+        }
+
+        let result = try await withTaskCancellationHandler {
+            try await requestTask.value
+        } onCancel: {
+            requestTask.cancel()
+        }
+        try Task.checkCancellation()
+        guard tileJSONGeneration == capturedGeneration,
+              viewportContext == capturedContext,
+              settings == capturedSettings else {
+            throw CancellationError()
+        }
+        guard result.capture == capture, result.clickedWorldPoint == clickedWorldPoint,
+              result.sourceID == "osm" else {
+            throw BackgroundMapTileJSONError.invalidResponse
+        }
+
+        switch result.status {
+        case "available":
+            guard let tile = result.tile, let sourceRevision = result.sourceRevision,
+                  let rawJSON = result.rawJson, !rawJSON.isEmpty else {
+                throw BackgroundMapTileJSONError.invalidResponse
+            }
+            guard (0...14).contains(tile.zoom) else {
+                throw BackgroundMapTileJSONError.invalidResponse
+            }
+            let maximumTileIndex = (1 << tile.zoom) - 1
+            let validHex = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+            guard (0...maximumTileIndex).contains(tile.column),
+                  (0...maximumTileIndex).contains(tile.tmsRow), sourceRevision.count == 64,
+                  sourceRevision.unicodeScalars.allSatisfy(validHex.contains),
+                  let jsonData = rawJSON.data(using: .utf8),
+                  (try? JSONSerialization.jsonObject(with: jsonData)) is [String: Any] else {
+                throw BackgroundMapTileJSONError.invalidResponse
+            }
+            writeClipboard(rawJSON)
+        case "disabled", "outsideCoverage":
+            guard result.tile == nil, result.sourceRevision == nil, result.rawJson == nil else {
+                throw BackgroundMapTileJSONError.invalidResponse
+            }
+        default:
+            throw BackgroundMapTileJSONError.invalidResponse
+        }
+        return result
     }
 
     func updateViewport(mapID: UUID, projectSessionID: UUID, projectionType: String,
@@ -215,6 +326,7 @@ final class BackgroundMapSession: ObservableObject {
             if renderNeedsRefresh { scheduleRender() }
             return
         }
+        cancelHoveredTileJSON()
         viewportContext = next
         scheduleRender()
     }
@@ -303,6 +415,7 @@ final class BackgroundMapSession: ObservableObject {
     /// Retires every request associated with this map document without
     /// discarding its persisted per-map settings or already loaded metadata.
     func invalidate() {
+        cancelHoveredTileJSON()
         generation &+= 1
         stylesGeneration &+= 1
         cacheGeneration &+= 1
@@ -326,6 +439,7 @@ final class BackgroundMapSession: ObservableObject {
     }
 
     func cancelRendering(clearSnapshot: Bool = false) {
+        cancelHoveredTileJSON()
         generation &+= 1
         renderTask?.cancel()
         renderTask = nil
@@ -335,6 +449,12 @@ final class BackgroundMapSession: ObservableObject {
             viewportContext = nil
             snapshot = nil
         }
+    }
+
+    private func cancelHoveredTileJSON() {
+        tileJSONGeneration &+= 1
+        tileJSONTask?.cancel()
+        tileJSONTask = nil
     }
 
     private func scheduleRender() {
@@ -392,6 +512,23 @@ final class BackgroundMapSession: ObservableObject {
                 self.isLoading = false
                 self.error = error.localizedDescription
             }
+        }
+    }
+}
+
+private enum BackgroundMapTileJSONError: LocalizedError {
+    case viewportUnavailable
+    case invalidClickedPoint
+    case invalidResponse
+
+    var errorDescription: String? {
+        switch self {
+        case .viewportUnavailable:
+            "The map viewport is not available for reading an OSM tile."
+        case .invalidClickedPoint:
+            "The clicked point is outside the current map viewport."
+        case .invalidResponse:
+            "The OSM tile service returned an invalid tile JSON response."
         }
     }
 }

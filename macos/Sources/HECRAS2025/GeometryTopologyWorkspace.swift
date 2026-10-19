@@ -72,6 +72,10 @@ struct GeometryTopologyWorkspacePage: View {
                 if !availableTools.isEmpty {
                     GeometryTopologyToolsMenu(selection: $activeTool, availableTools: availableTools)
                 }
+                if let columnKind = GeometryTopologyMetadataColumnKind(rawValue: featureKind) {
+                    GeometryTopologyMetadataColumnMenu(featureKind: columnKind,
+                        columns: table.columns, session: session)
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -146,11 +150,15 @@ struct GeometryTopologyWorkspacePage: View {
         .sheet(item: $profileActionCapture) { capture in
             GeometryTopologyFeatureProfileSheet(store: store, topology: session, capture: capture)
         }
+        .sheet(isPresented: Binding(get: { activeTool == .vectorImport },
+            set: { if !$0 { activeTool = nil } })) {
+            GeometryVectorImportView(topology: session, store: store)
+        }
     }
 
     private var availableTools: [GeometryTopologyToolPanel] {
         switch featureKind {
-        case "arc": [.arcPoints, .tagFilter]
+        case "arc": [.vectorImport, .arcPoints, .tagFilter]
         case "region": [.recipe, .tagFilter]
         default: []
         }
@@ -166,6 +174,8 @@ struct GeometryTopologyWorkspacePage: View {
 
         let panel: GeometryTopologyToolPanel?
         switch (featureKind, request.action) {
+        case ("arc", .vectorImport) where request.featureKind == nil:
+            panel = .vectorImport
         case ("arc", .arcPoints) where request.featureKind == "arc":
             panel = .arcPoints
         case ("arc", .tagFilter) where request.featureKind == nil:
@@ -223,6 +233,12 @@ struct GeometryTopologyWorkspacePage: View {
                 }
                     .width(min: 85, ideal: 105)
             }
+            TableColumnForEach(table.columns.filter { $0.isUserDefined == true }) { column in
+                TableColumn(column.title) { row in
+                    userDefinedColumnCell(row, columnID: column.id)
+                }
+                .width(min: 90, ideal: 130)
+            }
             TableColumn("Properties and tags") { row in
                 Text(compactAttributes(row))
                     .lineLimit(1)
@@ -250,6 +266,14 @@ struct GeometryTopologyWorkspacePage: View {
         GeometryTopologyFeatureContextMenu(topology: session, store: store,
             featureKind: featureKind, rowIDs: contextRowIDs(for: row.id),
             profileCapture: $profileActionCapture, error: $featureActionError)
+    }
+
+    private func userDefinedColumnCell(_ row: GeometryTopologyFeatureRow, columnID: String) -> some View {
+        let cellValue: String = value(row, columnID, fallback: "—")
+        return Text(verbatim: cellValue)
+            .font(.caption.monospaced())
+            .textSelection(.enabled)
+            .contextMenu { featureContextMenu(for: row) }
     }
 
     /// Original DataGrid right-click behavior retains a selected row group,
@@ -484,7 +508,7 @@ struct GeometryTopologyWorkspacePage: View {
 
     private func compactAttributes(_ row: GeometryTopologyFeatureRow) -> String {
         let excluded = Set(["FID", "X", "Y", "StartNodeID", "EndNodeID", "Length"])
-        return table.columns.filter { !excluded.contains($0.id) }
+        return table.columns.filter { !excluded.contains($0.id) && $0.isUserDefined != true }
             .compactMap { column in
                 guard let value = row.values[column.id], !value.isEmpty else { return nil }
                 return "\(column.title): \(value)"

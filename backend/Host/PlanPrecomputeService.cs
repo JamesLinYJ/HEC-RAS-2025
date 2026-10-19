@@ -52,12 +52,13 @@ public static partial class ModelEditorAdapter
         string assetPath = Path.GetFullPath(request.AssetPath);
         string revision = Revision(assetPath);
         if (revision != request.Revision) throw new SourceFileChangedException();
-        VerifyOwningProject(projectPath, assetPath);
+        VerifyOwningProject(projectPath, assetPath, request.CoreLayerContext);
         string projectRevision = Revision(projectPath);
         Dictionary<string, string> dependencySnapshot = CapturePlanPrecomputeDependencies(
-            projectPath, assetPath, request.ProjectXml);
+            projectPath, assetPath, request.ProjectXml, request.CoreLayerContext);
 
-        ModelRequest model = new(assetPath, "Plan", projectPath, request.ProjectXml, request.SourceState);
+        ModelRequest model = new(assetPath, "Plan", projectPath, request.ProjectXml, request.SourceState,
+            request.CoreLayerContext);
         PlanPrecomputeResult result;
         bool geometryPreparePending;
         using (var context = new ModelContext(model))
@@ -104,7 +105,8 @@ public static partial class ModelEditorAdapter
 
         if (Revision(assetPath) != revision || Revision(projectPath) != projectRevision)
             throw new SourceFileChangedException();
-        VerifyPlanPrecomputeDependencies(projectPath, assetPath, request.ProjectXml, dependencySnapshot);
+        VerifyPlanPrecomputeDependencies(projectPath, assetPath, request.ProjectXml,
+            request.CoreLayerContext, dependencySnapshot);
         return result;
     }
 
@@ -212,13 +214,13 @@ public static partial class ModelEditorAdapter
         // Only ordinary staged Save may materialize these image changes.
     }
 
-    private static Dictionary<string, string> CapturePlanPrecomputeDependencies(
-        string projectPath, string assetPath, string projectXml)
+    internal static Dictionary<string, string> CapturePlanPrecomputeDependencies(
+        string projectPath, string assetPath, string projectXml,
+        CoreLayerRequestContext? coreLayerContext)
     {
-        var project = new Project(projectPath);
+        var project = CoreLayerImportService.OpenProject(projectPath, projectXml, coreLayerContext);
         try
         {
-            project.ApplyEditorMetadata(XElement.Parse(projectXml));
             Plan plan = project.Plans.FirstOrDefault(candidate =>
                 SourceFilePaths.SameSourceFile(candidate.Filename, assetPath))
                 ?? throw new ArgumentException("The plan does not belong to the selected project.");
@@ -279,10 +281,12 @@ public static partial class ModelEditorAdapter
         }
     }
 
-    private static void VerifyPlanPrecomputeDependencies(string projectPath, string assetPath,
-        string projectXml, Dictionary<string, string> expected)
+    internal static void VerifyPlanPrecomputeDependencies(string projectPath, string assetPath,
+        string projectXml, CoreLayerRequestContext? coreLayerContext,
+        Dictionary<string, string> expected)
     {
-        Dictionary<string, string> current = CapturePlanPrecomputeDependencies(projectPath, assetPath, projectXml);
+        Dictionary<string, string> current = CapturePlanPrecomputeDependencies(projectPath, assetPath,
+            projectXml, coreLayerContext);
         bool unchanged = expected.Count == current.Count && expected.All(pair =>
             current.TryGetValue(pair.Key, out string? state) && string.Equals(pair.Value, state, StringComparison.Ordinal));
         if (!unchanged) throw new SourceFileChangedException();

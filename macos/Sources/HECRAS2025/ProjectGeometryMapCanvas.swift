@@ -1,8 +1,81 @@
 import RASWorkspaceCore
 import SwiftUI
 
+private struct GeometryPlotCanvasRequest {
+    let captureIdentity: String
+    let family: GeometryMeshPlotRendererFamily
+    let session: GeometryMeshPlotSession
+    let intent: GeometryMeshPlotRenderIntent
+}
+
 @MainActor
 enum ProjectGeometryMapStyleResolver {
+    static func plotPacket(for source: ProjectGeometryMapSourceState,
+                          state: MapGeometryLayerState,
+                          family: GeometryMeshPlotRendererFamily,
+                          store: WorkspaceStore,
+                          mapID: UUID) -> GeometryMeshPlotStylePacket? {
+        let nodeType: String
+        let ids: [String]
+        switch family {
+        case .mesh:
+            nodeType = "FlowAreaLayer"
+            ids = ["Mesh_Line_Symbology"]
+        case .conceptualMesh:
+            nodeType = "ConceptualMesh"
+            ids = ["Arc_Line_Symbology", "Node_Symbology", "Deletable_Node_Symbology",
+                   "Internal_Point_Symbology"]
+        case .topologyTIN:
+            // ViewTIN creates a transient TinRenderLayer with its real source
+            // defaults; no saved map-tree symbology owner is attached to it.
+            return .sourceDefaults
+        }
+        guard let childLocator = state.locator,
+              let geometryPath = source.capture.geometryNode.nodePath else { return nil }
+        let matchingOwners = store.vectorSymbologyContexts(mapID: mapID).filter { context in
+            guard let owner = context.specializedNode else { return false }
+            return context.mapID == mapID
+                && context.projectSessionID == source.capture.projectSessionID
+                && owner.geometryNodePath == geometryPath
+                && owner.geometryName == source.capture.geometryName
+                && SourceFilePaths.canonical(URL(fileURLWithPath: owner.geometryAssetID))
+                    == source.capture.geometryCanonicalPath
+                && owner.rootName == source.capture.geometryNode.rootName
+                && owner.nodeType == nodeType
+                && owner.nodePath == childLocator.nodePath
+                && owner.nodeName == childLocator.nodeName
+        }
+        guard matchingOwners.count <= 1 else { return nil }
+
+        let values: [String: VectorStyleValues]
+        let scope: GeometryMeshPlotStylePacket.Scope
+        let revision: String
+        if let context = matchingOwners.first {
+            do {
+                guard let owner = try store.specializedVectorStyleSource(context),
+                      Set(owner.settings.options.keys) == Set(ids) else { return nil }
+                values = owner.settings.options.mapValues(\.values)
+                scope = .localVis
+                revision = owner.settings.revision ?? ""
+            } catch {
+                return nil
+            }
+        } else {
+            // A map with no exact local owner inherits the current global
+            // Geometry styles. Local styles from sibling maps are never used.
+            values = Dictionary(uniqueKeysWithValues: ids.map {
+                ($0, store.effectiveVectorStyle(definitionID: $0))
+            })
+            scope = .global
+            revision = ""
+        }
+        guard Set(values.keys) == Set(ids) else { return nil }
+        let canonicalValues = values.compactMapValues { $0.validatedForPersistence() }
+        guard canonicalValues.count == ids.count else { return nil }
+        return GeometryMeshPlotStylePacket(scope: scope, revision: revision,
+            globalRevision: store.vectorStyleRevision, styles: canonicalValues)
+    }
+
     static func values(for source: ProjectGeometryMapSourceState,
                        state: MapGeometryLayerState,
                        nodeType: String,
@@ -246,18 +319,139 @@ struct ProjectGeometryMapCanvas: View {
         return matches.count == 1 ? matches.first : nil
     }
 
+    private func geometryPlotRequests(transform: MapTransform,
+                                      size: CGSize,
+                                      renderScale: Double) -> [GeometryPlotCanvasRequest] {
+        // The 180x120 minimap uses the same source owner but a different
+        // camera. Keep source rendering on the primary canvas so two views do
+        // not race the map-scoped renderer session for different viewports.
+        guard size.width.isFinite, size.height.isFinite, size.width >= 320, size.height >= 240,
+              transform.factor.isFinite, transform.factor > 0 else { return [] }
+        let geometryRows = MapRenderComposition.orderedRecords(mapState.sourceMapRenderRows)
+            .filter { $0.mapID == mapID && $0.payloadKind == "Geometry" && $0.isActiveAndVisible }
+        let visibleGeometryOwners = Set(geometryRows.map(\.locator))
+        let upperLeft = transform.world(.zero)
+        let lowerRight = transform.world(CGPoint(x: size.width, y: size.height))
+        let viewport = GeometryMeshPlotViewport(minX: min(upperLeft.x, lowerRight.x),
+            minY: min(upperLeft.y, lowerRight.y), maxX: max(upperLeft.x, lowerRight.x),
+            maxY: max(upperLeft.y, lowerRight.y))
+        guard viewport.isFiniteAndOrdered else { return [] }
+
+        let width = Double(size.width)
+        let height = Double(size.height)
+        let requestedScale = renderScale.isFinite && renderScale > 0 ? min(renderScale, 4) : 1
+        let maxDimensionScale = min(4096 / width, 4096 / height)
+        let maxPixelScale = sqrt(2_097_152 / (width * height))
+        let pixelScale = min(requestedScale, maxDimensionScale, maxPixelScale)
+        let pixelWidth = max(1, Int((width * pixelScale).rounded(.down)))
+        let pixelHeight = max(1, Int((height * pixelScale).rounded(.down)))
+        guard pixelWidth <= 4096, pixelHeight <= 4096,
+              pixelWidth * pixelHeight <= 2_097_152 else { return [] }
+        // Integer raster dimensions can differ slightly by axis after
+        // flooring. The lower actual pixels-per-point ratio keeps source
+        // pens/markers from looking thicker on either axis after resampling.
+        let pixelSamplingScale = min(Double(pixelWidth) / width, Double(pixelHeight) / height)
+        guard pixelSamplingScale.isFinite, pixelSamplingScale > 0,
+              renderScale * pixelSamplingScale <= 64 else { return [] }
+
+        return sourcesInPaintOrder.compactMap { source in
+            guard let snapshot = source.snapshot, snapshot.geometryEffectiveVisible,
+                  visibleGeometryOwners.contains(source.capture.geometryNode) else { return nil }
+            let familySession = session.geometryPlotSession(for: source.capture.identity)
+            let family = familySession.rendererFamily
+            let layerIsVisible: Bool
+            switch family {
+            case .mesh:
+                layerIsVisible = source.presentsFlowAreaData
+            case .conceptualMesh:
+                layerIsVisible = snapshot.topologyState.effectiveVisible
+                    && snapshot.topologyState.status.hasSourceData
+            case .topologyTIN:
+                layerIsVisible = snapshot.topologyState.effectiveVisible
+                    && snapshot.topologyState.status.hasSourceData
+            }
+            let styleState: MapGeometryLayerState
+            switch family {
+            case .mesh: styleState = snapshot.flowAreasState
+            case .conceptualMesh, .topologyTIN: styleState = snapshot.topologyState
+            }
+            guard layerIsVisible,
+                  let stylePacket = ProjectGeometryMapStyleResolver.plotPacket(for: source,
+                    state: styleState, family: family, store: store, mapID: mapID),
+                  let intent = familySession.renderIntent(source: source, mapState: mapState,
+                      store: store, viewport: viewport, pixelWidth: pixelWidth,
+                      pixelHeight: pixelHeight, renderScale: renderScale,
+                      pixelSamplingScale: pixelSamplingScale,
+                      stylePacket: stylePacket) else { return nil }
+            return GeometryPlotCanvasRequest(captureIdentity: source.capture.identity,
+                family: family, session: familySession, intent: intent)
+        }
+    }
+
+    private func plotRequestIdentity(_ requests: [GeometryPlotCanvasRequest]) -> String {
+        requests.map { $0.captureIdentity + "|" + $0.intent.identity }
+            .joined(separator: "\n")
+    }
+
+    private func drawSourcePlot(_ output: GeometryMeshPlotRenderedOutput,
+                                in context: inout GraphicsContext,
+                                transform: MapTransform,
+                                renderScale: Double) {
+        let response = output.response
+        let topLeft = transform.screen(MapPoint(x: response.rasterExtent.minX,
+            y: response.rasterExtent.maxY))
+        let bottomRight = transform.screen(MapPoint(x: response.rasterExtent.maxX,
+            y: response.rasterExtent.minY))
+        var plotContext = context
+        plotContext.clip(to: Path(CGRect(origin: .zero, size: transform.size)))
+        plotContext.draw(Image(decorative: output.image, scale: 1), in: CGRect(
+            x: topLeft.x, y: topLeft.y,
+            width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y))
+        for label in response.labels {
+            let location = transform.screen(MapPoint(x: label.point.x, y: label.point.y))
+            guard location.x.isFinite, location.y.isFinite,
+                  location.x >= 0, location.y >= 0,
+                  location.x <= transform.size.width, location.y <= transform.size.height else { continue }
+            let text = Text(label.text)
+                .font(.system(size: max(8, 10 * renderScale)))
+                .foregroundColor(.primary)
+            context.draw(text, at: location, anchor: .center)
+        }
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let renderScale = renderScaling.factor
             let points = mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers)
             let transform = MapTransform(points: points, size: proxy.size, scale: scale, offset: offset)
+            let plotRenderingEnabled = proxy.size.width >= 320 && proxy.size.height >= 240
+            let plotRequests = geometryPlotRequests(transform: transform, size: proxy.size,
+                renderScale: renderScale)
+            let activePlotCaptures = Set(plotRequests.map(\.captureIdentity))
+            let plotIdentity = plotRequestIdentity(plotRequests)
             ZStack {
                 Canvas { context, _ in
                     // Source tree capture order is preorder. RasMap reverses
                     // enabled rows before drawing, so the same exact captures
                     // paint bottom-to-top in reverse order here.
                     for source in sourcesInPaintOrder {
-                        draw(source, in: &context, transform: transform, renderScale: renderScale)
+                        let plotRequest = plotRequests.first(where: {
+                            $0.captureIdentity == source.capture.identity
+                        })
+                        let acceptedOutput = plotRequest.flatMap { request in
+                            request.session.output(for: request.family,
+                                matching: request.intent.identity)
+                        }
+                        let suppressBaseFamily = GeometryMeshPlotFramePolicy.familyToSuppressBaseLayer(
+                            output: acceptedOutput,
+                            requestedIdentity: plotRequest?.intent.identity,
+                            requestedFamily: plotRequest?.family)
+                        draw(source, in: &context, transform: transform, renderScale: renderScale,
+                             sourceRendererFamily: suppressBaseFamily)
+                        if let acceptedOutput {
+                            drawSourcePlot(acceptedOutput, in: &context, transform: transform,
+                                          renderScale: renderScale)
+                        }
                     }
                     // Selection is a single active feature and remains above
                     // all source-painted children, as in the source map.
@@ -281,6 +475,16 @@ struct ProjectGeometryMapCanvas: View {
                 guard savedMeshMapRefreshIdentity != nil, session.canRefreshSources else { return }
                 await session.refresh()
             }
+            .task(id: plotIdentity) {
+                guard plotRenderingEnabled else { return }
+                for request in plotRequests {
+                    guard !Task.isCancelled else { return }
+                    request.session.requestRender(request.intent)
+                }
+                for source in sourcesInPaintOrder where !activePlotCaptures.contains(source.capture.identity) {
+                    session.geometryPlotSession(for: source.capture.identity).requestRender(nil)
+                }
+            }
         }
     }
 
@@ -297,11 +501,17 @@ struct ProjectGeometryMapCanvas: View {
     private func draw(_ source: ProjectGeometryMapSourceState,
                       in context: inout GraphicsContext,
                       transform: MapTransform,
-                      renderScale: Double) {
+                      renderScale: Double,
+                      sourceRendererFamily: GeometryMeshPlotRendererFamily?) {
         guard let snapshot = source.snapshot, snapshot.geometryEffectiveVisible else { return }
         for layer in childLayers(in: snapshot, topmostFirst: false) {
             switch layer {
             case .topology:
+                // The actual ConceptualMesh source renderer owns this child
+                // layer's arcs and vertices; avoid painting the sampled DTO
+                // a second time beneath its RGBA output.
+                guard sourceRendererFamily != .conceptualMesh,
+                      sourceRendererFamily != .topologyTIN else { continue }
                 guard snapshot.topologyState.effectiveVisible,
                       snapshot.topologyState.status.hasSourceData,
                       let styles = resolvedStyles(for: source, state: snapshot.topologyState,
@@ -311,6 +521,9 @@ struct ProjectGeometryMapCanvas: View {
                 drawTopology(source.topologyFeatures, styles: styles,
                              context: &context, transform: transform, renderScale: renderScale)
             case .flowAreas:
+                // MeshRenderLayer is the source owner for these faces and
+                // edges. Its pixels replace the lightweight map DTO drawing.
+                guard sourceRendererFamily != .mesh else { continue }
                 guard source.presentsFlowAreaData,
                       let styles = resolvedStyles(for: source, state: snapshot.flowAreasState,
                           nodeType: "FlowAreaLayer", ids: ["Mesh_Line_Symbology"]) else { continue }

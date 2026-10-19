@@ -119,7 +119,7 @@
       "source": "JiraBugReportForm/ras-2025-bugreports",
       "target": "BackendBugReportProvider/BugReportService",
       "cardinality": "application-UID-current-project-XML-SHA-exact-Geometry-source-capture",
-      "semantics": "Categories and service version come from the retained report endpoint. Previewed report fields and attachments retain exact source ownership. Local geometry capture verifies canonical asset membership and revisions; submission happens only through the explicit native report action."
+      "semantics": "Categories and service version come from the retained report endpoint. Previewed report fields and attachments retain exact source ownership. The bounded Modules inventory is collected by the .NET backend process from loaded managed assemblies and enumerated native modules; file-backed modules carry SHA-256 when readable, and the Swift frontend process image is excluded. Local geometry capture verifies canonical asset membership and revisions; submission happens only through the explicit native report action."
     },
     {
       "id": "usgs-source-hover",
@@ -868,7 +868,7 @@
       "source": "SourceGeometry/FID/TypedMetadata",
       "target": "ArcRegionNodeEditors",
       "cardinality": "parent-model-revision-child-generation-and-save-capture",
-      "semantics": "Source FIDs identify features independently of sorted rows. Typed tags, metadata and quick sizing replay against the original geometry in memory. Arc sizing follows its Constant or Count function; regions and Quad sides use their source rules. The child draft joins ordinary geometry fields and images in one staged HDF save. Save locks the child, acknowledges only its captured draft and rebases its revision. Discard, model replacement and late replies cannot restore an obsolete draft."
+      "semantics": "Source FIDs identify features independently of sorted rows. Typed tags, metadata, Arc and Region user-defined column add/rename/delete, and quick sizing replay against the original geometry in memory. Column permissions use the source Arc or ControlPoint default-column predicate and observable metadata-table APIs; Nodes expose no column CRUD. Arc sizing follows its Constant or Count function; regions and Quad sides use their source rules. The child draft joins ordinary geometry fields and images in one staged HDF save. Save locks the child, acknowledges only its captured draft and rebases its revision. Discard, model replacement and late replies cannot restore an obsolete draft."
     },
     {
       "id": "catalog-project-tree",
@@ -1202,9 +1202,9 @@
     {
       "id": "plan-export",
       "source": "SelectedPlan/ProjectDraft",
-      "target": "ExportedProject/ZIP/Connections/Rasters",
-      "cardinality": "source-plan-path-and-file-revisions",
-      "semantics": "The native plan picker uses actual source paths. Export includes current project associations and saved model data; model-only save preserves the project draft. Source migration includes geometry, boundary, terrain, Manning/classification and required external connections. Source and acknowledged ZIP destination hashes guard publication. Relative copied files survive relocation. Creation and export share a project-operation lease. Upload and native final-window acceptance remain pending."
+      "target": "ExportedProject/CommittedZIPReceipt/OptionalModelLibrary",
+      "cardinality": "project-session-plan-source-revision-core-token-committed-ZIP-hash-length-and-owner",
+      "semantics": "The native picker uses actual source paths and exports current project associations without saving project XML. Source migration includes the selected Plan, geometry, boundary, terrain, Manning/classification and required external connections; relative copied connections remain relocatable. Source and acknowledged ZIP destination hashes guard local publication, and creation and export share the project-operation lease. A committed ZIP receipt binds canonical project and Plan paths, project session, source revision, optional CoreLayer identity token, output path, SHA-256 and byte length. Optional model-library upload is a second stage, available only for ZIP exports with existing developer S3 credentials and an explicit Model ID; the captured owner is the application UID or the source fallback anonymous. The Host rechecks the receipt and ZIP bytes before ModelLibraryClient.PushAsync(force:false). Duplex progress and cancellation cover both stages, while cancellation or failure after local commit preserves the ZIP and session receipt. Directory exports cannot be uploaded."
     },
     {
       "id": "hdf-string-storage",
@@ -1415,6 +1415,62 @@
       "target": "WilcockDraft/WilcockSession/WilcockService/WilcockWorkspace",
       "cardinality": "standalone-window-session-full-raw-draft-number-culture-positional-source-case-index-selected-plot-index-and-calculation-generation",
       "semantics": "The standalone calculator keeps SBTM, ISBTM, STAB and STATE inputs as raw strings and calls the retained four calculation paths independently, with section-specific input issues and unavailable results. Source tables, outputs and chart series are projections of those results; editing inputs marks calculations stale and does not write a project, HDF or map. Case IDs identify current source positions rather than names. BTM import requests confirmation before either appending on a matching grain grid or replacing STAB cases when grids differ; the response acknowledges whether existing cases were replaced. Static source wiring does not establish build, regression or native-window acceptance."
+    },
+    {
+      "id": "gdal-raster-layer-import",
+      "source": "RasterLayerImportView/GDALRaster.GetVRTSources",
+      "target": "MapRasterLayerSourceManifest/MapRasterLayerService/MapTreeService.ImportRasterLayer",
+      "cardinality": "project-session-map-owner-canonical-source-path-sorted-local-file-path-length-SHA256-manifest-map-type-and-request-generation",
+      "semantics": "The selected GDAL dataset is identified by its canonical root and every local file GDAL reports, including VRT dependencies; virtual /vsi sources are rejected because their local bytes cannot be verified. Actual band count and data type select the retained single-band, RGB image or discrete renderer. Preview and map load revalidate the full manifest. The .vis node retains the source and map type; no raster conversion or snapshot is created. Local project projections remain valid and do not gain fabricated CRS metadata."
+    },
+    {
+      "id": "gdb-multitype-source-manifest",
+      "source": "GdbMapSourceService.CaptureSource/GdbMapCatalogResponse",
+      "target": "MapTreeService.ImportGdbVector/GdbMapSourceService/GdbRasterSourceService",
+      "cardinality": "project-session-map-visualization-revision-canonical-directory-sorted-non-lock-file-manifest-exact-child-identity",
+      "semantics": "One canonical directory manifest covers actual non-lock files for both OGR vector layers and GDAL raster subdatasets. Preview, publication, rendering and edits verify the same manifest. Persist the dataset parent and exact typed child: vector children identify the source layer, while raster children retain the GDAL connection string and reopen only within a verified dataset lifetime. Vector records preserve source feature order, IDs, field types, set versus NULL state, XYZM and ring roles."
+    },
+    {
+      "id": "geometry-vector-topology-import",
+      "source": "GeometryVectorImportView/GeometryTopologySession",
+      "target": "ModelEditorAdapter.InspectGeometryVectorImportAsync/ApplyGeometryVectorImportAsync/GeometryTopologyService",
+      "cardinality": "project-session-geometry-source-revision-topology-draft-identity-shapefile-family-revisions-and-import-options",
+      "semantics": "Inspect accepts actual polyline and polygon Shapefiles in the owning Geometry project coordinates. Apply re-reads selected source families, verifies the same source and draft identity, and submits the imported features as one replayable topology mutation. Merge-contiguous and external-arc options are part of that mutation. Undo/discard remain in the topology child ledger; only the registered parent Geometry save writes HDF."
+    },
+    {
+      "id": "new-shapefile-family-create",
+      "source": "NewShapefileRoute/NewShapefileService.Create",
+      "target": "NewShapefileCreateReceipt/WorkspaceStore.connectVectorSource",
+      "cardinality": "project-session-exact-map-owner-projection-and-no-clobber-file-family",
+      "semantics": "The retained writer creates the family in a sibling staging directory. Validate the map, destination and every staged member and prepare the in-memory receipt before publishing sidecars; rename .shp last as the commit point. Never clobber an existing family. Synchronous rollback removes only this operation’s published members whose bytes still match; the current SwiftUI session keeps the create receipt so a failed map import can retry without invoking the writer again."
+    },
+    {
+      "id": "rgb-raster-export",
+      "source": "RasterMapLayerBehaviors.ExportSymbologyAsRgbTiff/RgbTiffExporter.ExportRgba",
+      "target": "RasterSymbologyService.InspectRgbExport/PreviewRgbExport/ExportRgbAsync",
+      "cardinality": "exact-map-node-source-revision-visualization-revision-symbology-plot-options-extent-cell-size-and-output-path",
+      "semantics": "The export uses the selected source raster, its persisted symbology and retained RasterRenderLayer/RgbTiffExporter algorithms over the requested full extent or current view. Progress and duplex cancellation belong to the export operation. Recheck source and .vis revisions before a no-clobber atomic single-file publish, and return a receipt computed from the staged TIFF. A Local projection may evaluate successfully with no Projection object: retain geotransform and omit CRS rather than inventing one."
+    },
+    {
+      "id": "depth-contour-shapefile-export",
+      "source": "ResultMapBehaviors.ExportContour/MapResultSelectionState",
+      "target": "DepthShapefileExportService/ResultMapRenderLayer/Mapper/ResultMapResampler/ShapefileIO",
+      "cardinality": "map-context-token-exact-result-node-slot-zero-result-path-revision-profile-terrain-lease-and-output-path",
+      "semantics": "Require the explicitly selected active Result or MultiResult owner, selection slot zero and a stored profile; never substitute another Result or choose a first owner. Preview and export use the retained depth render layer, Mapper with AllowNegativeDepths, ResultMapResampler and contour generation with the captured cell size and simplification. Recheck result and terrain dependencies, respond to duplex cancellation, compute every sidecar receipt before family publication and rename .shp last. A valid Local projection writes no fabricated .prj."
+    },
+    {
+      "id": "session-core-layer-reference",
+      "source": "CoreLayerReferenceRegistry/CoreLayerRequestContext",
+      "target": "CoreLayerImportService/OpenSessionProject/Project-rebuilding request providers",
+      "cardinality": "project-session-canonical-project-path-project-revision-explicit-reference-captures-identity-token",
+      "semantics": "The project format does not persist an external core-layer reference. Each capture is session-only and binds kind, source path, canonical path, source SHA, name and reference ID; a matching typed context must be supplied explicitly whenever a backend request rebuilds Project. Without that context a Project-rebuilding request does not discover or attach arbitrary external references. Existing explicit standalone model-path requests retain their contract and do not register a project reference. The Swift registry clears on session/path replacement and rebases references after successful source saves. Add Reference acts on the exact selected map; Copy File copies bytes without implicitly changing map membership."
+    },
+    {
+      "id": "raster-calculator-map-registry",
+      "source": "MapTreeMapIdentity/MapTreeMapWorkflowIdentity/RasterCalculatorSourceChoice",
+      "target": "RasterCalculatorLayerRegistry/RasterCalculatorService",
+      "cardinality": "project-session-map-ID-map-type-capture-epoch-context-token-source-ID-revisions-profile-and-layer-generation",
+      "semantics": "The stable entry owner is project session plus map ID and actual map type; the full workflow and map identity form a separate mutable capture epoch. An epoch change cancels old evaluation and re-inspects the new capture while retaining the same owner’s recipe, name, visibility and profile. Re-evaluate only if every input still matches source ID, revision, availability, kind and map type; otherwise clear its layer and full-source extent while keeping the editable entry with an error. Reference points are the visible entries’ whole-source min/max corners, never current viewport corners. An open editor retains unsaved recipe, input, constant, name and profile drafts across changes to the same stable owner. Adopting a changed source version requires explicit confirmation for the same source ID, kind and map type. Add/Save always inspect current sources, evaluate and post-inspect the same context before registry commit; every asynchronous stage fences operation generation and draft revision."
     }
   ],
   "stateScopes": [
@@ -1781,7 +1837,7 @@
     {
       "id": "geometry-topology-child",
       "identity": "source geometry path/SHA + source FIDs + model generation + parent save UUID",
-      "rule": "Typed child operations stay in memory. A captured topology draft and ordinary fields/images share one staged HDF commit. Old loads/edits/saves cannot acknowledge a different model or a later draft."
+      "rule": "Typed topology operations, metadata-column add/rename/delete, and vector imports stay in the same in-memory child mutation/undo history. A captured topology draft, ordinary fields and images share one staged HDF commit owned by the parent save. Old loads/edits/saves cannot acknowledge a different model or later draft."
     },
     {
       "id": "source-visualization-map",
@@ -1992,6 +2048,66 @@
       "id": "persistence",
       "identity": "source SHA-256 or saved project bytes",
       "rule": "External-modification protection, not a UI reply generation counter."
+    },
+    {
+      "id": "runtime-renderer-options",
+      "identity": "map-session/exact-node/source-path/source-revision/renderer-family/viewport-generation",
+      "rule": "Plot options belong to transient renderer instances. Saved symbology remains in its existing persistence transaction. Responses only install for the captured owner, viewport and current request generation; transient vector overlays never enter feature identity, hit testing or export."
+    },
+    {
+      "id": "stream-tin-render-owner",
+      "identity": "stream-session/source-sequence/opaque-asset/streamable-sha256",
+      "rule": "Use actual typed TIN stream records. Replay only validated assets from the application-owned cache across backend child processes. Closing or replacing a connection retires associated requests and assets; stream objects do not impersonate saved map nodes."
+    },
+    {
+      "id": "result-render-options-slot",
+      "identity": "map/node/logical-slot/result-path/result-revision",
+      "rule": "Per-slot runtime choices remain distinct when two slots share the same Result. Compute writer leases and selected-profile availability still gate reads; diagnostic labels are actual renderer output."
+    },
+    {
+      "id": "gdb-source-import",
+      "identity": "project-session/map/visualization-revision/canonical-directory/sorted-file-content-manifest/exact-layer-name",
+      "rule": "The sorted manifest hashes all actual non-lock data files in the canonical directory and is shared by OGR vector children and GDAL raster subdatasets. Preview, import, render and style reads verify it with the exact map and child locator. Raster child filenames are GDAL connection strings, not standalone paths; vector rows preserve field types, unset versus NULL, XYZM and ring roles."
+    },
+    {
+      "id": "background-tile-clipboard",
+      "identity": "project-session/map/background-settings/projection/camera/clicked-world-point/tile-address/compressed-source-sha256",
+      "rule": "Read actual vector tile bytes through the normal service and cache policy. Serialize the retained tile protocol; write the clipboard only after an explicit menu action and current-owner validation. Disabled, unavailable and stale contexts produce no clipboard mutation."
+    },
+    {
+      "id": "gdal-raster-source-family",
+      "identity": "canonical-root-path + sorted-GDAL-local-file-path-length-and-content-SHA256-manifest + source-map-type",
+      "rule": "Every local dependency returned by GDAL participates in preview, import and load currentness. Virtual sources are unavailable to local-file export/import identity checks. Store the original source and actual renderer type; display pixels are derived output."
+    },
+    {
+      "id": "geometry-vector-import",
+      "identity": "project-session + Geometry-source-SHA + topology-draft-identity + selected-Shapefile-family-captures + operation-generation",
+      "rule": "Inspection is read-only. Apply re-reads and verifies selected families and mutates only the same loaded topology draft. The resulting operation shares the child undo history and parent HDF save; cancellation or stale replies cannot install another owner."
+    },
+    {
+      "id": "new-shapefile-create",
+      "identity": "operation-ID + project-session + exact-map-owner + destination-family + staged-member-SHAs + prepared-receipt",
+      "rule": "The prepared receipt is retained in the app session before map import. .shp is the final synchronous publish step; retry import reuses the receipt and never reruns file creation. No persistent project record is written by the receipt."
+    },
+    {
+      "id": "rgb-raster-export",
+      "identity": "exact-map-node + source-and-vis-revisions + output-settings + destination-lease + duplex-operation",
+      "rule": "Preview and execution use the same source and symbology capture. Cancel removes staged output; publish requires current input revisions, an absent destination and a receipt for the staged TIFF. Local/no-CRS projects retain geotransform without an invented projection."
+    },
+    {
+      "id": "depth-shapefile-export",
+      "identity": "map-context-token + exact-Result-node + slot-zero-result-path-revision + profile + terrain-source-revisions + destination-family-lease",
+      "rule": "Only a stored profile from the exact selected owner can be exported. Result and terrain dependencies are rechecked before publish. Required and optional sidecars are receipted before .shp is published last; Local projection leaves .prj absent."
+    },
+    {
+      "id": "core-layer-reference-session",
+      "identity": "project-session + canonical-project-path + optional-project-revision + explicit-reference-captures + identity-token",
+      "rule": "External references exist only in the running session. A request that reconstructs Project must explicitly carry the matching context; absent or stale context cannot attach arbitrary files. Clear captures on project-session/path replacement and rebase source hashes only after successful saves."
+    },
+    {
+      "id": "raster-calculator-map-registry",
+      "identity": "stable-owner(project-session,map-ID,map-type) + mutable-capture-epoch(workflow-identity,MapTreeMapIdentity) + source-revisions + request-generation",
+      "rule": "Same-owner epoch changes preserve editable recipe/name/visibility/profile but cancel prior work and inspect the new context. Evaluation requires every captured source identity and availability to match. Failure clears stale layer and whole-source bounds while retaining the entry and error."
     }
   ],
   "invariants": [
@@ -2248,8 +2364,21 @@
         "close HDF handles",
         "create portable ZIP or directory",
         "recheck hashes",
-        "publish and reveal output",
+        "publish local output and return its committed receipt",
+        "retain ZIP receipt with source, session, optional Core token and committed output identity",
         "independently reopen relocated project/data"
+      ]
+    },
+    {
+      "id": "plan-export-optional-model-upload",
+      "steps": [
+        "capture the exact project session, project and Plan paths, source revision, optional CoreLayer context, explicit Model ID and application owner identity",
+        "offer upload only for ZIP export when existing developer S3 credentials are available; explain unavailable capability otherwise",
+        "commit the local ZIP and retain its receipt with output SHA-256 and byte length before starting upload",
+        "recheck receipt ID, ZIP bytes, project, Plan, session, source revision and CoreLayer identity token in the Host",
+        "upload the exact committed ZIP through ModelLibraryClient.PushAsync with force:false",
+        "report export progress in the first half and upload progress in the second half; route cancellation through the active duplex stage",
+        "preserve the committed ZIP and session receipt if upload is cancelled or fails"
       ]
     },
     {
@@ -2293,6 +2422,101 @@
         "persist output",
         "read actual result snapshots/output blocks",
         "synchronize maps/timeseries/profiles"
+      ]
+    },
+    {
+      "id": "gdal-raster-layer-import",
+      "steps": [
+        "capture the selected local GDAL dataset path and enumerate its complete local dependency manifest",
+        "inspect actual band count, cell type, projection and extent",
+        "preview through the retained renderer for the selected source type",
+        "capture the exact project, map and visualization revision",
+        "verify the source manifest before and after import",
+        "publish only the source-backed map node and its renderer type to the .vis draft",
+        "reopen and render from the same verified source identity"
+      ]
+    },
+    {
+      "id": "geometry-vector-topology-import",
+      "steps": [
+        "capture the current Geometry editor, source revision and topology draft identity",
+        "inspect chosen Shapefile families and project-space polyline/polygon features",
+        "show actual feature preview and import options",
+        "re-read selected families and verify the original Geometry and draft capture",
+        "apply one source-backed topology mutation to the child draft",
+        "undo or discard within the child session, or save through the parent Geometry transaction"
+      ]
+    },
+    {
+      "id": "new-shapefile-create-and-import",
+      "steps": [
+        "capture the explicit map, project projection, geometry type and destination",
+        "write the shapefile family into a sibling staging directory",
+        "validate map and destination and prepare receipts from staged member bytes",
+        "publish sidecars without overwrite and rename .shp last as the commit point",
+        "retain the create receipt in the current app session",
+        "import through the existing map source transaction",
+        "on import failure, retry only the map import using the same receipt"
+      ]
+    },
+    {
+      "id": "rgb-raster-export",
+      "steps": [
+        "select the exact source raster node and capture its source and visualization revisions",
+        "inspect full extent, current view, source symbology and supported plot options",
+        "choose full-layer or current-view extent and a finite cell size",
+        "preview pixels and output dimensions using the retained RasterRenderLayer path",
+        "execute the retained RGBA TIFF writer with duplex progress and cancellation",
+        "revalidate source and visualization revisions and compute the staged artifact receipt",
+        "publish the TIFF atomically only if the destination remains absent"
+      ]
+    },
+    {
+      "id": "depth-contour-shapefile-export",
+      "steps": [
+        "capture the map result context token and explicit Result or MultiResult owner",
+        "select the actual result in slot zero and one stored profile",
+        "inspect and preview using the depth renderer, mapper and terrain resampler",
+        "capture result and terrain source revisions plus output options",
+        "generate zero-depth polygons from the retained contour algorithm with duplex progress and cancellation",
+        "revalidate all inputs and prepare receipts for every staged family member",
+        "publish optional and required sidecars with .shp last and no overwrite"
+      ]
+    },
+    {
+      "id": "core-layer-reference-session",
+      "steps": [
+        "capture the current project session, canonical path and revision",
+        "inspect the exact external HDF source and its kind, identity and revision",
+        "choose Add Reference or Copy File explicitly",
+        "for Add Reference, register the returned session-only capture and apply it to the explicitly selected map",
+        "propagate the matching typed context to requests that reconstruct the current Project",
+        "rebase after successful source saves and clear on session or project replacement"
+      ]
+    },
+    {
+      "id": "raster-calculator-map-registry",
+      "steps": [
+        "assign each calculator entry to its project session, stable map ID and actual map type",
+        "capture the current workflow identity and full map identity as its request epoch",
+        "inspect exact raster sources and retain source IDs, revisions and availability",
+        "on same-owner epoch changes cancel pending work, preserve editable settings and inspect again",
+        "evaluate only when every source identity still matches the refreshed context",
+        "publish each layer and whole-source extent only for the current generation",
+        "clear stale output while preserving the editable entry when a source is unavailable or changed"
+      ]
+    },
+    {
+      "id": "core-layer-reference-recovery",
+      "steps": [
+        "capture the exact current session, project revision, complete reference context and target reference",
+        "remove only the exact in-memory capture without deleting files or validating unrelated sources",
+        "for Reload, verify the captured context structure and project hash without opening every old source",
+        "read the same physical target source between matching SHA checks and require the original core kind",
+        "return a replacement capture and a normalized complete next context",
+        "replace only if the current full context and target are unchanged and the receipt matches the independently computed next context",
+        "invalidate catalog and map source identities while preserving all editor baselines and draft fields",
+        "mark the affected open editor as conflicted and require explicit editor reload before saving"
       ]
     }
   ],

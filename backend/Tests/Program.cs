@@ -9,6 +9,13 @@ if (args.Length == 3 && args[0] == "--background-map-cache-lock-probe")
     return;
 }
 
+if (args.Length == 1 && args[0] == "--gdb-map-source-focused")
+{
+    await RuntimeChecks.Run();
+    GdbMapSourceChecks.Run();
+    return;
+}
+
 using (var encoded = new MemoryStream())
 {
     using (var writer = new BinaryWriter(encoded, Encoding.ASCII, leaveOpen: true))
@@ -77,6 +84,8 @@ await PlanContextRefreshChecks.Run();
 await SourcePathAliasChecks.Run();
 await ModelEditorChecks.Run();
 await GeometryTopologyChecks.Run();
+await GeometryTopologyMetadataColumnChecks.Run();
+await GeometryVectorImportChecks.Run();
 await GeometryTopologyToolChecks.Run();
 await GeometryMeshChecks.Run();
 await GeometryCulvertChecks.Run();
@@ -100,6 +109,8 @@ await ClassificationImportChecks.Run();
 VectorDimensionChecks.Run();
 MapPolylineGeoprocessChecks.Run();
 MapTreeShapefileImportChecks.Run();
+NewShapefileChecks.Run();
+MapRasterLayerChecks.Run();
 MapVectorSourceChecks.Run();
 GeoprocessingToolChecks.Run();
 await FeatureQueryChecks.Run();
@@ -114,6 +125,7 @@ ResultInspectorChecks.Run();
 PlanResultCatalogChecks.Run();
 PlanResultAssociationChecks.Run();
 WorkspaceFileImportChecks.Run();
+await CoreLayerImportChecks.Run();
 CatalogModelActionChecks.Run();
 CatalogModelContextActionChecks.Run();
 await PlanComputeChecks.Run();
@@ -149,6 +161,9 @@ await finalSourceChecks.Run(nameof(MapResultChartChecks), MapResultChartChecks.R
 await finalSourceChecks.Run(nameof(MapMultiResultDetailChecks), MapMultiResultDetailChecks.Run);
 await finalSourceChecks.Run(nameof(PortableResultMapperChecks), PortableResultMapperChecks.Run);
 await finalSourceChecks.Run(nameof(MapResultRenderChecks), MapResultRenderChecks.Run);
+await finalSourceChecks.Run(nameof(RasterCalculatorChecks), RasterCalculatorChecks.Run);
+await finalSourceChecks.Run(nameof(ResultExportChecks), ResultExportChecks.Run);
+await finalSourceChecks.Run(nameof(ExportOutputCommitChecks), ExportOutputCommitChecks.Run);
 await finalSourceChecks.Run(nameof(MapDynamicProfileChecks), MapDynamicProfileChecks.Run);
 await finalSourceChecks.Run(nameof(MapDynamicProfileLegacyMaximumChecks), MapDynamicProfileLegacyMaximumChecks.Run);
 await finalSourceChecks.Run(nameof(GeometryCulvertMapCommandChecks), GeometryCulvertMapCommandChecks.Run);
@@ -159,6 +174,7 @@ await finalSourceChecks.Run(nameof(SourcePropertyValidationChecks), SourceProper
 await finalSourceChecks.Run(nameof(BugReportChecks), BugReportChecks.Run);
 await finalSourceChecks.Run(nameof(BackendApplicationLoggingChecks), BackendApplicationLoggingChecks.Run);
 await finalSourceChecks.Run(nameof(StreamModeChecks), StreamModeChecks.RunAsync);
+await finalSourceChecks.Run(nameof(StreamModeTinRenderingChecks), StreamModeTinRenderingChecks.RunAsync);
 await finalSourceChecks.Run(nameof(GeoprocessingSourceOperationChecks), GeoprocessingSourceOperationChecks.RunAsync);
 await finalSourceChecks.Run(nameof(StableChannelDebugChecks), StableChannelDebugChecks.Run);
 await finalSourceChecks.Run(nameof(DeveloperProjectArchiveChecks), DeveloperProjectArchiveChecks.Run);
@@ -184,8 +200,15 @@ await finalSourceChecks.Run(nameof(ProjectMigrationChecks), ProjectMigrationChec
 await finalSourceChecks.Run(nameof(HdfUnicodeChecks), HdfUnicodeChecks.Run);
 await finalSourceChecks.Run(nameof(ModelSaveFailureChecks), ModelSaveFailureChecks.Run);
 await finalSourceChecks.Run(nameof(PlanExportChecks), PlanExportChecks.Run);
+await finalSourceChecks.Run(nameof(PlanModelUploadChecks), PlanModelUploadChecks.Run);
 await finalSourceChecks.Run(nameof(ResultProfileChecks), ResultProfileChecks.Run);
 await finalSourceChecks.Run(nameof(ResultProfileSampleLineChecks), ResultProfileSampleLineChecks.Run);
+await finalSourceChecks.Run(nameof(CatalogHeaderActionChecks), CatalogHeaderActionChecks.Run);
+await finalSourceChecks.Run(nameof(BackgroundMapTileJsonChecks), BackgroundMapTileJsonChecks.Run);
+await finalSourceChecks.Run(nameof(GdbMapSourceChecks), GdbMapSourceChecks.Run);
+await finalSourceChecks.Run(nameof(GdbRasterSourceChecks), GdbRasterSourceChecks.Run);
+await finalSourceChecks.Run(nameof(VectorMapPlotRenderingChecks), VectorMapPlotRenderingChecks.Run);
+await finalSourceChecks.Run(nameof(RasterSymbologyGdbChecks), RasterSymbologyGdbChecks.Run);
 finalSourceChecks.ThrowIfFailed();
 Console.WriteLine("Backend source regression checks passed on " + System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier + ".");
 

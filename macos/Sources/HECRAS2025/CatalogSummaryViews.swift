@@ -836,6 +836,7 @@ struct CatalogAssetInspectorSummaryView: View {
                     case .some(.geometry) where asset.section == .geometries:
                         CatalogGeometryMeshPreviewView(asset: asset, projectURL: store.document?.url,
                             requestIdentity: sourcePreviewRequestIdentity,
+                            coreLayerContext: store.captureCoreLayerRequestContext(),
                             client: backend.client)
                     case .some(.terrain) where asset.section == .terrains:
                         CatalogModelRasterSummaryPreviewView(asset: asset, kind: .terrain,

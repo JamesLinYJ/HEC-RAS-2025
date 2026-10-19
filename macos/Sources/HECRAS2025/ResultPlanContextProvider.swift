@@ -8,6 +8,7 @@ struct ResultPlanContextRequest: Encodable, Sendable {
     let projectXml: String
     let resultPath: String
     let revision: String
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 struct ResultPlanPropertyItem: Decodable, Equatable, Identifiable, Sendable {
@@ -65,6 +66,7 @@ struct LinkedResultSelection: Equatable, Sendable {
     let projectRevision: String
     let anchor: ResultPlanCandidate
     let selectedGroups: [ResultPlanCandidateGroup]
+    var coreLayerContext: CoreLayerRequestContext? = nil
 
     var results: [ResultPlanCandidate] {
         var seen = Set<String>()
@@ -74,6 +76,11 @@ struct LinkedResultSelection: Equatable, Sendable {
     }
 
     var planCount: Int { selectedGroups.count + 1 }
+
+    func withCoreLayerContext(_ context: CoreLayerRequestContext?) -> Self {
+        Self(projectPath: projectPath, projectRevision: projectRevision, anchor: anchor,
+            selectedGroups: selectedGroups, coreLayerContext: context)
+    }
 }
 
 @MainActor
@@ -86,7 +93,8 @@ struct BackendResultPlanContextProvider {
     }
 
     func inspect(resultPath: URL, projectPath: URL, projectXml: String,
-                 revision: String) async throws -> ResultPlanContextSnapshot {
+                 revision: String,
+                 coreLayerContext: CoreLayerRequestContext? = nil) async throws -> ResultPlanContextSnapshot {
         let request = ResultPlanContextRequest(
             // Keep the caller's path spelling as the base for project-relative
             // Result references. The service uses canonical paths separately
@@ -94,7 +102,7 @@ struct BackendResultPlanContextProvider {
             projectPath: projectPath.standardizedFileURL.path,
             projectXml: projectXml,
             resultPath: resultPath.standardizedFileURL.resolvingSymlinksInPath().path,
-            revision: revision
+            revision: revision, coreLayerContext: coreLayerContext
         )
         return try await client.request("result.planContext", parameters: request,
                                         as: ResultPlanContextSnapshot.self)
@@ -115,6 +123,8 @@ final class ResultPlanContextSession: ObservableObject {
     private var lastProjectXml: String?
     private var lastInspectorSnapshot: ResultInspectorSnapshot?
     private var lastSourceContextRevision = ""
+    private var lastCoreLayerContext: CoreLayerRequestContext?
+    var coreLayerContext: CoreLayerRequestContext? { lastCoreLayerContext }
 
     init(provider: BackendResultPlanContextProvider) {
         self.provider = provider
@@ -122,6 +132,7 @@ final class ResultPlanContextSession: ObservableObject {
 
     func ensureLoaded(asset: ProjectAsset?, projectPath: URL?, projectXml: String?,
                       inspectorSnapshot: ResultInspectorSnapshot?, sourceContextRevision: String,
+                      coreLayerContext: CoreLayerRequestContext? = nil,
                       force: Bool = false) async {
         guard let asset, asset.section == .results, let projectPath, let projectXml,
               let inspectorSnapshot else {
@@ -139,8 +150,10 @@ final class ResultPlanContextSession: ObservableObject {
         lastProjectXml = projectXml
         lastInspectorSnapshot = inspectorSnapshot
         lastSourceContextRevision = sourceContextRevision
+        lastCoreLayerContext = coreLayerContext
         let identity = Self.identity(asset: asset, projectPath: projectPath, projectXml: projectXml,
-            revision: inspectorSnapshot.revision, sourceContextRevision: sourceContextRevision)
+            revision: inspectorSnapshot.revision, sourceContextRevision: sourceContextRevision,
+            coreLayerContext: coreLayerContext)
         guard force || identity != contextIdentity || (snapshot == nil && !isLoading && error == nil) else { return }
 
         generation &+= 1
@@ -153,7 +166,8 @@ final class ResultPlanContextSession: ObservableObject {
 
         do {
             let loaded = try await provider.inspect(resultPath: asset.url, projectPath: projectPath,
-                projectXml: projectXml, revision: inspectorSnapshot.revision)
+                projectXml: projectXml, revision: inspectorSnapshot.revision,
+                coreLayerContext: coreLayerContext)
             guard current == generation, !Task.isCancelled else { return }
             guard Self.samePath(loaded.projectPath, projectPath),
                   Self.samePath(loaded.resultPath, asset.url),
@@ -180,7 +194,9 @@ final class ResultPlanContextSession: ObservableObject {
               Self.samePath(inspectorSnapshot.resultPath, asset.url),
               contextIdentity == Self.identity(asset: asset, projectPath: projectPath,
                   projectXml: projectXml, revision: inspectorSnapshot.revision,
-                  sourceContextRevision: sourceContextRevision),
+                  sourceContextRevision: sourceContextRevision,
+                  coreLayerContext: lastCoreLayerContext),
+              selection.coreLayerContext == lastCoreLayerContext,
               Self.samePath(snapshot.resultPath, asset.url),
               snapshot.revision == inspectorSnapshot.revision,
               Self.samePath(selection.projectPath, projectPath),
@@ -204,6 +220,7 @@ final class ResultPlanContextSession: ObservableObject {
         lastProjectXml = nil
         lastInspectorSnapshot = nil
         lastSourceContextRevision = ""
+        lastCoreLayerContext = nil
     }
 
     func reloadCurrentContext() async {
@@ -211,7 +228,8 @@ final class ResultPlanContextSession: ObservableObject {
               let lastInspectorSnapshot else { return }
         await ensureLoaded(asset: lastAsset, projectPath: lastProjectPath,
             projectXml: lastProjectXml, inspectorSnapshot: lastInspectorSnapshot,
-            sourceContextRevision: lastSourceContextRevision, force: true)
+            sourceContextRevision: lastSourceContextRevision,
+            coreLayerContext: lastCoreLayerContext, force: true)
     }
 
     private static func valid(_ snapshot: ResultPlanContextSnapshot) -> Bool {
@@ -246,10 +264,11 @@ final class ResultPlanContextSession: ObservableObject {
     }
 
     private static func identity(asset: ProjectAsset, projectPath: URL, projectXml: String,
-                                  revision: String, sourceContextRevision: String) -> String {
+                                  revision: String, sourceContextRevision: String,
+                                  coreLayerContext: CoreLayerRequestContext?) -> String {
         let source = [asset.url.standardizedFileURL.resolvingSymlinksInPath().path,
-            projectPath.standardizedFileURL.path,
-            revision, sourceContextRevision, projectXml].joined(separator: "\n")
+            projectPath.standardizedFileURL.path, revision, sourceContextRevision, projectXml,
+            coreLayerContext?.identityToken ?? ""].joined(separator: "\n")
         return SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }

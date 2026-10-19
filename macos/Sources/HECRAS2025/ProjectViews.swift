@@ -353,7 +353,7 @@ struct ActionSearch: View {
         if store.hasProject {
             items += ModelEditorKind.allCases.map { Item(id: "editor/" + $0.id, title: $0.rawValue, group: "Model Editors", symbol: $0.symbol, operation: .editor($0)) }
         }
-        items += ToolKind.allCases.filter { (!$0.requiresProject || store.hasProject) && ($0.group != "Testing" || store.isDebugMode) }.map {
+        items += ToolKind.generalMenuCases.filter { (!$0.requiresProject || store.hasProject) && ($0.group != "Testing" || store.isDebugMode) }.map {
             Item(id: "tool/" + $0.id, title: $0.rawValue, group: $0.group, symbol: "slider.horizontal.3", operation: .tool($0))
         }
         return items.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) || L10n.text($0.title).localizedCaseInsensitiveContains(query) || L10n.text($0.group).localizedCaseInsensitiveContains(query) }
@@ -489,7 +489,7 @@ struct WorkspaceSettings: View {
             }
             .background(WindowLifecycleGuard(store: store, beforeClose: { await store.globalSymbologySession.flushGlobalChanges() }, guardsProjectChanges: false).frame(width: 0, height: 0))
             .sheet(isPresented: $showingCredentials) {
-                DataToolSheet(store: store, kind: .credentials)
+                CredentialsSettingsView(store: store)
                     .environment(\.locale, store.interfaceLocale)
             }
     }

@@ -8,9 +8,11 @@ import SwiftUI
 struct ProjectMapView: View {
     @ObservedObject var store: WorkspaceStore
     @ObservedObject private var mapState: MapState
+    @ObservedObject private var calculatorRegistry: CalculatorLayerRegistry
     let mapID: UUID
     init(store: WorkspaceStore, mapID: UUID = MapState.projectMapID) {
         self.store = store; self.mapID = mapID; self.mapState = store.mapState(for: mapID)
+        self.calculatorRegistry = store.calculatorLayerRegistry
     }
     private var scale: CGFloat { get { mapState.scale } nonmutating set { mapState.scale = newValue } }
     private var offset: CGSize { get { mapState.offset } nonmutating set { mapState.offset = newValue } }
@@ -28,6 +30,18 @@ struct ProjectMapView: View {
         MapRenderComposition.vectorLayers(records: mapState.sourceMapRenderRows,
             candidates: mapState.visibleVectors(store.mapLayers))
     }
+    @ViewBuilder
+    private func vectorSurface(offset: CGSize) -> some View {
+        if let provider = store.vectorSymbologyProvider as? WorkspaceVectorSymbologyProvider {
+            MapVectorPlotSurface(store: store, mapState: mapState, provider: provider,
+                mapID: mapID, scale: scale, offset: offset, pointer: $pointer,
+                orderedLayers: visibleLayers)
+        } else {
+            VectorMapCanvas(store: store, mapState: mapState, mapID: mapID,
+                scale: scale, offset: offset, pointer: $pointer, orderedLayers: visibleLayers)
+        }
+    }
+
     private var orderedRasterLayers: [MapRasterLayer] {
         let candidates = mapState.rasters(store.rasterLayers) + mapState.associatedMapLayers.visibleLayers
         return MapRenderComposition.rasterLayers(records: mapState.sourceMapRenderRows,
@@ -57,6 +71,8 @@ struct ProjectMapView: View {
     private var visibleLayerCount: Int {
         visibleLayers.count
             + orderedRasterLayers.count
+            + calculatorRegistry.layers(mapID: mapID, projectSessionID: store.projectSessionID,
+                workflowIdentity: store.mapWorkflowIdentity(mapID)).count
             + mapState.projectGeometryMap.visibleChildLayerCount
             + mapState.boundaryMap.visibleLines.count
             + Set(mapState.terrainInputMap.features.map(\.inputNodeID)).count
@@ -102,6 +118,18 @@ struct ProjectMapView: View {
                     RasterMapCanvas(store: store, mapState: mapState, scale: scale,
                         offset: CGSize(width: offset.width + dragOffset.width, height: offset.height + dragOffset.height),
                         orderedLayers: orderedRasterLayers)
+                    CalculatorMapLayerCanvas(store: store, mapID: mapID,
+                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
+                        scale: scale,
+                        offset: CGSize(width: offset.width + dragOffset.width,
+                                       height: offset.height + dragOffset.height),
+                        viewport: mapState.resultViewport)
+                    MapResultDiagnosticCanvas(session: mapState.resultMap,
+                        points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
+                        scale: scale,
+                        offset: CGSize(width: offset.width + dragOffset.width,
+                                       height: offset.height + dragOffset.height),
+                        visibleLayerIDs: Set(orderedRasterLayers.map(\.id)))
                     ProjectGeometryMapCanvas(store: store, mapState: mapState,
                         session: mapState.projectGeometryMap, mapID: mapID, scale: scale,
                         offset: CGSize(width: offset.width + dragOffset.width,
@@ -116,15 +144,14 @@ struct ProjectMapView: View {
                         scale: scale,
                         offset: CGSize(width: offset.width + dragOffset.width,
                                        height: offset.height + dragOffset.height), isInteractive: false)
-                    TerrainInputMapCanvas(features: mapState.terrainInputMap.features,
+                    TerrainInputMapCanvas(session: mapState.terrainInputMap,
+                        features: mapState.terrainInputMap.features,
                         points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
                         scale: scale,
                         offset: CGSize(width: offset.width + dragOffset.width,
                                        height: offset.height + dragOffset.height))
-                    VectorMapCanvas(store: store, mapState: mapState, mapID: mapID,
-                        scale: scale,
-                        offset: CGSize(width: offset.width + dragOffset.width, height: offset.height + dragOffset.height),
-                        pointer: $pointer, orderedLayers: visibleLayers)
+                    vectorSurface(offset: CGSize(width: offset.width + dragOffset.width,
+                                                 height: offset.height + dragOffset.height))
                     MapResultVelocityParticlesCanvas(session: mapState.resultMap.velocityParticles,
                         points: mapState.transformPoints(vectors: store.mapLayers, rasters: store.rasterLayers),
                         scale: scale,
@@ -347,6 +374,7 @@ struct ProjectMapView: View {
             }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 10).frame(height: 26)
         }
         .task(id: store.mapWorkflowIdentity(mapID)) { await store.configureMapResultSources(mapID) }
+        .modifier(GdbMapImportPresentation(store: store, mapID: mapID))
         .task(id: [store.projectSessionID.uuidString, store.document?.projectionType ?? "",
             store.document?.projectionValue ?? ""]) {
             await projectionPresentation.resolve(type: store.document?.projectionType ?? "",

@@ -392,7 +392,9 @@ struct BackendPlanMapResultWorkflowTests {
         let mapTreeContext = store.sourceMapTreeContext(mapID)
         let currentMapIdentity = try #require(store.mapIdentityRequest(for: mapID))
         let request = PlanCulvertProfileRequest(
-            map: .init(currentMapIdentity, resultSelectionOverrides: mapTreeContext.resultSelectionOverrides),
+            map: .init(currentMapIdentity,
+                resultSelectionOverrides: mapTreeContext.resultSelectionOverrides,
+                coreLayerContext: currentSources.map.coreLayerContext),
             contextToken: currentSources.sources.contextToken,
             selectionOverrides: currentSources.selectionOverrides,
             resultNode: currentResultNode.node,
@@ -476,7 +478,9 @@ struct BackendPlanMapResultWorkflowTests {
         let zeroMapIdentity = try #require(store.mapIdentityRequest(for: mapID))
         let zeroMapContext = store.sourceMapTreeContext(mapID)
         let zeroRequest = PlanCulvertProfileRequest(
-            map: .init(zeroMapIdentity, resultSelectionOverrides: zeroMapContext.resultSelectionOverrides),
+            map: .init(zeroMapIdentity,
+                resultSelectionOverrides: zeroMapContext.resultSelectionOverrides,
+                coreLayerContext: zeroSources.map.coreLayerContext),
             contextToken: zeroSources.sources.contextToken,
             selectionOverrides: zeroSources.selectionOverrides,
             resultNode: zeroResultNode.node,
@@ -819,8 +823,11 @@ private struct PlanTreeWireRequest: Encodable {
     let mapType: String
     let expectedVisualizationRevision: String
     let resultSelectionOverrides: [MapTreeResultSelectionOverride]
+    let coreLayerContext: CoreLayerRequestContext?
 
-    init(_ identity: MapTreeMapIdentity, resultSelectionOverrides: [MapTreeResultSelectionOverride]) {
+    init(_ identity: MapTreeMapIdentity,
+         resultSelectionOverrides: [MapTreeResultSelectionOverride],
+         coreLayerContext: CoreLayerRequestContext?) {
         projectPath = identity.projectPath
         projectXml = identity.projectXml
         projectXmlSHA = identity.projectXmlSHA
@@ -830,6 +837,7 @@ private struct PlanTreeWireRequest: Encodable {
         mapType = identity.mapType
         expectedVisualizationRevision = identity.expectedVisualizationRevision
         self.resultSelectionOverrides = resultSelectionOverrides
+        self.coreLayerContext = coreLayerContext
     }
 }
 

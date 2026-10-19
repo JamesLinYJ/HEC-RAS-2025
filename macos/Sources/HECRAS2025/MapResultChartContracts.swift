@@ -48,11 +48,13 @@ struct MapResultChartLineCapture: Hashable, Sendable {
     let stableFeatureIdentity: String
     let coordinates: [GeometryTopologyCoordinate]
     let draftGeneration: String
+    let coreLayerContext: CoreLayerRequestContext?
 
     init(projectSessionID: UUID, mapID: UUID, projectPath: URL, projectXML: String,
          mapIndex: Int, mapName: String, mapType: String, visualizationRevision: String,
          layerID: String, vectorPath: URL, vectorRevision: String, stableFeatureIdentity: String,
-         coordinates: [GeometryTopologyCoordinate], draftGeneration: String) throws {
+         coordinates: [GeometryTopologyCoordinate], draftGeneration: String,
+         coreLayerContext: CoreLayerRequestContext? = nil) throws {
         guard (2...10_000).contains(coordinates.count), coordinates.allSatisfy({ $0.x.isFinite && $0.y.isFinite }),
               !layerID.isEmpty, !stableFeatureIdentity.isEmpty, !vectorRevision.isEmpty,
               !visualizationRevision.isEmpty, !draftGeneration.isEmpty else {
@@ -75,6 +77,7 @@ struct MapResultChartLineCapture: Hashable, Sendable {
         self.stableFeatureIdentity = stableFeatureIdentity
         self.coordinates = coordinates
         self.draftGeneration = draftGeneration
+        self.coreLayerContext = coreLayerContext
     }
 
 }
@@ -104,6 +107,7 @@ struct MapResultChartContext: Hashable, Sendable {
     var stableFeatureIdentity: String { capture.stableFeatureIdentity }
     var sampleLine: [GeometryTopologyCoordinate] { capture.coordinates }
     var draftGeneration: String { capture.draftGeneration }
+    var coreLayerContext: CoreLayerRequestContext? { capture.coreLayerContext }
 
     var mapRequest: MapResultChartMapRequest {
         MapResultChartMapRequest(
@@ -114,7 +118,8 @@ struct MapResultChartContext: Hashable, Sendable {
             mapIndex: mapIndex,
             mapName: mapName,
             mapType: mapType,
-            expectedVisualizationRevision: visualizationRevision)
+            expectedVisualizationRevision: visualizationRevision,
+            coreLayerContext: capture.coreLayerContext)
     }
 
     func expectedFeatureContextToken(contextToken: String, mode: MapResultChartMode) -> String {
@@ -127,7 +132,8 @@ struct MapResultChartContext: Hashable, Sendable {
     var identity: String {
         [projectSessionID.uuidString, mapID.uuidString, projectPath, projectXMLSHA,
          String(mapIndex), mapName, mapType, visualizationRevision, layerID, vectorPath,
-         vectorRevision, stableFeatureIdentity, coordinateSHA, draftGeneration].joined(separator: "|")
+         vectorRevision, stableFeatureIdentity, coordinateSHA, draftGeneration,
+         coreLayerContext?.identityToken ?? ""].joined(separator: "|")
     }
 
     private static func digest(_ data: Data) -> String {
@@ -160,6 +166,7 @@ struct MapResultChartMapRequest: Codable, Hashable, Sendable {
     let mapType: String
     let expectedVisualizationRevision: String
     var computeReadLease: MapResultComputeReadLease? = nil
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 struct MapResultComputeReadLease: Codable, Hashable, Sendable {

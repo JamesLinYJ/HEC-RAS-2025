@@ -39,6 +39,7 @@ struct StableChannelDebugOpenRequest: Codable, Sendable {
     var projectPath: String?
     var inMemorySourceID: String?
     var inMemoryState: StableChannelDebugState?
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 struct StableChannelDebugOpenResponse: Codable, Sendable {
@@ -52,6 +53,7 @@ struct StableChannelDebugComputeRequest: Codable, Sendable {
     var source: StableChannelDebugSource
     var state: StableChannelDebugState
     var solveFor: [String]
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 struct StableChannelDebugComputeResponse: Codable, Sendable {
@@ -67,6 +69,7 @@ struct StableChannelDebugSaveRequest: Codable, Sendable {
     var requestID: String
     var source: StableChannelDebugSource
     var state: StableChannelDebugState
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 struct StableChannelDebugSaveResponse: Codable, Sendable {
@@ -277,6 +280,7 @@ final class StableChannelDebugSession: ObservableObject {
     private let provider: StableChannelDebugProviding
     private var baselineState: StableChannelDebugState?
     private var projectSessionID: UUID?
+    private var coreLayerContext: CoreLayerRequestContext?
     private var generation = 0
     private var busyTaskID: UUID?
     private var lastNotifiedDirty = false
@@ -299,13 +303,22 @@ final class StableChannelDebugSession: ObservableObject {
     /// parent project save may legitimately advance that revision while leaving
     /// the captured design file and this local draft untouched.
     @discardableResult
-    func acceptProjectSave(projectPath: String, projectSessionID: UUID, projectRevision: String) -> Bool {
+    func acceptProjectSave(projectPath: String, projectSessionID: UUID, projectRevision: String,
+                           coreLayerContext: CoreLayerRequestContext? = nil) -> Bool {
         guard !isBusy, self.projectSessionID == projectSessionID,
               let currentSource = source, let currentProjectPath = currentSource.projectPath,
               Self.samePath(currentProjectPath, projectPath), Self.isSHA256(projectRevision) else { return false }
+        if let coreLayerContext,
+           (coreLayerContext.projectSessionID != projectSessionID.uuidString ||
+            CoreLayerRequestContext.canonical(URL(fileURLWithPath: coreLayerContext.projectPath)) !=
+                CoreLayerRequestContext.canonical(URL(fileURLWithPath: projectPath)) ||
+            coreLayerContext.projectRevision?.caseInsensitiveCompare(projectRevision) != .orderedSame) {
+            return false
+        }
         var updatedSource = currentSource
         updatedSource.projectRevision = projectRevision
         source = updatedSource
+        self.coreLayerContext = coreLayerContext
         return true
     }
 
@@ -313,7 +326,8 @@ final class StableChannelDebugSession: ObservableObject {
         Binding(get: { self.inputText[field] ?? "" }, set: { self.updateInput($0, for: field) })
     }
 
-    func load(projectPath: String?, projectSessionID: UUID) async {
+    func load(projectPath: String?, projectSessionID: UUID,
+              coreLayerContext: CoreLayerRequestContext? = nil) async {
         if self.projectSessionID == projectSessionID, hasOpened { return }
         guard !isBusy else {
             showError("Wait for the Stable Channel operation to finish before changing the project.")
@@ -324,6 +338,7 @@ final class StableChannelDebugSession: ObservableObject {
             return
         }
         self.projectSessionID = projectSessionID
+        self.coreLayerContext = coreLayerContext
         generation &+= 1
         let loadGeneration = generation
         source = nil
@@ -339,7 +354,8 @@ final class StableChannelDebugSession: ObservableObject {
         do {
             let response = try await provider.open(StableChannelDebugOpenRequest(
                 requestID: requestID, projectPath: projectPath,
-                inMemorySourceID: nil, inMemoryState: nil))
+                inMemorySourceID: nil, inMemoryState: nil,
+                coreLayerContext: coreLayerContext))
             guard generation == loadGeneration, self.projectSessionID == projectSessionID,
                   response.requestID == requestID,
                   Self.isValidOpenedSource(response.source, requestedProjectPath: projectPath) else {
@@ -423,7 +439,8 @@ final class StableChannelDebugSession: ObservableObject {
         message = nil
         do {
             let response = try await provider.compute(StableChannelDebugComputeRequest(
-                requestID: requestID, source: source, state: state, solveFor: targets))
+                requestID: requestID, source: source, state: state, solveFor: targets,
+                coreLayerContext: coreLayerContext))
             guard generation == capturedGeneration, projectSessionID == capturedOwner,
                   self.source == source,
                   response.requestID == requestID, response.sourceID == source.sourceID,
@@ -457,7 +474,8 @@ final class StableChannelDebugSession: ObservableObject {
         message = nil
         do {
             let response = try await provider.save(StableChannelDebugSaveRequest(
-                requestID: requestID, source: source, state: state))
+                requestID: requestID, source: source, state: state,
+                coreLayerContext: coreLayerContext))
             guard generation == capturedGeneration, projectSessionID == capturedOwner,
                   self.source == source,
                   response.requestID == requestID, response.sourceID == source.sourceID,
@@ -513,6 +531,7 @@ final class StableChannelDebugSession: ObservableObject {
         invalidFields = []
         selectedSolveFor = []
         projectSessionID = nil
+        coreLayerContext = nil
         message = nil
         messageIsError = false
         notifyParentIfNeeded()

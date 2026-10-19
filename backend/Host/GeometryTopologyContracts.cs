@@ -1,6 +1,7 @@
 namespace Ras.Backend;
 
-public sealed record GeometryTopologyModelRequest(string AssetPath, string Kind, string? ProjectPath, string? ProjectXml = null);
+public sealed record GeometryTopologyModelRequest(string AssetPath, string Kind, string? ProjectPath,
+    string? ProjectXml = null, CoreLayerRequestContext? CoreLayerContext = null);
 public sealed record GeometryTopologyLoadRequest(GeometryTopologyModelRequest Model, string? Revision = null);
 public sealed record GeometryTopologyEditRequest(GeometryTopologyModelRequest Model, string Revision, string DraftState, GeometryTopologyMutation Mutation);
 public sealed record GeometryTopologySaveRequest(GeometryTopologyModelRequest Model, string Revision, string DraftState);
@@ -31,7 +32,36 @@ public sealed record GeometryTopologyMutation(string Operation, string FeatureKi
     public int? EndpointNodeIndex { get; init; }
     public string? Axis { get; init; }
     public string? RawValue { get; init; }
+
+    // Shapefile line/polygon import is an ordinary parent geometry draft edit.
+    // The source family is retained for provenance; projected feature points
+    // make draft replay independent of the external files after acceptance.
+    public GeometryTopologyImportPayload? ImportPayload { get; init; }
 }
+
+public sealed record GeometryTopologyImportPayload(
+    string Mode,
+    bool MergeContiguousArcs,
+    bool RemoveExternalArcs,
+    GeometryTopologyImportSource[] Sources,
+    GeometryTopologyImportFeature[] Features);
+
+public sealed record GeometryTopologyImportSource(string Path, MapSourceFamilyCapture Family);
+public sealed record GeometryTopologyImportFeature(string GeometryType, GeometryTopologyCoordinate[] Points);
+
+public sealed record GeometryVectorImportInspectRequest(GeometryTopologyModelRequest Model, string Revision,
+    string DraftState, string DraftIdentity, string[] Paths);
+public sealed record GeometryVectorImportApplyRequest(GeometryTopologyModelRequest Model, string Revision,
+    string DraftState, string DraftIdentity, GeometryVectorImportSelectedSource[] Sources,
+    string Mode, bool MergeContiguousArcs, bool RemoveExternalArcs);
+public sealed record GeometryVectorImportSelectedSource(string Path, MapSourceFamilyCapture Family);
+public sealed record GeometryVectorImportInspection(string Revision, string DraftIdentity,
+    GeometryVectorImportSource[] Sources, GeometryVectorImportIssue[] Issues);
+public sealed record GeometryVectorImportSource(string Path, string Name, string ShapeType, int ShapeTypeCode,
+    int FeatureCount, MapSourceFamilyCapture Family, GeometryVectorImportFeature[] Features);
+public sealed record GeometryVectorImportFeature(int SourceOrdinal, string GeometryType,
+    GeometryTopologyCoordinate[] Points);
+public sealed record GeometryVectorImportIssue(string Path, string Message);
 
 public sealed record GeometryTopologyArcPointsRequest(GeometryTopologyModelRequest Model, string Revision,
     string DraftState, int ArcFID);
@@ -89,7 +119,7 @@ public sealed record GeometryTopologyDiagnosticTarget(string FeatureKind, int FI
 public sealed record GeometryTopologyFeatureTable(string FeatureKind, GeometryTopologyColumn[] Columns,
     GeometryTopologyField[] EditableFields, GeometryTopologyFeatureRow[] Rows);
 public sealed record GeometryTopologyColumn(string ID, string Title, string SourceType, bool ReadOnly = true,
-    bool IsTag = false);
+    bool IsTag = false, bool IsUserDefined = false);
 public sealed record GeometryTopologyField(string ID, string Title, string SourceType, string[] Choices,
     bool ReadOnly = false);
 public sealed record GeometryTopologyFeatureRow(string ID, int FID, Dictionary<string, string> Values,

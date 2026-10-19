@@ -33,18 +33,23 @@ struct MapLinkedResultContextTests {
         let sourceBytes = try LinkedContextSourceBytes(root: workingRoot)
         let revision = SHA256.hash(data: try Data(contentsOf: anchorURL))
             .map { String(format: "%02X", $0) }.joined()
+        let projectSessionID = UUID()
+        let coreLayerContext = CoreLayerRequestContext.capture(
+            projectSessionID: projectSessionID, projectURL: project,
+            projectRevision: try CoreLayerRequestContext.revision(of: project), references: [])
         let client = BackendProcessClient(executableURL: executable)
         let context = try await BackendResultPlanContextProvider(client: client).inspect(
             resultPath: anchorURL, projectPath: project,
-            projectXml: xml, revision: revision)
+            projectXml: xml, revision: revision, coreLayerContext: coreLayerContext)
         let group = try #require(context.candidateGroups.first { $0.planName == fixture.candidatePlan })
         let mapID = UUID()
-        let capture = try MapLinkedResultCapture(projectSessionID: UUID(), mapID: mapID,
+        let capture = try MapLinkedResultCapture(projectSessionID: projectSessionID, mapID: mapID,
             mapWorkflowIdentity: "fixture-map-workflow|\(mapID.uuidString)",
             projectPath: project, projectXML: xml,
             contextToken: "fixture-result-context", sourceIdentity: "fixture-source-slots",
             resultNodeIdentity: "fixture-result-node", selectionIndex: 0,
-            anchorPath: context.resultPath, anchorRevision: context.revision)
+            anchorPath: context.resultPath, anchorRevision: context.revision,
+            coreLayerContext: coreLayerContext)
         let selection = try MapLinkedResultSelectionBuilder.build(context: context,
             capture: capture, selectedGroupIDs: [group.id])
 
@@ -112,11 +117,19 @@ struct MapLinkedResultContextTests {
         let resultPath = "/tmp/round30/project/anchor.hdf"
         let locator = CatalogTreeNodeLocator(rootName: "Results", nodeType: "Result",
             nodeName: "Anchor", assetID: resultPath)
-        let capture = try MapLinkedResultCapture(projectSessionID: UUID(), mapID: mapID,
+        let projectSessionID = UUID()
+        let coreLayerContext = CoreLayerRequestContext.capture(
+            projectSessionID: projectSessionID, projectURL: projectURL,
+            projectRevision: "PROJECT-REV", references: [])
+        let changedCoreLayerContext = CoreLayerRequestContext.capture(
+            projectSessionID: projectSessionID, projectURL: projectURL,
+            projectRevision: "PROJECT-REV-CHANGED", references: [])
+        let capture = try MapLinkedResultCapture(projectSessionID: projectSessionID, mapID: mapID,
             mapWorkflowIdentity: "map-workflow-A", projectPath: projectURL,
             projectXML: projectXML, contextToken: "context-A", sourceIdentity: "source-A",
             resultNodeIdentity: locator.sourceIdentity, selectionIndex: 0,
-            anchorPath: resultPath, anchorRevision: "ABCDEF")
+            anchorPath: resultPath, anchorRevision: "ABCDEF",
+            coreLayerContext: coreLayerContext)
         let choice = MapResultChartSourceChoice(resultPath: resultPath, revision: "ABCDEF",
             resultName: "Anchor", planName: "Plan A", endTime: nil, isComputing: false)
         let slot = MapResultChartSelectionSlot(selectionIndex: 0, selectionMode: .latest,
@@ -133,25 +146,36 @@ struct MapLinkedResultContextTests {
             expectedVisualizationRevision: "VIS-REV")
         let snapshot = MapResultSourcesSnapshot(map: mapRequest, identity: "snapshot-A",
             sources: sources, selectionOverrides: [])
+        #expect(changedCoreLayerContext.identityToken != coreLayerContext.identityToken)
         let matched = capture.matches(projectSessionID: capture.projectSessionID,
             mapWorkflowIdentity: "map-workflow-A", projectPath: projectURL,
-            projectXML: projectXML, sourceIdentity: "source-A", sources: snapshot)
+            projectXML: projectXML, sourceIdentity: "source-A",
+            coreLayerContext: coreLayerContext, sources: snapshot)
         #expect(matched)
         #expect(!capture.matches(projectSessionID: capture.projectSessionID,
             mapWorkflowIdentity: "map-workflow-B", projectPath: projectURL,
-            projectXML: projectXML, sourceIdentity: "source-A", sources: snapshot))
+            projectXML: projectXML, sourceIdentity: "source-A",
+            coreLayerContext: coreLayerContext, sources: snapshot))
         #expect(!capture.matches(projectSessionID: capture.projectSessionID,
             mapWorkflowIdentity: "map-workflow-A", projectPath: projectURL,
-            projectXML: projectXML, sourceIdentity: "source-B", sources: snapshot))
+            projectXML: projectXML, sourceIdentity: "source-B",
+            coreLayerContext: coreLayerContext, sources: snapshot))
+        #expect(!capture.matches(projectSessionID: capture.projectSessionID,
+            mapWorkflowIdentity: "map-workflow-A", projectPath: projectURL,
+            projectXML: projectXML, sourceIdentity: "source-A",
+            coreLayerContext: changedCoreLayerContext, sources: snapshot))
         #expect(!capture.matches(projectSessionID: UUID(),
             mapWorkflowIdentity: "map-workflow-A", projectPath: projectURL,
-            projectXML: projectXML, sourceIdentity: "source-A", sources: snapshot))
+            projectXML: projectXML, sourceIdentity: "source-A",
+            coreLayerContext: coreLayerContext, sources: snapshot))
         #expect(!capture.matches(projectSessionID: capture.projectSessionID,
             mapWorkflowIdentity: "map-workflow-A", projectPath: projectURL,
-            projectXML: "<Project changed=\"true\"/>", sourceIdentity: "source-A", sources: snapshot))
+            projectXML: "<Project changed=\"true\"/>", sourceIdentity: "source-A",
+            coreLayerContext: coreLayerContext, sources: snapshot))
         #expect(!capture.matches(projectSessionID: capture.projectSessionID,
             mapWorkflowIdentity: "map-workflow-A", projectPath: projectURL.appendingPathComponent("Other"),
-            projectXML: projectXML, sourceIdentity: "source-A", sources: snapshot))
+            projectXML: projectXML, sourceIdentity: "source-A",
+            coreLayerContext: coreLayerContext, sources: snapshot))
         let staleChoice = MapResultChartSourceChoice(resultPath: resultPath, revision: "STALE",
             resultName: "Anchor", planName: "Plan A", endTime: nil, isComputing: false)
         let staleSlot = MapResultChartSelectionSlot(selectionIndex: 0, selectionMode: .latest,
@@ -166,7 +190,8 @@ struct MapLinkedResultContextTests {
             sources: staleSources, selectionOverrides: [])
         #expect(!capture.matches(projectSessionID: capture.projectSessionID,
             mapWorkflowIdentity: "map-workflow-A", projectPath: projectURL,
-            projectXML: projectXML, sourceIdentity: "source-A", sources: staleSnapshot))
+            projectXML: projectXML, sourceIdentity: "source-A",
+            coreLayerContext: coreLayerContext, sources: staleSnapshot))
     }
 }
 

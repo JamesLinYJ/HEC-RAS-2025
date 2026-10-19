@@ -550,7 +550,7 @@ final class ModelEditorSession: ObservableObject {
         return draft
     }
     func setDateTimeInputDraft(_ draft: OriginalDateTimeInputDraft, for fieldID: String) {
-        guard !workspaceWriteLocked(), canEdit, !isSaving, !isPerforming,
+        guard !isWriteLocked, canEdit, !isSaving, !isPerforming,
               !readOnlyFieldIDs.contains(fieldID), fields[fieldID, default: ""] == draft.sourceValue,
               dateTimeInputDrafts[fieldID] != draft else { return }
         dateTimeInputDrafts[fieldID] = draft
@@ -628,7 +628,7 @@ final class ModelEditorSession: ObservableObject {
     func updateUnitNumberInput(rawText: String, owner: OriginalUnitNumberInputOwner, units: DisplayUnitData,
                                locale: Locale = .autoupdatingCurrent,
                                expectedContext: OriginalUnitNumberInputContext? = nil) -> OriginalUnitNumberInputContext? {
-        guard !workspaceWriteLocked(), canEdit, !isSaving, !isPerforming, !loadingSelection,
+        guard !isWriteLocked, canEdit, !isSaving, !isPerforming, !loadingSelection,
               !isReadOnlyUnitNumberOwner(owner),
               let current = unitNumberInputContext(for: owner, units: units, locale: locale) else { return nil }
 
@@ -712,7 +712,7 @@ final class ModelEditorSession: ObservableObject {
         units.choices.first { $0.id == (displayUnitSelections[units.selectionId] ?? units.sourceId) } ?? units.choices.first { $0.id == units.sourceId }
     }
     func selectDisplayUnit(_ id: String, units: DisplayUnitData) {
-        guard !workspaceWriteLocked(), !hasUnitNumberInputDraft(selectionID: units.selectionId),
+        guard !isWriteLocked, !hasUnitNumberInputDraft(selectionID: units.selectionId),
               units.choices.contains(where: { $0.id == id }), displayUnitSelections[units.selectionId] != id else { return }
         displayUnitSelections[units.selectionId] = id
     }
@@ -833,6 +833,8 @@ final class ModelEditorSession: ObservableObject {
     let terrainUSGSImportCleanup = TerrainUSGSImportCleanupSession()
     @Published private(set) var isTerrainInputImportCancelling = false
     @Published private(set) var terrainInputImportStatus: TerrainInputImportStatus?
+    @Published private(set) var coreLayerReferenceConflict: String?
+    var hasCoreLayerReferenceConflict: Bool { coreLayerReferenceConflict != nil }
     private var terrainInputImportAttempt: TerrainInputImportAttempt?
     var canRecheckTerrainInputImportStatus: Bool {
         guard terrainInputImportCleanupBatchToken != nil, let attempt = terrainInputImportAttempt,
@@ -848,10 +850,20 @@ final class ModelEditorSession: ObservableObject {
         hasPendingTopologyEdit || geometryMesh?.isEditing == true || geometryCulvert?.isEditing == true
             || geometryCulvert?.hasActiveSketch == true
     }
-    var isBusy: Bool { workspaceWriteLocked() || planCompute?.isRunning == true || isSaving || isPerforming || isTerrainInputImportRunning || hasPendingGeometryEdit || geometryMesh?.isSavingDiagnosticsPreferences == true || resultPlanSettings?.isBusy == true }
+    var isWriteLocked: Bool { hasCoreLayerReferenceConflict || workspaceWriteLocked() }
+    // Core source conflicts preserve a stale editor draft and block its writes,
+    // but they are not a running operation. Lifecycle and recovery actions need
+    // to distinguish that state so the user can explicitly discard or reload it.
+    var isBusyExceptCoreLayerConflict: Bool {
+        workspaceWriteLocked() || planCompute?.isRunning == true || isSaving || isPerforming
+            || isTerrainInputImportRunning || hasPendingGeometryEdit
+            || geometryMesh?.isSavingDiagnosticsPreferences == true || resultPlanSettings?.isBusy == true
+    }
+    var isBusy: Bool { hasCoreLayerReferenceConflict || isBusyExceptCoreLayerConflict }
     var hasUnsavedEditorChanges: Bool { modified || hasIncompleteEditorInput || hasPendingGeometryEdit || geometryMesh?.hasUnsavedDiagnosticsPreferences == true || resultPlanSettings?.hasUnsavedChanges == true }
     var canSave: Bool {
-        guard loaded, !loadingSelection, !isBusy, !hasIncompleteEditorInput else { return false }
+        guard loaded, !loadingSelection, !isBusy, !hasIncompleteEditorInput,
+              coreLayerReferenceConflict == nil else { return false }
         if resultPlanSettings?.hasUnsavedChanges == true {
             guard !hasGeometryDraftChanges, !hasOrdinaryDraftChanges,
                   geometryMesh?.hasUnsavedDiagnosticsPreferences != true,
@@ -865,6 +877,7 @@ final class ModelEditorSession: ObservableObject {
     @Published var error: String?
     let provider: (any ModelEditorProvider)?
     var didSave: (@MainActor () -> Void)?
+    var didSaveModelSnapshot: (@MainActor (EditorSnapshot, CoreLayerRequestContext?, String?) -> Void)?
     var persistDiagnosticsPreferences: (@MainActor (GeometryMeshDiagnosticsPreferencesCapture) async throws -> String)?
     var workspaceWriteLocked: @MainActor () -> Bool = { false }
     var currentResultPlanSettingsContext: (@MainActor () -> PlanSettingsResultCapture?)?
@@ -919,18 +932,21 @@ final class ModelEditorSession: ObservableObject {
         let backend = provider as? BackendModelProvider
         let sourceTopology: (any GeometryTopologyProvider)? = topologyProvider ?? backend.map { backend in
             BackendGeometryTopologyProvider(client: backend.client,
-                currentProject: { [weak backend] in backend?.project })
+                currentProject: { [weak backend] in backend?.project },
+                currentCoreLayerContext: { [weak backend] in backend?.captureCoreLayerContext() })
         }
         geometryTopology = sourceTopology.map { GeometryTopologySession(provider: $0) }
         let topologyChild = geometryTopology
         let sourceMesh: (any GeometryMeshProvider)? = meshProvider ?? backend.map { backend in
             BackendGeometryMeshProvider(client: backend.client,
                 currentProject: { [weak backend] in backend?.project },
+                currentCoreLayerContext: { [weak backend] in backend?.captureCoreLayerContext() },
                 currentTopologyDraftState: { [weak topologyChild] in topologyChild?.topologyStateForParentSave })
         }
         let sourceCulverts: (any GeometryCulvertProvider)? = culvertProvider ?? backend.map { backend in
             BackendGeometryCulvertProvider(client: backend.client,
-                currentProject: { [weak backend] in backend?.project })
+                currentProject: { [weak backend] in backend?.project },
+                currentCoreLayerContext: { [weak backend] in backend?.captureCoreLayerContext() })
         }
         geometryMesh = sourceMesh.map { GeometryMeshSession(provider: $0) }
         geometryCulvert = sourceCulverts.map { GeometryCulvertSession(provider: $0) }
@@ -1018,7 +1034,7 @@ final class ModelEditorSession: ObservableObject {
     }
     func currentPlanComputeContext() -> PlanPrecomputeContext? {
         guard loaded, let asset, asset.section == .plans, let sourceRevision,
-              (!workspaceWriteLocked() || planCompute?.isRunning == true),
+              (!isWriteLocked || planCompute?.isRunning == true),
               !isSaving, !isPerforming, !hasPendingGeometryEdit,
               !loadingSelection, !isRefreshingContext, !contextRefreshPending,
               !hasIncompleteEditorInput else { return nil }
@@ -1098,6 +1114,7 @@ final class ModelEditorSession: ObservableObject {
         await geometryCulvert?.ensureLoaded(asset: asset, sourceRevision: sourceRevision)
     }
     func ensureLoaded(_ asset: ProjectAsset?, kind: ModelEditorKind) async {
+        guard !hasCoreLayerReferenceConflict else { return }
         if loaded, self.asset == asset { return }
         await load(asset, kind: kind)
     }
@@ -1156,11 +1173,12 @@ final class ModelEditorSession: ObservableObject {
             guard revision == loadRevision, !Task.isCancelled else { return }
             try snapshot.validatePresentation()
             install(snapshot)
+            coreLayerReferenceConflict = nil
             scheduleProjectContextRefresh()
         } catch { if revision == loadRevision, !Task.isCancelled { self.error = L10n.text(error.localizedDescription) } }
     }
     func set(_ field: String, _ value: String) {
-        guard !workspaceWriteLocked(), !hasUnitNumberDraftBlockingField(field) else { return }
+        guard !isWriteLocked, !hasUnitNumberDraftBlockingField(field) else { return }
         if readOnlyFieldIDs.contains(field) || SourceEditorLibrary.shared.field(storageID: field)?.readOnly == true { return }
         let related = Set(fieldGroups.values.filter { $0.contains(field) }.flatMap { $0 }).union([field])
         let definition = SourceEditorLibrary.shared.field(storageID: field)
@@ -1191,7 +1209,7 @@ final class ModelEditorSession: ObservableObject {
               let propertyName = field.errorValidationPropertyName,
               let asset, let sourceRevision, let provider = provider as? BackendModelProvider,
               loaded, canEdit, !isSaving, !isPerforming, !isBusy, !loadingSelection,
-              !workspaceWriteLocked(), !hasIncompleteEditorInput,
+              !isWriteLocked, !hasIncompleteEditorInput,
               !field.readOnly, field.isReadOnly != true,
               !readOnlyFieldIDs.contains(field.storageID),
               ModelEditorKind.allCases.contains(where: { $0.section == asset.section }) else { return nil }
@@ -1278,7 +1296,7 @@ final class ModelEditorSession: ObservableObject {
               !field.readOnly, field.isReadOnly != true, !readOnlyFieldIDs.contains(field.storageID),
               let asset, asset.section == .geometries,
               let topology = geometryTopology, topology.isWritingRegionInputs,
-              canEdit, !loadingSelection, !workspaceWriteLocked(), !isSaving, !isPerforming,
+              canEdit, !loadingSelection, !isWriteLocked, !isSaving, !isPerforming,
               !isTerrainInputImportRunning, planCompute?.isRunning != true,
               geometryMesh?.isEditing != true, geometryMesh?.isSavingDiagnosticsPreferences != true,
               geometryCulvert?.isEditing != true, geometryCulvert?.hasActiveSketch != true,
@@ -1293,7 +1311,7 @@ final class ModelEditorSession: ObservableObject {
               !field.readOnly, field.isReadOnly != true, !readOnlyFieldIDs.contains(field.storageID),
               let asset, asset.section == .geometries, canEdit,
               (!isBusy || canContinueGeometryRegionInput(field)), !loadingSelection,
-              !workspaceWriteLocked(), !isSaving, !isPerforming,
+              !isWriteLocked, !isSaving, !isPerforming,
               let topology = geometryTopology else { return }
         let capturedLoadRevision = loadRevision
         let capturedSelectionRevision = selectionRevision
@@ -1326,7 +1344,7 @@ final class ModelEditorSession: ObservableObject {
               let rowIDs = currentTableSelections["Regions"], !rowIDs.isEmpty,
               !field.readOnly, field.isReadOnly != true, !readOnlyFieldIDs.contains(field.storageID),
               let asset, asset.section == .geometries, canEdit, !isBusy, !loadingSelection,
-              !workspaceWriteLocked(), !isSaving, !isPerforming,
+              !isWriteLocked, !isSaving, !isPerforming,
               let topology = geometryTopology else { return }
         let capturedLoadRevision = loadRevision
         let capturedSelectionRevision = selectionRevision
@@ -1360,7 +1378,7 @@ final class ModelEditorSession: ObservableObject {
               let rowIDs = currentTableSelections["Regions"], rowIDs.count > 1,
               !field.readOnly, field.isReadOnly != true, !readOnlyFieldIDs.contains(field.storageID),
               let asset, asset.section == .geometries, canEdit, !isBusy, !loadingSelection,
-              !workspaceWriteLocked(), !isSaving, !isPerforming,
+              !isWriteLocked, !isSaving, !isPerforming,
               let topology = geometryTopology else { return }
         let capturedLoadRevision = loadRevision
         let capturedSelectionRevision = selectionRevision
@@ -1417,11 +1435,11 @@ final class ModelEditorSession: ObservableObject {
               planTimeWindowEdits.prefix(edits.count).map(\.id) == edits.map(\.id) else { return }
         planTimeWindowEdits.removeFirst(edits.count)
     }
-    func clearMixedFlag(_ field: String?) { guard !workspaceWriteLocked() else { return }; if let field { fields[field] = "false"; clearedMixedFieldIDs.insert(field) } }
-    func addImage(_ field: String, image: ImageAttachment) { guard !workspaceWriteLocked() else { return }; images[field, default: []].append(image); changedImageFieldIDs.insert(field); editRevision += 1; modified = true }
-    func removeImage(_ field: String, id: String) { guard !workspaceWriteLocked() else { return }; images[field]?.removeAll { $0.id == id }; changedImageFieldIDs.insert(field); editRevision += 1; modified = true }
+    func clearMixedFlag(_ field: String?) { guard !isWriteLocked else { return }; if let field { fields[field] = "false"; clearedMixedFieldIDs.insert(field) } }
+    func addImage(_ field: String, image: ImageAttachment) { guard !isWriteLocked else { return }; images[field, default: []].append(image); changedImageFieldIDs.insert(field); editRevision += 1; modified = true }
+    func removeImage(_ field: String, id: String) { guard !isWriteLocked else { return }; images[field]?.removeAll { $0.id == id }; changedImageFieldIDs.insert(field); editRevision += 1; modified = true }
     func setCell(table: String, rowID: String, column: String, value: String) {
-        guard !workspaceWriteLocked(), !hasUnitNumberDraftBlockingCell(tableID: table, rowID: rowID, columnID: column) else { return }
+        guard !isWriteLocked, !hasUnitNumberDraftBlockingCell(tableID: table, rowID: rowID, columnID: column) else { return }
         if column != "Value", SourceEditorLibrary.shared.field(storageID: table)?.kind == "classificationMapping" { return }
         if let presentation = tablePresentations[table] {
             guard let definition = presentation.columns.first(where: { $0.id == column }), definition.readOnly != true else { return }
@@ -1585,6 +1603,7 @@ final class ModelEditorSession: ObservableObject {
         dateTimeInputDrafts = [:]
         unitNumberInputDrafts = [:]
         sourceRevision = nil; sourceState = nil; readOnlyFieldIDs = []
+        coreLayerReferenceConflict = nil
         terrainInputImportDraftToken = nil; terrainInputImportCleanupWarning = nil; terrainInputImportCleanupToken = nil
         terrainInputImportCleanupBatchToken = nil; terrainInputImportCleanupAfterSave = false
         terrainInputImportAttempt = nil; terrainInputImportStatus = nil
@@ -1605,6 +1624,14 @@ final class ModelEditorSession: ObservableObject {
         asset = nil
         startDraft()
         loaded = false; canEdit = false; error = nil
+    }
+
+    func markCoreLayerReferenceConflict(_ message: String) {
+        guard !message.isEmpty else { return }
+        coreLayerReferenceConflict = L10n.text(message)
+    }
+    func clearCoreLayerReferenceConflictAfterExplicitDiscard() {
+        coreLayerReferenceConflict = nil
     }
     // Refresh source metadata/options without overwriting unsaved tool inputs.
     func mergeToolPresentation(_ snapshot: EditorSnapshot, overwriteRows: Bool = false, sourceWins: Set<String> = []) {
@@ -1845,8 +1872,12 @@ final class ModelEditorSession: ObservableObject {
     }
     @discardableResult
     func perform(_ action: EditorAction) async -> Bool {
+        guard coreLayerReferenceConflict == nil else {
+            error = coreLayerReferenceConflict
+            return false
+        }
         if case .compute = action {
-            guard !workspaceWriteLocked(), let compute = planCompute, !compute.isRunning,
+            guard !isWriteLocked, let compute = planCompute, !compute.isRunning,
                   let context = currentPlanComputeContext(),
                   let beginPlanCompute, let endPlanCompute, let didComputePlan else { return false }
             error = nil
@@ -2277,6 +2308,10 @@ final class ModelEditorSession: ObservableObject {
     private func saveModel(_ requestedAsset: ProjectAsset?, gridImport: SpatialGridSelection? = nil, classificationImport: [ClassificationImportFile]? = nil,
                            cumulusImport: CumulusGridImportSelection? = nil,
                            cumulusProgress: (@MainActor (BackendProgressUpdate) -> Void)? = nil) async -> Bool {
+        guard coreLayerReferenceConflict == nil else {
+            error = coreLayerReferenceConflict
+            return false
+        }
         guard !hasIncompleteEditorInput else {
             if hasIncompleteDateTimeInput {
                 error = L10n.text("Complete or discard the invalid date or time input before saving.")
@@ -2296,7 +2331,7 @@ final class ModelEditorSession: ObservableObject {
             return false
         }
         guard modified || gridImport != nil || classificationImport != nil || cumulusImport != nil else { return true }
-        guard let requestedAsset, requestedAsset == asset, let provider, canEdit, !workspaceWriteLocked(), !isSaving, !loadingSelection, !isEditingSourceDraft else { return false }
+        guard let requestedAsset, requestedAsset == asset, let provider, canEdit, !isWriteLocked, !isSaving, !loadingSelection, !isEditingSourceDraft else { return false }
         let topology = requestedAsset.section == .geometries ? geometryTopology : nil
         let mesh = requestedAsset.section == .geometries ? geometryMesh : nil
         let culverts = requestedAsset.section == .geometries ? geometryCulvert : nil
@@ -2326,6 +2361,10 @@ final class ModelEditorSession: ObservableObject {
             geometryMeshState: meshCapture?.draftState,
             geometryCulvertState: culvertCapture?.draftState, tableSelections: currentTableSelections, changedCells: currentChangedCells)
         let capturedPlanTimeWindowEdits = changes.planTimeWindowEdits
+        // Retain the same exact session reference capture that BackendModelProvider
+        // serializes before its first suspension. A late save must not rebase a
+        // newer registry entry for the same external HDF path.
+        let capturedCoreLayerContext = (provider as? BackendModelProvider)?.captureCoreLayerContext()
         protectPlanTimeWindowPrefix(capturedPlanTimeWindowEdits)
         var savedBaseline = EditorSnapshot(fields: fields, rows: rows, samples: samples, canEdit: canEdit, images: images, editableSamplePages: editableSamplePages, choiceOptions: choiceOptions, fieldTitles: fieldTitles, textSuggestions: textSuggestions, sourceCollections: sourceCollections, tablePresentations: tablePresentations, boundaryLines: boundaryLines?.selecting(lineID: selectedBoundaryLineID, payloadIDs: selectedBoundaryPayloadIDs), sourceRevision: sourceRevision, fieldGroups: fieldGroups, availableOperations: availableOperations, diagnosticHistory: diagnosticHistory, seriesPresentations: seriesPresentations, spatialPresentations: spatialPresentations, sourceState: sourceState, readOnlyFieldIDs: readOnlyFieldIDs, planTimeWindowFieldIDs: planTimeWindowFieldIDs,
             terrainInputImportDraftToken: terrainInputImportDraftToken, terrainInputImportCleanupWarning: terrainInputImportCleanupWarning, terrainInputImportCleanupToken: terrainInputImportCleanupToken)
@@ -2371,6 +2410,10 @@ final class ModelEditorSession: ObservableObject {
             }
             guard loadedRevision == loadRevision, requestedAsset == asset else { return false }
             didSave?()
+            if let committedSnapshot = result.snapshot {
+                didSaveModelSnapshot?(committedSnapshot, capturedCoreLayerContext,
+                    capturedCoreLayerContext?.projectRevision)
+            }
             // A save acknowledges only the captured edits. Later edits remain
             // dirty even if a provider resumes after the user types again.
             guard revision == editRevision else { return false }
@@ -2395,7 +2438,7 @@ final class ModelEditorSession: ObservableObject {
                                           documentXML: String, submittedProjectXML: String,
                                           descriptionDraft: String) throws -> BoundaryInitialConditionsCapture {
         guard loaded, canEdit, !isSaving, !isPerforming, !loadingSelection, !isRefreshingContext,
-              !workspaceWriteLocked(), !hasIncompleteEditorInput,
+              !isWriteLocked, !hasIncompleteEditorInput,
               let asset, asset.section == .boundaryConditions, let sourceRevision,
               let backend = provider as? BackendModelProvider,
               let project = backend.project, project.url?.standardizedFileURL == projectURL.standardizedFileURL,
@@ -2416,7 +2459,8 @@ final class ModelEditorSession: ObservableObject {
             projectXml: submittedProjectXML, sourceState: base.sourceState,
             rows: base.rows, samples: base.samples, planTimeWindowEdits: base.planTimeWindowEdits,
             geometryTopologyState: base.geometryTopologyState,
-            geometryMeshState: base.geometryMeshState, geometryCulvertState: base.geometryCulvertState)
+            geometryMeshState: base.geometryMeshState, geometryCulvertState: base.geometryCulvertState,
+            coreLayerContext: base.coreLayerContext)
         return BoundaryInitialConditionsCapture(
             id: UUID().uuidString.lowercased(), projectSessionID: projectSessionID,
             editorID: id, loadRevision: loadRevision, editRevision: editRevision,
@@ -2432,7 +2476,7 @@ final class ModelEditorSession: ObservableObject {
                                                     projectRevision: String, documentXML: String,
                                                     submittedProjectXML: String) -> Bool {
         guard loaded, canEdit, !isSaving, !isPerforming, !loadingSelection, !isRefreshingContext,
-              !workspaceWriteLocked(), !hasIncompleteEditorInput,
+              !isWriteLocked, !hasIncompleteEditorInput,
               capture.editorID == id, capture.projectSessionID == projectSessionID,
               capture.loadRevision == loadRevision, capture.editRevision == editRevision,
               capture.asset == asset, capture.asset.section == .boundaryConditions,
@@ -2515,6 +2559,7 @@ final class ModelEditorSession: ObservableObject {
             !changedImageFieldIDs.isEmpty || !changedSamplePages.isEmpty ||
             !changedSeriesPages.isEmpty || !changedTables.isEmpty || sourceState != snapshot.sourceState
         didSave?()
+        didSaveModelSnapshot?(snapshot, capture.model.coreLayerContext, receipt.projectRevision)
         return true
     }
 
@@ -3073,7 +3118,11 @@ final class ModelEditorSession: ObservableObject {
         return await save(asset, cumulusImport: selection, cumulusProgress: progress)
     }
     func discardEdits() {
-        guard !isBusy, let baseline else { return }
+        guard !workspaceWriteLocked(), !isSaving, !isPerforming, !isTerrainInputImportRunning,
+              planCompute?.isRunning != true, !hasPendingGeometryEdit,
+              geometryMesh?.isSavingDiagnosticsPreferences != true,
+              resultPlanSettings?.isBusy != true,
+              let baseline else { return }
         let terrainDraftToDiscard = terrainInputImportDraftToken ?? terrainInputImportCleanupToken
         let terrainAssetToDiscard = asset
         geometryMesh?.discardDiagnosticsPreferences()

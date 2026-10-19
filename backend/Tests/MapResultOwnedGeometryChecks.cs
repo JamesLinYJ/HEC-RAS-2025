@@ -143,6 +143,27 @@ internal static class MapResultOwnedGeometryChecks
               boundaryReadback.Lines.Select(line => line.Id).SequenceEqual(boundary.Lines.Select(line => line.Id)) &&
               boundaryReadback.Lines.Select(line => line.SourceOrdinal).SequenceEqual(boundary.Lines.Select(line => line.SourceOrdinal)),
             "A Result boundary readback accepts its captured boundary state and retains stable IDs/order.");
+        BoundaryLineCoordinateData[] boundaryPoints = boundary.Lines
+            .SelectMany(line => line.Coordinates ?? []).ToArray();
+        double minX = boundaryPoints.Min(point => point.X);
+        double maxX = boundaryPoints.Max(point => point.X);
+        double minY = boundaryPoints.Min(point => point.Y);
+        double maxY = boundaryPoints.Max(point => point.Y);
+        double padding = Math.Max(1, Math.Max(maxX - minX, maxY - minY) * 0.05);
+        var attachedFacesViewport = new RasterMapViewExtent(
+            minX - padding, minY - padding, maxX + padding, maxY + padding, 128, 128);
+        MapBoundaryGeometrySnapshot attachedFaces = await ModelEditorAdapter.LoadMapBoundaryGeometryAsync(
+            new MapBoundaryGeometryRequest(map, RequiredLocator(resultBoundary), signedRevision,
+                boundary.BoundarySourceState, boundary.ContextToken, boundaryOwner,
+                AttachedFacesViewport: attachedFacesViewport, RenderScale: 0.75));
+        Check(attachedFaces.AttachedFaces is { } attachedFrame &&
+              attachedFrame.Viewport == attachedFacesViewport && attachedFrame.Width == 128 &&
+              attachedFrame.Height == 128 && attachedFrame.Rgba.Length == 128 * 128 * 4 &&
+              attachedFrame.Rgba.Where((_, index) => index % 4 == 3).Any(alpha => alpha > 0) &&
+              attachedFaces.ResultOwner is { } attachedOwner && SameLocator(attachedOwner.ResultNode, resultLocator) &&
+              SamePath(attachedOwner.SelectedResultPath, signedPath) &&
+              attachedOwner.SelectedResultRevision.Equals(signedRevision, StringComparison.OrdinalIgnoreCase),
+            "ShowAttachedFaces renders nontransparent source pixels for the exact selected Result owner and requested project-camera viewport.");
         await ExpectAsync<SourceFileChangedException>(() => ModelEditorAdapter.LoadMapBoundaryGeometryAsync(
             new MapBoundaryGeometryRequest(map,
                 RequiredLocator(resultBoundary) with { ParentResultAssetID = zeroPath }, signedRevision,

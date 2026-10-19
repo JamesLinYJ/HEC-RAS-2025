@@ -78,7 +78,7 @@ public class RasterCalculator
 		KeyFrameVariableName = ResolveKeyFrameName(inputsArray, null);
 	}
 
-	private RasterCalculator(string expression, RasterCalculatorInput[] inputs, Dictionary<string, float> constants, Delegate compiled, Extent extent, int profileCount, IReadOnlyList<DateTime> outputTimes, int[][] profileMaps, string keyFrameVariableName)
+	private RasterCalculator(string expression, RasterCalculatorInput[] inputs, Dictionary<string, float> constants, Delegate compiled, Extent extent, int profileCount, IReadOnlyList<DateTime> outputTimes, int[][] profileMaps, string? keyFrameVariableName)
 	{
 		Expression = expression;
 		_inputs = inputs;
@@ -102,7 +102,7 @@ public class RasterCalculator
 		return TryCreate(expression, inputs, constants, null, out calculator);
 	}
 
-	public static OperationResult TryCreate(string expression, IEnumerable<RasterCalculatorInput> inputs, IEnumerable<KeyValuePair<string, float>> constants, string keyFrameVariableName, out RasterCalculator calculator)
+	public static OperationResult TryCreate(string expression, IEnumerable<RasterCalculatorInput> inputs, IEnumerable<KeyValuePair<string, float>> constants, string? keyFrameVariableName, out RasterCalculator calculator)
 	{
 		calculator = null;
 		RasterCalculatorInput[] inputsArray = inputs.ToArray();
@@ -132,7 +132,7 @@ public class RasterCalculator
 		{
 			return OperationResult.Fail(error2);
 		}
-		string keyFrameVariableName2 = ResolveKeyFrameName(inputsArray, keyFrameVariableName);
+		string? keyFrameVariableName2 = ResolveKeyFrameName(inputsArray, keyFrameVariableName);
 		calculator = new RasterCalculator(expression, inputsArray, constants2, compiled, extent, profileCount, outputTimes, profileMaps, keyFrameVariableName2);
 		return OperationResult.Success();
 	}
@@ -174,13 +174,13 @@ public class RasterCalculator
 		return extent.IsValid();
 	}
 
-	private static string ResolveKeyFrameName(RasterCalculatorInput[] inputs, string keyFrameVariableName)
+	private static string ResolveKeyFrameName(RasterCalculatorInput[] inputs, string? keyFrameVariableName)
 	{
 		string error;
 		return ResolveKeyFrame(inputs, keyFrameVariableName, out error)?.VariableName;
 	}
 
-	private static RasterCalculatorInput ResolveKeyFrame(RasterCalculatorInput[] inputs, string keyFrameVariableName, out string error)
+	private static RasterCalculatorInput ResolveKeyFrame(RasterCalculatorInput[] inputs, string? keyFrameVariableName, out string error)
 	{
 		error = null;
 		List<RasterCalculatorInput> rasterCalculatorInputs = inputs.Where((RasterCalculatorInput i) => i.IsDynamic).ToList();
@@ -201,7 +201,7 @@ public class RasterCalculator
 		return rasterCalculatorInput;
 	}
 
-	private static bool TryBuildTemporalAlignment(RasterCalculatorInput[] inputs, string keyFrameVariableName, out int profileCount, out IReadOnlyList<DateTime> outputTimes, out int[][] profileMaps, out string error)
+	private static bool TryBuildTemporalAlignment(RasterCalculatorInput[] inputs, string? keyFrameVariableName, out int profileCount, out IReadOnlyList<DateTime> outputTimes, out int[][] profileMaps, out string error)
 	{
 		profileCount = 1;
 		outputTimes = null;

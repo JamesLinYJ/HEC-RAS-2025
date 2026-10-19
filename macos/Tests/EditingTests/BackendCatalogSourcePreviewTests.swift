@@ -48,6 +48,7 @@ struct BackendCatalogSourcePreviewTests {
         let session = CatalogGeometryMeshPreviewSession()
 
         await session.load(asset: asset, projectURL: projectURL,
+            coreLayerContext: nil,
             requestIdentity: "geometry-catalog-source-acceptance", provider: BackendGeometryMeshProvider(client: client))
 
         #expect(session.error == nil)
@@ -81,6 +82,7 @@ struct BackendCatalogSourcePreviewTests {
         defer { try? geometryBytes.write(to: asset.url) }
         let backupSession = CatalogGeometryMeshPreviewSession()
         await backupSession.load(asset: ProjectAsset(url: backup, section: .geometries), projectURL: projectURL,
+            coreLayerContext: nil,
             requestIdentity: "selected-backup-catalog-source-acceptance", provider: BackendGeometryMeshProvider(client: client))
         #expect(backupSession.error == nil)
         let backupMap = try #require(backupSession.map)

@@ -14,7 +14,9 @@ using Ras.Observables;
 using Utility.Logging;
 using Utility.Memory;
 using Utility.DataStructures;
+using Utility.Progress;
 using Visual.Mapping.Observables;
+using Visual.Mapping.Observables.EditOperations;
 using Visual.Observables;
 
 namespace Ras.Backend;
@@ -131,7 +133,8 @@ public static partial class ModelEditorAdapter
     }
 
     private static ModelRequest ToModelRequest(GeometryTopologyModelRequest model) =>
-        new(model.AssetPath, model.Kind, model.ProjectPath, model.ProjectXml);
+        new(model.AssetPath, model.Kind, model.ProjectPath, model.ProjectXml,
+            CoreLayerContext: model.CoreLayerContext);
 
     private static void VerifyGeometryTopologyModel(GeometryTopologyModelRequest model)
     {
@@ -351,6 +354,8 @@ public static partial class ModelEditorAdapter
 
     private static bool IsNoOpTopologyMutation(ObservableConceptualMeshTopology topology, GeometryTopologyMutation mutation)
     {
+        if (mutation.Operation == "renameMetadataColumn")
+            return IsNoOpGeometryTopologyMetadataColumnMutation(topology, mutation);
         if (mutation.Operation == "applyFactor")
         {
             var (arcs, points, factor) = FactorTargets(topology, mutation);
@@ -453,6 +458,13 @@ public static partial class ModelEditorAdapter
 
         public bool ApplyMutation(GeometryTopologyMutation mutation)
         {
+            if (mutation.Operation == "importLines")
+            {
+                if (mutation.ImportPayload is null)
+                    throw new ArgumentException("A source line/polygon import is missing its replay payload.");
+                return ApplyGeometryTopologyImport(_observableTopology, _editContext,
+                    _completionContext, mutation.ImportPayload);
+            }
             if (mutation.Operation == "deleteSelection")
             {
                 DeleteTopologySelectionOperation? deleteOperation = CreateDeleteSelectionOperation(
@@ -475,6 +487,84 @@ public static partial class ModelEditorAdapter
             if (!accepted) throw new InvalidOperationException("The topology edit stack rejected a source mutation.");
             return true;
         }
+    }
+
+    /// <summary>
+    /// Applies the two source ArcImportDialog operations to the current draft.
+    /// The copied projected coordinates are replayed through the same retained
+    /// PasteArcOperation or TIN import and Hotswap operations used by the source.
+    /// </summary>
+    private static bool ApplyGeometryTopologyImport(ObservableConceptualMeshTopology observableTopology,
+        TopologyEditContext editContext, TopologyCompletionContext completionContext,
+        GeometryTopologyImportPayload payload)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        if (payload.Mode is not ("Merge" or "NoMerge") || payload.Sources is null || payload.Sources.Length == 0 ||
+            payload.Features is null || payload.Features.Length == 0)
+            throw new ArgumentException("The geometry import draft is incomplete.");
+        if (payload.Sources.Any(source => source is null || source.Family is null ||
+                !string.Equals(source.Family.Family, "shapefile", StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(source.Path) ||
+                string.IsNullOrWhiteSpace(source.Family.SourcePath) ||
+                !SourceFilePaths.SameSourceFile(source.Path, source.Family.SourcePath)))
+            throw new ArgumentException("The geometry import draft has an invalid Shapefile source identity.");
+
+        Polyline[] lines = payload.Features.Select(feature =>
+        {
+            if (feature is null || feature.Points is null || feature.Points.Any(point => point is null ||
+                    !double.IsFinite(point.X) || !double.IsFinite(point.Y)))
+                throw new ArgumentException("The geometry import draft contains invalid coordinates.");
+            Point[] points = feature.Points.Select(point => new Point(point.X, point.Y)).ToArray();
+            return feature.GeometryType switch
+            {
+                "polyline" => (Polyline)new Polyline(points),
+                "polygon" => new Polygon(points),
+                _ => throw new ArgumentException("The geometry import draft contains an unsupported feature type.")
+            };
+        }).ToArray();
+
+        if (payload.Mode == "NoMerge")
+        {
+            // ImportShapefile -> PasteNoMerge: one PasteArcOperation wrapped in
+            // the original multi-operation edit transaction.
+            var paste = new PasteArcOperation(editContext, lines, metadataRows: null);
+            var operation = new MultiOperationEditOperation(paste);
+            if (!completionContext.AttachListenersAndExecute(operation))
+                throw new InvalidOperationException("The topology edit stack rejected the source no-merge import.");
+            return true;
+        }
+
+        Topology sourceTopology = observableTopology.Topology;
+        if (!sourceTopology.Lock.TryEnterReadLock(5000))
+            throw new TimeoutException("Could not acquire the geometry topology for the source merge import.");
+        Topology merged;
+        try
+        {
+            merged = sourceTopology.CloneWithMeshGenerationHooks();
+            merged.ImportPolylinesOrPolygons_Tin(lines, new TopologyHelpers.TopologyImportOptions
+            {
+                ImportArcMetadata = TopologyHelpers.TopologyImportOptions.ArcMetadataImportOption.NoImport
+            }, ProgressReporter.None());
+            if (payload.MergeContiguousArcs)
+                MultiDeleteNodesOperation.MergeCollinearNodes(merged);
+            if (payload.RemoveExternalArcs)
+            {
+                merged.Complete();
+                merged.RemoveExternalArcs();
+            }
+        }
+        finally
+        {
+            sourceTopology.Lock.ExitReadLock();
+        }
+
+        // ImportShapefile -> PasteAndMerge: atomically swap the fully processed
+        // clone so the retained edit stack can undo/redo the entire import.
+        var hotswap = new HotswapTopologyEditOperation(editContext, observableTopology, merged);
+        var mergeOperation = new MultiOperationEditOperation(hotswap);
+        if (!completionContext.AttachListenersAndExecute(mergeOperation))
+            throw new InvalidOperationException("The topology edit stack rejected the source merge import.");
+        return true;
     }
 
     /// <summary>
@@ -669,7 +759,7 @@ public static partial class ModelEditorAdapter
             new("EndNodeID", "End Node", "int"), new("Length", "Length", "double")
         };
         columns.AddRange(fields.Select(field => new GeometryTopologyColumn(field.ID, field.Title, field.SourceType)));
-        columns.AddRange(MetadataColumns(topology.ArcMetadata, topology)
+        columns.AddRange(MetadataColumns(topology.ArcMetadata, topology, MeshExtensions.IsUserDefinedArcColumn)
             .Where(column => fields.All(field => field.ID != column.ID)));
         var rows = topology.Arcs.Select(arc =>
         {
@@ -707,7 +797,7 @@ public static partial class ModelEditorAdapter
             new("FID", "FID", "int"), new("X", "X", "double"), new("Y", "Y", "double")
         };
         columns.AddRange(fields.Select(field => new GeometryTopologyColumn(field.ID, field.Title, field.SourceType)));
-        columns.AddRange(MetadataColumns(topology.ControlPointMetadata, topology)
+        columns.AddRange(MetadataColumns(topology.ControlPointMetadata, topology, MeshExtensions.IsUserDefinedControlPointColumn)
             .Where(column => fields.All(field => field.ID != column.ID)));
         var rows = topology.ControlPoints.Select(point =>
         {
@@ -900,9 +990,11 @@ public static partial class ModelEditorAdapter
 
     private static string FeatureID(string kind, int fid) => kind + ":" + fid.ToString(CultureInfo.InvariantCulture);
 
-    private static GeometryTopologyColumn[] MetadataColumns(ObservableTable table, ObservableConceptualMeshTopology? topology = null) => table.Columns
+    private static GeometryTopologyColumn[] MetadataColumns(ObservableTable table, ObservableConceptualMeshTopology? topology = null,
+        Func<string, bool>? isUserDefined = null) => table.Columns
         .Select(column => new GeometryTopologyColumn(column.Name, column.Name, SourceTypeName(column.Type), column.IsReadOnly,
-            IsTag: topology?.IsReservedColumn(column.Name) != true)).ToArray();
+            IsTag: topology?.IsReservedColumn(column.Name) != true,
+            IsUserDefined: isUserDefined?.Invoke(column.Name) == true)).ToArray();
 
     private static string SourceTypeName(Type type) => type == typeof(string) ? "string"
         : type == typeof(bool) ? "bool" : type == typeof(int) ? "int"
@@ -1016,6 +1108,10 @@ public static partial class ModelEditorAdapter
             case "createTag":
                 CreateTag(topology, kind, mutation.TagName, mutation.TagType);
                 return true;
+            case "addMetadataColumn":
+            case "renameMetadataColumn":
+            case "deleteMetadataColumn":
+                return ApplyGeometryTopologyMetadataColumnMutation(topology, mutation);
             case "setTag":
             case "removeTag":
                 SetTagValues(topology, kind, mutation.FeatureIDs, mutation.TagName, mutation.Operation == "removeTag" ? null : mutation.TagValue);

@@ -9,6 +9,7 @@ struct CatalogModelActionRequest: Encodable, Sendable {
     let expectedAssetSHA: String
     let action: String
     let name: String?
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 struct CatalogModelActionDependency: Decodable, Equatable, Identifiable, Sendable {

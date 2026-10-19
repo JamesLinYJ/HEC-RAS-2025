@@ -9,12 +9,13 @@ struct CatalogGeometryMeshPreviewView: View {
     let asset: ProjectAsset
     let projectURL: URL?
     let requestIdentity: String
+    var coreLayerContext: CoreLayerRequestContext? = nil
     let client: BackendProcessClient
     @StateObject private var session = CatalogGeometryMeshPreviewSession()
     @State private var refreshRevision = UUID()
 
     private var previewIdentity: String {
-        [requestIdentity, refreshRevision.uuidString].joined(separator: "\n")
+        [requestIdentity, coreLayerContext?.identityToken ?? "", refreshRevision.uuidString].joined(separator: "\n")
     }
 
     var body: some View {
@@ -57,7 +58,8 @@ struct CatalogGeometryMeshPreviewView: View {
                 return
             }
             await session.load(asset: asset, projectURL: projectURL,
-                requestIdentity: previewIdentity, provider: BackendGeometryMeshProvider(client: client))
+                coreLayerContext: coreLayerContext, requestIdentity: previewIdentity,
+                provider: BackendGeometryMeshProvider(client: client))
         }
         .onDisappear { session.invalidate() }
     }
@@ -74,7 +76,8 @@ final class CatalogGeometryMeshPreviewSession: ObservableObject {
     private var currentRequestIdentity: String?
 
     func load(asset: ProjectAsset, projectURL: URL,
-              requestIdentity: String, provider: any GeometryMeshProvider) async {
+              coreLayerContext: CoreLayerRequestContext?, requestIdentity: String,
+              provider: any GeometryMeshProvider) async {
         generation &+= 1
         let request = generation
         currentRequestIdentity = requestIdentity
@@ -88,7 +91,7 @@ final class CatalogGeometryMeshPreviewSession: ObservableObject {
             let expectedRevision = try await CatalogPreviewFileRevision.sha256(asset.url)
             let projectRevision = try await CatalogPreviewFileRevision.sha256(projectURL)
             let model = GeometryMeshModelRequest(assetPath: asset.url.path, kind: "Geometry",
-                projectPath: projectURL.path, projectXml: nil)
+                projectPath: projectURL.path, projectXml: nil, coreLayerContext: coreLayerContext)
             let snapshot = try await provider.load(model, expectedRevision: expectedRevision,
                 draftState: nil, topologyDraftState: nil, selectedRegionIDs: [])
             guard snapshot.revision == expectedRevision,

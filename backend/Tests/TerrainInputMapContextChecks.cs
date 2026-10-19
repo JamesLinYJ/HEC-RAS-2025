@@ -78,6 +78,36 @@ internal static class TerrainInputMapContextChecks
                 $"{expected.SourceClass} returns its actual finite source geometry in project map coordinates");
         }
 
+        CatalogTreeNode leveeNode = inputs.Single(node => node.SourceClass == "LeveeModTerrainInputVC");
+        var leveeViewport = new RasterMapViewExtent(80, 10, 120, 50, 128, 128);
+        var tinOptions = new TerrainInputMapTinRenderOptions("z",
+            RenderEdges: true, RenderPoints: true, RenderDeletedTriangles: true,
+            LabelTriangles: true, LabelEdges: false, LabelPoints: false);
+        TerrainInputMapContextData leveeRender = TerrainInputMapContextService.Render(
+            new TerrainInputMapContextRequest(map, leveeNode.Id, leveeNode.SourceClass, terrainPath,
+                new TerrainInputMapRenderOptions(leveeViewport,
+                    ShowProfileStations: true, ShowTin: true, DebugMode: true,
+                    RenderScale: 0.75, TinOptions: tinOptions)));
+        TerrainInputMapLeveeRendererData leveeRenderer = leveeRender.LeveeRenderer
+            ?? throw new InvalidDataException("The retained Levee render layer did not return its source output.");
+        Check(leveeRenderer.Viewport == leveeViewport && leveeRenderer.TinFeatureCount == 1 &&
+              leveeRenderer.ProfileStations is { } stations && stations.Viewport == leveeViewport &&
+              VisiblePixels(stations) > 0 && stations.Labels.Length >= 2,
+            "The exact Levee input renders its retained Show Profile Stations output and source station labels for the requested map camera.");
+        Check(leveeRenderer.Tin is { } tin && tin.Viewport == leveeViewport && VisiblePixels(tin) > 0,
+            "The Levee DEBUG MultiTin route renders actual associated source TIN pixels in the requested map camera.");
+        Dictionary<string, TerrainInputMapTinPlotOptionDescriptor> tinDescriptors =
+            leveeRenderer.TinPlotOptions.ToDictionary(option => option.PropertyName, StringComparer.Ordinal);
+        Check(tinDescriptors["PaintZ"].Value == "true" && tinDescriptors["PaintM"].Value == "false" &&
+              tinDescriptors["RenderEdges"].Value == "true" && tinDescriptors["RenderPoints"].Value == "true" &&
+              tinDescriptors["RenderDeletedTris"].Value == "true" &&
+              tinDescriptors["LabelTris"].Name == "LabelTriangles" && tinDescriptors["LabelTris"].Value == "true" &&
+              !tinDescriptors["LabelEdges"].IsEnabled && !tinDescriptors["LabelEdges"].HasDrawingImplementation &&
+              !tinDescriptors["LabelPoints"].IsEnabled && !tinDescriptors["LabelPoints"].HasDrawingImplementation,
+            "Levee MultiTin echoes the effective source PlotOptions, keeps PaintZ/PaintM exclusive, and marks the two source no-op label options unavailable.");
+        Check(File.ReadAllBytes(visualizationPath).SequenceEqual(visualizationBefore),
+            "Levee profile and MultiTin renderer options remain transient and do not mutate the saved .vis document.");
+
         CatalogTreeNode selected = inputs.Single(node => node.SourceClass == "ChannelModTerrainInputParentVC");
         Expect<SourceFileChangedException>(() =>
         {
@@ -105,6 +135,14 @@ internal static class TerrainInputMapContextChecks
     }
 
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
+
+    private static int VisiblePixels(MapSourceRasterFrame frame)
+    {
+        int count = 0;
+        for (int offset = 3; offset < frame.Rgba.Length; offset += 4)
+            if (frame.Rgba[offset] != 0) count++;
+        return count;
+    }
 
     private static void Check(bool condition, string message)
     {
