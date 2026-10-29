@@ -81,6 +81,18 @@ struct MapSourceLayersPopover: View {
                                     ForEach(group.nodes) { node in layerRow(node) }
                                 }
                             }
+                            MapResultCulvertTimeSeriesEntry(store: store, mapState: mapState,
+                                session: mapState.storedCulvertProfile)
+                            if let acceptedSources = mapState.resultSources.snapshot,
+                               let selectedNodeID = mapState.resultMap.selectedNodeID,
+                               let resultNode = acceptedSources.sources.activeNodes.first(where: {
+                                   $0.id == selectedNodeID
+                               }),
+                               (resultNode.nodeKind == "Result" || resultNode.nodeKind == "MultiResult") {
+                                Divider()
+                                MapResultMeshTimeSeriesEntry(store: store, mapState: mapState,
+                                    snapshot: acceptedSources, node: resultNode)
+                            }
                             if nodes.contains(where: { $0.sourceLocator?.nodeType == "BoundaryCondition" })
                                 || !mapState.boundaryMap.entries.isEmpty || mapState.boundaryMap.isLoading {
                                 boundaryLinesSection
@@ -110,70 +122,168 @@ struct MapSourceLayersPopover: View {
             .onChange(of: store.mapWorkflowIdentity(mapState.id)) { _, _ in
                 removing = nil
             }
+            .onChange(of: store.isDebugMode) { _, debugMode in
+                guard !debugMode else { return }
+                for node in nodes where node.sourceClass == "LeveeModTerrainInputVC" {
+                    Task { await mapState.terrainInputMap.setShowsTin(false, nodeID: node.id, debugMode: false) }
+                }
+            }
     }
     private func isChecked(_ node: LayerTreeNode) -> Bool {
-        FlowAreaMapGenerationVisibility.hasLocalVisibilityOverride(node: node,
+        if isRenderableTerrainInput(node) { return mapState.terrainInputMap.isChecked(node.id) }
+        return FlowAreaMapGenerationVisibility.hasLocalVisibilityOverride(node: node,
             mapID: mapState.id, projectSessionID: store.projectSessionID, store: store)
             || node.checked == .checked
+    }
+    private func isRenderableTerrainInput(_ node: LayerTreeNode) -> Bool {
+        ["ChannelModTerrainInputParentVC", "LeveeModTerrainInputVC",
+         "PolygonRasterModTerrainInputVisualContext"].contains(node.sourceClass)
     }
     @ViewBuilder private func layerRow(_ node: LayerTreeNode) -> some View {
         let meshGeneration = FlowAreaMapGenerationVisibility.activeSession(node: node,
             mapID: mapState.id, projectSessionID: store.projectSessionID, store: store)
         let hasGenerationVisibilityOverride = FlowAreaMapGenerationVisibility.hasLocalVisibilityOverride(
             node: node, mapID: mapState.id, projectSessionID: store.projectSessionID, store: store)
-        HStack {
-            if meshGeneration != nil {
-                Toggle(isOn: .constant(false)) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                if meshGeneration != nil {
+                    Toggle(isOn: .constant(false)) {
+                        Label { Text(verbatim: node.name) } icon: { Image(systemName: node.symbol) }
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(true)
+                    .accessibilityValue(L10n.text(meshGeneration?.isCancellingMeshGeneration == true
+                        ? "Cancelling mesh generation" : "Generating mesh"))
+                } else if case .mixed? = node.checked, !hasGenerationVisibilityOverride {
+                    Button { setVisibility(node, checked: true) } label: {
+                        Image(systemName: "minus.square")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(L10n.text("Partially visible"))
+                    .accessibilityLabel(L10n.text("Partially visible"))
+                    Label { Text(verbatim: node.name) } icon: { Image(systemName: node.symbol) }
+                } else if node.checked != nil {
+                    Toggle(isOn: Binding(get: { isChecked(node) }, set: { checked in
+                        setVisibility(node, checked: checked)
+                    })) { Label { Text(verbatim: node.name) } icon: { Image(systemName: node.symbol) } }
+                        .toggleStyle(.checkbox)
+                } else {
                     Label { Text(verbatim: node.name) } icon: { Image(systemName: node.symbol) }
                 }
-                .toggleStyle(.checkbox)
-                .disabled(true)
-                .accessibilityValue(L10n.text(meshGeneration?.isCancellingMeshGeneration == true
-                    ? "Cancelling mesh generation" : "Generating mesh"))
-            } else if case .mixed? = node.checked, !hasGenerationVisibilityOverride {
-                Button { setVisibility(node, checked: true) } label: {
-                    Image(systemName: "minus.square")
-                        .foregroundStyle(.secondary)
+                Spacer()
+                if canEditRasterStyle(node) {
+                    Button { presentRasterStyle(node) } label: {
+                        Image(systemName: "slider.horizontal.3")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(L10n.text("Raster Style…"))
+                    .accessibilityLabel(L10n.text("Raster Style…"))
+                    .disabled(styleLoading)
                 }
-                .buttonStyle(.plain)
-                .help(L10n.text("Partially visible"))
-                .accessibilityLabel(L10n.text("Partially visible"))
-                Label { Text(verbatim: node.name) } icon: { Image(systemName: node.symbol) }
-            } else if node.checked != nil {
-                Toggle(isOn: Binding(get: { isChecked(node) }, set: { checked in
-                    setVisibility(node, checked: checked)
-                })) { Label { Text(verbatim: node.name) } icon: { Image(systemName: node.symbol) } }
-                    .toggleStyle(.checkbox)
-            } else {
-                Label { Text(verbatim: node.name) } icon: { Image(systemName: node.symbol) }
-            }
-            Spacer()
-            if canEditRasterStyle(node) {
-                Button { presentRasterStyle(node) } label: {
-                    Image(systemName: "slider.horizontal.3")
-                }
-                .buttonStyle(.borderless)
-                .help(L10n.text("Raster Style…"))
-                .accessibilityLabel(L10n.text("Raster Style…"))
-                .disabled(styleLoading)
-            }
-            if canRemove(node) {
-                Button(role: .destructive) {
-                    removing = PendingMapSourceRemoval(
-                        node: node,
-                        projectSessionID: store.projectSessionID,
-                        mapID: mapState.id,
-                        workflowIdentity: store.mapWorkflowIdentity(mapState.id))
-                } label: {
-                    Label(node.sourceLocator?.nodeType == "Plan" ? "Remove Plan from Map" : "Remove from Map",
-                          systemImage: "minus.circle")
-                }
+                if canRemove(node) {
+                    Button(role: .destructive) {
+                        removing = PendingMapSourceRemoval(
+                            node: node,
+                            projectSessionID: store.projectSessionID,
+                            mapID: mapState.id,
+                            workflowIdentity: store.mapWorkflowIdentity(mapState.id))
+                    } label: {
+                        Label(node.sourceLocator?.nodeType == "Plan" ? "Remove Plan from Map" : "Remove from Map",
+                              systemImage: "minus.circle")
+                    }
                     .labelStyle(.iconOnly)
                     .help(L10n.text("Remove this source from the map"))
+                }
+            }
+            if isLeveeInput(node), mapState.terrainInputMap.isChecked(node.id) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Toggle("Show Profile Stations", isOn: Binding(
+                        get: { mapState.terrainInputMap.showsProfileStations(node.id) },
+                        set: { enabled in
+                            Task { await mapState.terrainInputMap.setShowsProfileStations(enabled, nodeID: node.id) }
+                        }))
+                        .toggleStyle(.checkbox)
+                        .disabled(busy || mapState.terrainInputMap.loadingNodeIDs.contains(node.id)
+                            || !mapState.terrainInputMap.hasRenderViewport)
+                    if store.isDebugMode {
+                        Toggle("Add TIN to Map Layers (DEBUG)", isOn: Binding(
+                            get: { mapState.terrainInputMap.showsTin(node.id) },
+                            set: { enabled in
+                                Task { await mapState.terrainInputMap.setShowsTin(enabled,
+                                    nodeID: node.id, debugMode: store.isDebugMode) }
+                            }))
+                            .toggleStyle(.checkbox)
+                            .help(L10n.text("Adds the simple cut/fill surfaces as an in-memory TIN map layer. Not saved with the project."))
+                            .disabled(busy || mapState.terrainInputMap.loadingNodeIDs.contains(node.id)
+                                || !mapState.terrainInputMap.hasRenderViewport)
+                        tinRenderOptions(node.id)
+                    }
+                    if mapState.terrainInputMap.loadingNodeIDs.contains(node.id) {
+                        ProgressView("Rendering Levee map layer…").controlSize(.small)
+                    }
+                    if let warning = mapState.terrainInputMap.leveeRendererWarning(node.id) {
+                        Text(L10n.text(warning)).font(.caption2).foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    if let error = mapState.terrainInputMap.error(for: node.id) {
+                        Text(verbatim: error).font(.caption2).foregroundStyle(.red)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.leading, 24)
             }
         }
         .padding(.leading, CGFloat(max(0, (node.sourceLocator?.nodePath?.count ?? 2) - 2)) * 12)
         .disabled(busy || meshGeneration != nil)
+    }
+
+    private func isLeveeInput(_ node: LayerTreeNode) -> Bool {
+        node.sourceClass == "LeveeModTerrainInputVC"
+    }
+
+    @ViewBuilder
+    private func tinRenderOptions(_ nodeID: String) -> some View {
+        let current = mapState.terrainInputMap.tinOptions(nodeID)
+        VStack(alignment: .leading, spacing: 3) {
+            Picker(L10n.text("TIN Surface Fill"), selection: Binding(
+                get: { mapState.terrainInputMap.tinOptions(nodeID).surfaceFillMode },
+                set: { value in updateTinOptions(nodeID) { $0.surfaceFillMode = value } }
+            )) {
+                ForEach(TerrainInputMapTinSurfaceFillMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            Toggle(L10n.text("Render TIN Edges"), isOn: Binding(
+                get: { mapState.terrainInputMap.tinOptions(nodeID).renderEdges },
+                set: { value in updateTinOptions(nodeID) { $0.renderEdges = value } }))
+            Toggle(L10n.text("Render Points"), isOn: Binding(
+                get: { mapState.terrainInputMap.tinOptions(nodeID).renderPoints },
+                set: { value in updateTinOptions(nodeID) { $0.renderPoints = value } }))
+            Toggle(L10n.text("Render Deleted Triangles"), isOn: Binding(
+                get: { mapState.terrainInputMap.tinOptions(nodeID).renderDeletedTriangles },
+                set: { value in updateTinOptions(nodeID) { $0.renderDeletedTriangles = value } }))
+            Toggle(L10n.text("Label Triangles"), isOn: Binding(
+                get: { mapState.terrainInputMap.tinOptions(nodeID).labelTriangles },
+                set: { value in updateTinOptions(nodeID) { $0.labelTriangles = value } }))
+            Toggle(L10n.text("Label Edges"), isOn: .constant(false))
+                .disabled(true)
+                .help(L10n.text("The retained MultiTin renderer does not implement this label drawing option."))
+            Toggle(L10n.text("Label Points"), isOn: .constant(false))
+                .disabled(true)
+                .help(L10n.text("The retained MultiTin renderer does not implement this label drawing option."))
+        }
+        .font(.caption)
+        .padding(.leading, 16)
+        .accessibilityElement(children: .contain)
+        .accessibilityValue(current.surfaceFillMode.title)
+    }
+
+    private func updateTinOptions(_ nodeID: String,
+                                 update: (inout TerrainInputMapTinRenderOptions) -> Void) {
+        var next = mapState.terrainInputMap.tinOptions(nodeID)
+        update(&next)
+        Task { await mapState.terrainInputMap.setTinOptions(next, nodeID: nodeID) }
     }
 
     private var boundaryLinesSection: some View {
@@ -442,7 +552,8 @@ struct MapSourceLayersPopover: View {
     private func canRemove(_ node: LayerTreeNode) -> Bool {
         if node.sourceLocator?.nodeType == "MapLayer" {
             return store.sourceMapVectorURL(node) != nil
-                || (node.sourceLocator?.mapType == "SingleBandRasterMapLayer"
+                || (["SingleBandRasterMapLayer", "ImageRasterMapLayer", "DiscreteRasterMapLayer"]
+                    .contains(node.sourceLocator?.mapType ?? "")
                     && CatalogSourceContextRoutes.mapLayerFilePath(for: node) != nil)
         }
         if node.sourceLocator?.nodeType == "Plan" {

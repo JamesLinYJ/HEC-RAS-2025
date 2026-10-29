@@ -99,6 +99,56 @@ struct BackendGeometryTopologyToolWorkflowTests {
         await topology.loadRecipe(controlPointFIDs: recipeFIDs)
         #expect(topology.recipeEditorState?.inspection?.selectedRecipes.allSatisfy { $0.recipe == "Smooth()" } == true)
 
+        // The R Arc editor reports Default for a mixed Constrain Stretching or
+        // Laplace BC aggregate. Choosing that displayed Default is a no-op in
+        // the ordinary aggregate setter, so these commands must reach the
+        // dedicated multi-row ForceSet path through the real bundled Host.
+        let forceSetArcRows = Array(initial.arcs.rows.prefix(2))
+        #expect(forceSetArcRows.count == 2)
+        let forceSetArcIDs = forceSetArcRows.map(\.id)
+        let forceSetArcFIDs = forceSetArcRows.map(\.fid)
+        topology.select(Set(forceSetArcIDs), featureKind: "arc")
+        await topology.setField(featureKind: "arc", fid: forceSetArcFIDs[0],
+            fieldID: "ConstrainStretching", value: "Constrained")
+        await topology.setField(featureKind: "arc", fid: forceSetArcFIDs[1],
+            fieldID: "ConstrainStretching", value: "Floating")
+        await topology.setField(featureKind: "arc", fid: forceSetArcFIDs[0], fieldID: "LaplaceBC", value: "ZeroFlux")
+        await topology.setField(featureKind: "arc", fid: forceSetArcFIDs[1], fieldID: "LaplaceBC", value: "Dirichlet")
+        await topology.setField(featureKind: "arc", fid: forceSetArcFIDs[0], fieldID: "Bias", value: "1.5")
+        await topology.setField(featureKind: "arc", fid: forceSetArcFIDs[1], fieldID: "Bias", value: "2.5")
+        #expect(topology.snapshot?.arcs.rows.first { $0.fid == forceSetArcFIDs[0] }?
+            .values["ConstrainStretching"] == "Constrained")
+        #expect(topology.snapshot?.arcs.rows.first { $0.fid == forceSetArcFIDs[1] }?
+            .values["ConstrainStretching"] == "Floating")
+
+        #expect(await topology.forceSetArcChoice(rowIDs: forceSetArcIDs,
+            fieldID: "ConstrainStretching", value: "Default"))
+        #expect(forceSetArcFIDs.allSatisfy { fid in
+            topology.snapshot?.arcs.rows.first { $0.fid == fid }?.values["ConstrainStretching"] == "Default"
+        })
+        await topology.undo()
+        #expect(topology.snapshot?.arcs.rows.first { $0.fid == forceSetArcFIDs[0] }?
+            .values["ConstrainStretching"] == "Constrained")
+        #expect(topology.snapshot?.arcs.rows.first { $0.fid == forceSetArcFIDs[1] }?
+            .values["ConstrainStretching"] == "Floating")
+        await topology.redo()
+
+        #expect(await topology.forceSetArcChoice(rowIDs: forceSetArcIDs, fieldID: "LaplaceBC", value: "Default"))
+        #expect(forceSetArcFIDs.allSatisfy { fid in
+            topology.snapshot?.arcs.rows.first { $0.fid == fid }?.values["LaplaceBC"] == "Default"
+        })
+        await topology.undo()
+        #expect(topology.snapshot?.arcs.rows.first { $0.fid == forceSetArcFIDs[0] }?.values["LaplaceBC"] == "ZeroFlux")
+        #expect(topology.snapshot?.arcs.rows.first { $0.fid == forceSetArcFIDs[1] }?.values["LaplaceBC"] == "Dirichlet")
+        await topology.redo()
+
+        #expect(await topology.forceResetArcBias(rowIDs: forceSetArcIDs))
+        #expect(forceSetArcFIDs.allSatisfy { fid in topology.snapshot?.arcs.rows.first { $0.fid == fid }?.values["Bias"] == "NaN" })
+        await topology.undo()
+        #expect(topology.snapshot?.arcs.rows.first { $0.fid == forceSetArcFIDs[0] }?.values["Bias"] == "1.5")
+        #expect(topology.snapshot?.arcs.rows.first { $0.fid == forceSetArcFIDs[1] }?.values["Bias"] == "2.5")
+        await topology.redo()
+
         // The point query is tied to the current draft. Editing X through the
         // selected arc must reload rows so a following Y edit can use it.
         let arcID = manifest.internalPointArcFID
@@ -167,6 +217,11 @@ struct BackendGeometryTopologyToolWorkflowTests {
             $0.rowIndex == internalPoint.rowIndex
         })
         #expect(persistedPoint.x == changedX && persistedPoint.y == internalPoint.y + 2.5)
+        #expect(forceSetArcFIDs.allSatisfy { fid in
+            let row = reopenedTopology.snapshot?.arcs.rows.first { $0.fid == fid }
+            return row?.values["ConstrainStretching"] == "Default"
+                && row?.values["LaplaceBC"] == "Default" && row?.values["Bias"] == "NaN"
+        })
     }
 }
 

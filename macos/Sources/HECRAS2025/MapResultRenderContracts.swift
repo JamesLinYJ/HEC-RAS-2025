@@ -1,6 +1,85 @@
 import Foundation
 import RASWorkspaceCore
 
+enum MapResultVelocityDisplay: String, CaseIterable, Codable, Hashable, Sendable {
+    case magnitude = "Magnitude"
+    case vx = "Vx"
+    case vy = "Vy"
+
+    var titleKey: String {
+        switch self {
+        case .magnitude: "Magnitude (Default)"
+        case .vx: "Vx Component"
+        case .vy: "Vy Component"
+        }
+    }
+}
+
+struct MapResultRenderOptions: Codable, Hashable, Sendable {
+    var velocityDisplay: MapResultVelocityDisplay = .magnitude
+    var mapDiagnostics = false
+    var forceRecomputeMapPoints = false
+
+    static let `default` = MapResultRenderOptions()
+}
+
+struct MapResultRenderOptionIdentity: Hashable, Sendable {
+    let mapID: UUID
+    let node: CatalogTreeNodeLocator
+    let selectionIndex: Int
+    let canonicalResultPath: String
+    let normalizedRevision: String
+
+    init(mapID: UUID, node: CatalogTreeNodeLocator, selectionIndex: Int,
+         resultPath: String, revision: String) {
+        self.mapID = mapID
+        self.node = node
+        self.selectionIndex = selectionIndex
+        canonicalResultPath = SourceFilePaths.canonical(URL(fileURLWithPath: resultPath))
+        normalizedRevision = revision.lowercased()
+    }
+}
+
+struct MapResultRenderOptionOverride: Encodable, Hashable, Sendable {
+    let selectionIndex: Int
+    let resultPath: String
+    let revision: String
+    let velocityDisplay: String
+    let mapDiagnostics: Bool
+    let forceRecomputeMapPoints: Bool
+
+    init(selectionIndex: Int, resultPath: String, revision: String,
+         options: MapResultRenderOptions) {
+        self.selectionIndex = selectionIndex
+        self.resultPath = resultPath
+        self.revision = revision
+        velocityDisplay = options.velocityDisplay.rawValue
+        mapDiagnostics = options.mapDiagnostics
+        forceRecomputeMapPoints = options.forceRecomputeMapPoints
+    }
+}
+
+struct MapResultRenderDiagnosticPoint: Decodable, Hashable, Sendable {
+    let text: String
+    let x: Double
+    let y: Double
+}
+
+struct MapResultRenderDiagnosticAnnotation: Identifiable, Hashable, Sendable {
+    let layerID: String
+    let resultPath: String
+    let revision: String
+    let selectionIndices: [Int]
+    let text: String
+    let x: Double
+    let y: Double
+
+    var id: String {
+        [layerID, selectionIndices.map(String.init).joined(separator: ","), text,
+         x.bitPattern.description, y.bitPattern.description].joined(separator: "|")
+    }
+}
+
 struct MapResultRenderRequest: Encodable, Sendable {
     let map: MapResultChartMapRequest
     let selectionOverrides: [MapResultSelectionOverride]
@@ -10,6 +89,7 @@ struct MapResultRenderRequest: Encodable, Sendable {
     let viewport: RasterMapViewExtent?
     let blockedSelectionIndices: [Int]
     let liveKeyframeAnchor: MapResultRenderLiveKeyframeAnchor?
+    let renderOptions: [MapResultRenderOptionOverride]
 
     init(map: MapResultChartMapRequest,
          selectionOverrides: [MapResultSelectionOverride],
@@ -18,7 +98,8 @@ struct MapResultRenderRequest: Encodable, Sendable {
          profileIndex: Int?,
          viewport: RasterMapViewExtent?,
          blockedSelectionIndices: [Int] = [],
-         liveKeyframeAnchor: MapResultRenderLiveKeyframeAnchor? = nil) {
+         liveKeyframeAnchor: MapResultRenderLiveKeyframeAnchor? = nil,
+         renderOptions: [MapResultRenderOptionOverride] = []) {
         self.map = map
         self.selectionOverrides = selectionOverrides
         self.contextToken = contextToken
@@ -27,6 +108,7 @@ struct MapResultRenderRequest: Encodable, Sendable {
         self.viewport = viewport
         self.blockedSelectionIndices = blockedSelectionIndices
         self.liveKeyframeAnchor = liveKeyframeAnchor
+        self.renderOptions = renderOptions
     }
 }
 
@@ -117,7 +199,10 @@ struct MapResultRenderSourceStatus: Decodable, Identifiable, Sendable {
     let profileIndex: Int?
     let unavailableReason: String?
 
-    var id: String { SourceFilePaths.canonical(URL(fileURLWithPath: resultPath)) + "|" + revision }
+    var id: String {
+        SourceFilePaths.canonical(URL(fileURLWithPath: resultPath)) + "|" + revision.lowercased()
+            + "|" + selectionIndices.map(String.init).joined(separator: ",")
+    }
 
 }
 
@@ -144,6 +229,19 @@ struct MapResultRenderLayerPayload: Decodable, Identifiable, Sendable {
     let maxY: Double
     let noDataValue: Float
     let legendStops: [MapResultRenderLegendStop]
+    let selectionIndices: [Int]?
+    let velocityDisplay: String?
+    let mapDiagnostics: Bool?
+    let forceRecomputeMapPoints: Bool?
+    let diagnosticLabels: [MapResultRenderDiagnosticPoint]?
+
+    var renderOptions: MapResultRenderOptions? {
+        guard let velocityDisplay,
+              let mode = MapResultVelocityDisplay(rawValue: velocityDisplay),
+              let mapDiagnostics, let forceRecomputeMapPoints else { return nil }
+        return MapResultRenderOptions(velocityDisplay: mode,
+            mapDiagnostics: mapDiagnostics, forceRecomputeMapPoints: forceRecomputeMapPoints)
+    }
 
     func makeLayer(expectedMapID: UUID) throws -> MapRasterLayer {
         guard let returnedMapID = UUID(uuidString: sourceMapID), returnedMapID == expectedMapID else {
@@ -167,6 +265,17 @@ struct MapResultRenderResult: Decodable, Sendable {
     let sources: [MapResultRenderSourceStatus]
     let unavailableReason: String?
 
+    var diagnosticAnnotations: [MapResultRenderDiagnosticAnnotation] {
+        layers.flatMap { layer in
+            (layer.diagnosticLabels ?? []).map { label in
+                MapResultRenderDiagnosticAnnotation(layerID: layer.id,
+                    resultPath: layer.resultPath, revision: layer.revision,
+                    selectionIndices: layer.selectionIndices ?? [], text: label.text,
+                    x: label.x, y: label.y)
+            }
+        }
+    }
+
     func mapUpdate(expectedMapID: UUID) throws -> MapUpdate {
         let renderedLayers = try layers.map { try $0.makeLayer(expectedMapID: expectedMapID) }
         struct SourceIdentity: Hashable {
@@ -178,20 +287,22 @@ struct MapResultRenderResult: Decodable, Sendable {
                 self.revision = revision.lowercased()
             }
         }
-        var sourceIndices: [SourceIdentity: [Int]] = [:]
+        var sourceIndices: [SourceIdentity: Set<Int>] = [:]
         var ambiguousSources: Set<SourceIdentity> = []
-        var seenSources: Set<SourceIdentity> = []
         for source in sources {
             let identity = SourceIdentity(path: source.resultPath, revision: source.revision)
-            guard seenSources.insert(identity).inserted else {
+            let indices = source.selectionIndices
+            guard !indices.isEmpty, indices.allSatisfy({ (0..<32).contains($0) }),
+                  Set(indices).count == indices.count else { continue }
+            let incoming = Set(indices)
+            if let existing = sourceIndices[identity], !existing.isDisjoint(with: incoming) {
                 ambiguousSources.insert(identity)
                 sourceIndices.removeValue(forKey: identity)
                 continue
             }
-            let indices = source.selectionIndices
-            guard !indices.isEmpty, indices.allSatisfy({ $0 >= 0 }),
-                  Set(indices).count == indices.count else { continue }
-            sourceIndices[identity] = indices
+            if !ambiguousSources.contains(identity) {
+                sourceIndices[identity, default: []].formUnion(incoming)
+            }
         }
 
         var selectionIndicesByLayerID: [String: [Int]] = [:]
@@ -207,13 +318,19 @@ struct MapResultRenderResult: Decodable, Sendable {
             }
             let identity = SourceIdentity(path: layer.resultPath, revision: layer.revision)
             guard !ambiguousSources.contains(identity),
-                  let indices = sourceIndices[identity] else { continue }
-            if let previous = selectionIndicesByLayerID[layer.id], previous != indices {
+                  let ownedIndices = sourceIndices[identity],
+                  let indices = layer.selectionIndices,
+                  !indices.isEmpty,
+                  indices.allSatisfy({ ownedIndices.contains($0) && (0..<32).contains($0) }),
+                  Set(indices).count == indices.count,
+                  layer.renderOptions != nil,
+                  (layer.diagnosticLabels ?? []).allSatisfy({ !$0.text.isEmpty && $0.x.isFinite && $0.y.isFinite }) else { continue }
+            if let previous = selectionIndicesByLayerID[layer.id], !Set(previous).isDisjoint(with: indices) {
                 selectionIndicesByLayerID.removeValue(forKey: layer.id)
                 sourceIdentityByLayerID.removeValue(forKey: layer.id)
                 ambiguousLayerIDs.insert(layer.id)
             } else if !ambiguousLayerIDs.contains(layer.id) {
-                selectionIndicesByLayerID[layer.id] = indices
+                selectionIndicesByLayerID[layer.id] = indices.sorted()
                 sourceIdentityByLayerID[layer.id] = MapRasterSourceIdentity(
                     resultPath: layer.resultPath, revision: layer.revision)
             }

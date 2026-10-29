@@ -29,16 +29,16 @@ struct TypedEditorToolRoute: View {
         switch action {
         case .terrainImport: .terrains
         case .classificationImport: .surfaceLayers
-        case .griddedImport, .initialConditions: .boundaryConditions
+        case .griddedImport, .initialConditions, .spatialImport: .boundaryConditions
         case .tagCreate, .tagEdit: .geometries
-        case .topology, .topologyRecipe, .arcPoints, .tagFilter: .geometries
+        case .topology, .topologyRecipe, .arcPoints, .tagFilter, .vectorImport: .geometries
         default: nil
         }
     }
 
     private var isTagAction: Bool { action == .tagCreate || action == .tagEdit }
     private var isGeometryEditorAction: Bool {
-        [.topology, .topologyRecipe, .arcPoints, .tagFilter].contains(action)
+        [.topology, .topologyRecipe, .arcPoints, .tagFilter, .vectorImport].contains(action)
     }
 
     private var headerSymbol: String {

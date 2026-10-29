@@ -11,7 +11,6 @@ struct StreamModeView: View {
     @State private var selectedSample: StreamModeMapSample?
     @State private var cameraScale: CGFloat = 1
     @State private var cameraOffset: CGSize = .zero
-    @State private var paintsZSurface = false
 
     init(session: StreamModeSession, initialPipeName: String = "") {
         self.session = session
@@ -74,16 +73,22 @@ struct StreamModeView: View {
                     hiddenObjectIDs: $hiddenObjectIDs,
                     selectedObjectID: $selectedObjectID,
                     activeTinProfileID: effectiveActiveTinProfileID,
+                    tinProfileAssets: effectiveTinProfileSelection?.assets ?? [],
+                    selectedTinProfileIndex: effectiveTinProfileSelection?.selectedProfileIndex,
                     selectedSample: $selectedSample,
                     cameraScale: $cameraScale,
                     cameraOffset: $cameraOffset,
-                    paintsZSurface: $paintsZSurface)
+                    tinRenderSession: session.tinRenderSession)
                     .padding(12)
 
                 Divider()
 
                 ScrollView {
                     LazyVStack(spacing: 8) {
+                        StreamModeTinOptionsView(session: session.tinRenderSession,
+                            availableProfileIndices: availableTinProfileIndices,
+                            selectedProfileIndex: selectedTinProfileBinding)
+                            .padding(.bottom, 4)
                         ForEach(session.mapObjects.reversed()) { object in
                             StreamModeObjectRow(object: object,
                                 tinProfileIndex: tinProfileIndex(for: object),
@@ -104,17 +109,29 @@ struct StreamModeView: View {
         }
         .frame(minWidth: 800, minHeight: 500)
         .onDisappear {
-            if session.isActive { session.cancel() }
+            session.close()
         }
         .onChange(of: session.currentOperationID) { _, operationID in
             guard let operationID, operationID != lastSessionOperationID else { return }
             lastSessionOperationID = operationID
+            session.tinRenderSession.clear()
             hiddenObjectIDs = []
             selectedObjectID = nil
             activeTinProfileID = nil
             selectedSample = nil
             cameraScale = 1
             cameraOffset = .zero
+        }
+        .onChange(of: effectiveTinProfileSelection) { _, selection in
+            guard let selection, let sourceAsset = selection.assets.first else {
+                session.tinRenderSession.clear()
+                return
+            }
+            session.tinRenderSession.select(
+                assets: selection.assets.map { StreamModeTinAssetReference(sessionID: $0.sessionID,
+                    sequence: $0.sequence, assetID: $0.assetID, sha256: $0.sha256) },
+                selectedProfileIndex: selection.selectedProfileIndex,
+                operationID: sourceAsset.sessionID)
         }
     }
 
@@ -161,10 +178,26 @@ struct StreamModeView: View {
 
     private var effectiveActiveTinProfileID: String? {
         if let activeTinProfileID,
+           !hiddenObjectIDs.contains(activeTinProfileID),
            session.mapObjects.contains(where: { $0.id == activeTinProfileID && $0.source.objectType == "Tin" }) {
             return activeTinProfileID
         }
-        return session.mapObjects.first(where: { $0.source.objectType == "Tin" })?.id
+        return session.mapObjects.first(where: {
+            $0.source.objectType == "Tin" && !hiddenObjectIDs.contains($0.id)
+        })?.id
+    }
+
+    private var effectiveTinProfileSelection: StreamModeTinProfileSelection? {
+        guard let selectedProfileID = effectiveActiveTinProfileID,
+              let selectedObject = session.mapObjects.first(where: { $0.id == selectedProfileID }),
+              let selectedAsset = selectedObject.source.tinAsset,
+              let selectedIndex = tinProfileIndex(for: selectedObject) else { return nil }
+        let assets = session.mapObjects.compactMap { object -> BackendStreamModeTinAsset? in
+            guard object.source.objectType == "Tin" else { return nil }
+            return object.source.tinAsset
+        }
+        guard assets.indices.contains(selectedIndex), assets[selectedIndex] == selectedAsset else { return nil }
+        return StreamModeTinProfileSelection(assets: assets, selectedProfileIndex: selectedIndex)
     }
 
     private func tinProfileIndex(for object: StreamModeMapObject) -> Int? {
@@ -172,6 +205,32 @@ struct StreamModeView: View {
         return session.mapObjects.prefix(while: { $0.id != object.id })
             .filter { $0.source.objectType == "Tin" }.count
     }
+
+    private var availableTinProfileIndices: [Int] {
+        session.mapObjects.compactMap { object -> Int? in
+            guard object.source.objectType == "Tin", !hiddenObjectIDs.contains(object.id) else { return nil }
+            return tinProfileIndex(for: object)
+        }
+    }
+
+    private var selectedTinProfileBinding: Binding<Int> {
+        Binding(
+            get: { effectiveTinProfileSelection?.selectedProfileIndex ?? 0 },
+            set: { index in
+                guard let object = session.mapObjects.first(where: {
+                    $0.source.objectType == "Tin" && !hiddenObjectIDs.contains($0.id) &&
+                        tinProfileIndex(for: $0) == index
+                }) else { return }
+                activeTinProfileID = object.id
+                selectedObjectID = object.id
+                selectedSample = nil
+            })
+    }
+}
+
+private struct StreamModeTinProfileSelection: Equatable {
+    let assets: [BackendStreamModeTinAsset]
+    let selectedProfileIndex: Int
 }
 
 private struct StreamModeObjectRow: View {
@@ -290,10 +349,13 @@ private struct StreamModeMapCanvas: View {
     @Binding var hiddenObjectIDs: Set<String>
     @Binding var selectedObjectID: String?
     let activeTinProfileID: String?
+    let tinProfileAssets: [BackendStreamModeTinAsset]
+    let selectedTinProfileIndex: Int?
     @Binding var selectedSample: StreamModeMapSample?
     @Binding var cameraScale: CGFloat
     @Binding var cameraOffset: CGSize
-    @Binding var paintsZSurface: Bool
+    @ObservedObject var tinRenderSession: StreamModeTinRenderSession
+    @Environment(\.displayScale) private var displayScale
     @State private var dragOriginOffset: CGSize?
 
     private var visibleObjects: [StreamModeMapObject] {
@@ -307,18 +369,30 @@ private struct StreamModeMapCanvas: View {
         objects.flatMap(\.source.coordinates).map { MapPoint(x: $0.x, y: $0.y) }
     }
 
-    private var containsTinWithZ: Bool {
-        visibleObjects.contains { $0.source.objectType == "Tin" && $0.source.hasZ }
-    }
-
     var body: some View {
         GeometryReader { proxy in
             let transform = MapTransform(points: mapPoints, size: proxy.size,
                 scale: cameraScale, offset: cameraOffset)
+            let tinViewport = viewport(transform: transform, size: proxy.size)
+            let renderTaskKey: StreamModeTinRenderTaskKey? = {
+                guard !tinProfileAssets.isEmpty,
+                      let selectedTinProfileIndex,
+                      let viewport = tinViewport,
+                      tinProfileAssets.allSatisfy({ $0.sessionID == tinProfileAssets[0].sessionID }) else { return nil }
+                let references = tinProfileAssets.map { StreamModeTinAssetReference(sessionID: $0.sessionID,
+                    sequence: $0.sequence, assetID: $0.assetID, sha256: $0.sha256) }
+                return StreamModeTinRenderTaskKey(assets: references,
+                    selectedProfileIndex: selectedTinProfileIndex, viewport: viewport,
+                    optionsRevision: tinRenderSession.optionsRevision)
+            }()
             ZStack(alignment: .top) {
                 Canvas { context, _ in
                     draw(visibleObjects, in: &context, transform: transform,
-                        selectedObjectID: selectedObjectID, paintsZSurface: paintsZSurface)
+                        selectedObjectID: selectedObjectID,
+                        tinRender: tinRenderSession.render,
+                        tinImage: tinRenderSession.rasterImage,
+                        tinProfileAssets: tinProfileAssets,
+                        selectedTinProfileIndex: selectedTinProfileIndex)
                 }
 
                 MapPointerInteraction { location, delta in
@@ -359,6 +433,10 @@ private struct StreamModeMapCanvas: View {
             .simultaneousGesture(SpatialTapGesture().onEnded { value in
                 selectFeature(at: value.location, transform: transform)
             })
+            .task(id: renderTaskKey) {
+                guard let renderTaskKey else { return }
+                await tinRenderSession.render(viewport: renderTaskKey.viewport)
+            }
         }
     }
 
@@ -393,35 +471,10 @@ private struct StreamModeMapCanvas: View {
 
             Spacer(minLength: 8)
 
-            Toggle(L10n.text("Paint Z Surface"), isOn: $paintsZSurface)
-                .toggleStyle(.checkbox)
-                .disabled(!containsTinWithZ)
-                .help(L10n.text("Color TIN triangles using the source Z samples"))
-            if paintsZSurface, let range = activeTinZRange {
-                Text(Self.formatted(range.lowerBound))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                LinearGradient(colors: [.white, .black], startPoint: .leading, endPoint: .trailing)
-                    .frame(width: 64, height: 8)
-                    .clipShape(Capsule())
-                    .accessibilityLabel(L10n.text("Source Z surface color scale"))
-                Text(Self.formatted(range.upperBound))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
         }
         .buttonStyle(.borderless)
         .controlSize(.small)
     }
-
-    private var activeTinZRange: ClosedRange<Double>? {
-        guard let object = visibleObjects.first(where: { $0.id == activeTinProfileID && $0.source.hasZ }) else { return nil }
-        let values = object.source.coordinates.compactMap(\.z).filter(\.isFinite)
-        guard let minimum = values.min(), let maximum = values.max() else { return nil }
-        return minimum...maximum
-    }
-
-    private static func formatted(_ value: Double) -> String { String(format: "%.3f", value) }
 
     private func zoom(by factor: CGFloat, size: CGSize) {
         guard let update = MapPointerCamera.zoom(scale: cameraScale, offset: cameraOffset,
@@ -431,7 +484,11 @@ private struct StreamModeMapCanvas: View {
     }
 
     private func draw(_ objects: [StreamModeMapObject], in context: inout GraphicsContext,
-                      transform: MapTransform, selectedObjectID: String?, paintsZSurface: Bool) {
+                      transform: MapTransform, selectedObjectID: String?,
+                      tinRender: StreamModeTinRenderResult?,
+                      tinImage: CGImage?,
+                      tinProfileAssets: [BackendStreamModeTinAsset],
+                      selectedTinProfileIndex: Int?) {
         guard transform.size.width > 0, transform.size.height > 0 else { return }
         for object in objects {
             let frame = object.source
@@ -439,8 +496,14 @@ private struct StreamModeMapCanvas: View {
             let selected = object.id == selectedObjectID
 
             if frame.objectType == "Tin" {
-                drawTin(object, in: &context, transform: transform,
-                    selected: selected, paintsZSurface: paintsZSurface)
+                if object.id == activeTinProfileID,
+                   let tinRender, let tinImage, let selectedTinProfileIndex,
+                   tinRender.selectedProfileIndex == selectedTinProfileIndex,
+                   tinRender.assets == tinProfileAssets.map({ StreamModeTinAssetReference(
+                       sessionID: $0.sessionID, sequence: $0.sequence,
+                       assetID: $0.assetID, sha256: $0.sha256) }) {
+                    drawTin(tinRender, image: tinImage, in: &context, transform: transform)
+                }
                 continue
             }
 
@@ -454,45 +517,47 @@ private struct StreamModeMapCanvas: View {
         }
     }
 
-    private func drawTin(_ object: StreamModeMapObject, in context: inout GraphicsContext,
-                        transform: MapTransform, selected: Bool, paintsZSurface: Bool) {
-        let frame = object.source
-        let tinColor = streamObjectColor("Tin")
-        let zValues = frame.coordinates.compactMap(\.z).filter(\.isFinite)
-        let minimumZ = zValues.min()
-        let maximumZ = zValues.max()
+    private func drawTin(_ render: StreamModeTinRenderResult, image: CGImage,
+                        in context: inout GraphicsContext,
+                        transform: MapTransform) {
+        let topLeft = transform.screen(MapPoint(x: render.minX, y: render.maxY))
+        let bottomRight = transform.screen(MapPoint(x: render.maxX, y: render.minY))
+        let rect = CGRect(x: min(topLeft.x, bottomRight.x), y: min(topLeft.y, bottomRight.y),
+            width: abs(bottomRight.x - topLeft.x), height: abs(bottomRight.y - topLeft.y))
+        guard rect.width.isFinite, rect.height.isFinite, rect.width > 0, rect.height > 0 else { return }
+        context.draw(Image(decorative: image, scale: 1), in: rect)
 
-        for triangle in frame.triangles where triangle.count == 3 {
-            guard triangle.allSatisfy({ frame.coordinates.indices.contains($0) }) else { continue }
-            let vertices = triangle.map { frame.coordinates[$0] }
-            var path = Path()
-            path.move(to: transform.screen(MapPoint(x: vertices[0].x, y: vertices[0].y)))
-            path.addLine(to: transform.screen(MapPoint(x: vertices[1].x, y: vertices[1].y)))
-            path.addLine(to: transform.screen(MapPoint(x: vertices[2].x, y: vertices[2].y)))
-            path.closeSubpath()
-
-            if paintsZSurface, frame.hasZ,
-               let minimumZ, let maximumZ,
-               let values = vertices.map(\.z).asFiniteTriple {
-                let sample = (values.0 + values.1 + values.2) / 3
-                let band = zBand(for: sample, minimum: minimumZ, maximum: maximumZ)
-                context.fill(path, with: .color(grayscaleColor(band).opacity(0.82)))
-            } else if !paintsZSurface {
-                context.fill(path, with: .color(tinColor.opacity(selected ? 0.18 : 0.06)))
-            }
-            context.stroke(path, with: .color(selected ? .accentColor : tinColor.opacity(0.82)),
-                lineWidth: selected ? 2.3 : 0.85)
+        for label in render.labels {
+            let point = transform.screen(MapPoint(x: label.x, y: label.y))
+            var labelContext = context
+            labelContext.translateBy(x: point.x, y: point.y)
+            labelContext.rotate(by: .degrees(label.rotation))
+            labelContext.draw(Text(label.text).font(.system(size: 10)).foregroundColor(.primary), at: .zero)
         }
+    }
 
-        if frame.coordinates.count <= 250_000 {
-            for coordinate in frame.coordinates {
-                let center = transform.screen(MapPoint(x: coordinate.x, y: coordinate.y))
-                let diameter: CGFloat = selected ? 4 : 2.6
-                let marker = Path(ellipseIn: CGRect(x: center.x - diameter / 2,
-                    y: center.y - diameter / 2, width: diameter, height: diameter))
-                context.fill(marker, with: .color(selected ? .accentColor : tinColor))
-            }
-        }
+    private func viewport(transform: MapTransform, size: CGSize) -> StreamModeTinViewport? {
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0,
+              transform.factor.isFinite, transform.factor > 0 else { return nil }
+        let upperLeft = transform.world(.zero)
+        let lowerRight = transform.world(CGPoint(x: size.width, y: size.height))
+        let viewport = StreamModeTinViewport(minX: min(upperLeft.x, lowerRight.x),
+            minY: min(upperLeft.y, lowerRight.y), maxX: max(upperLeft.x, lowerRight.x),
+            maxY: max(upperLeft.y, lowerRight.y),
+            pixelWidth: boundedPixelSize(for: size.width, otherDimension: size.height),
+            pixelHeight: boundedPixelSize(for: size.height, otherDimension: size.width))
+        return viewport.isValid ? viewport : nil
+    }
+
+    private func boundedPixelSize(for dimension: CGFloat, otherDimension: CGFloat) -> Int {
+        let rawDimension = dimension * displayScale
+        let rawOtherDimension = otherDimension * displayScale
+        guard rawDimension.isFinite, rawOtherDimension.isFinite,
+              rawDimension > 0, rawOtherDimension > 0 else { return 0 }
+        let byLongestSide = CGFloat(4096) / max(rawDimension, rawOtherDimension)
+        let byPixelCount = sqrt(CGFloat(4_194_304) / (rawDimension * rawOtherDimension))
+        let scale = min(1, min(byLongestSide, byPixelCount))
+        return max(1, Int((rawDimension * scale).rounded()))
     }
 
     private func combinedPath(_ frame: BackendStreamModeFrame, transform: MapTransform) -> Path {
@@ -654,16 +719,6 @@ private struct StreamModeMapCanvas: View {
         return hypot(point.x - (start.x + projection * dx), point.y - (start.y + projection * dy))
     }
 
-    private func zBand(for value: Double, minimum: Double, maximum: Double) -> Double {
-        guard maximum > minimum else { return 0.5 }
-        let normalized = min(max((value - minimum) / (maximum - minimum), 0), 1)
-        return floor(normalized * 15) / 15
-    }
-
-    private func grayscaleColor(_ fraction: Double) -> Color {
-        let channel = 1 - min(max(fraction, 0), 1)
-        return Color(.sRGB, red: channel, green: channel, blue: channel, opacity: 1)
-    }
 }
 
 private struct StreamModeMapSample: Equatable {
@@ -683,14 +738,6 @@ private struct StreamModeMapSample: Equatable {
     }
 
     private static func number(_ value: Double) -> String { String(format: "%.3f", value) }
-}
-
-private extension Array where Element == Double? {
-    var asFiniteTriple: (Double, Double, Double)? {
-        guard count == 3, let first = self[0], let second = self[1], let third = self[2],
-              first.isFinite, second.isFinite, third.isFinite else { return nil }
-        return (first, second, third)
-    }
 }
 
 private extension StreamModeSessionState {

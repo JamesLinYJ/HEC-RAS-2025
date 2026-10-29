@@ -51,12 +51,13 @@ public static class AssociatedRasterStyleService
                 request.Map.ExpectedVisualizationRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
 
-        Project project = new(projectAliasPath);
+        Project project = CoreLayerImportService.OpenProjectWithMetadata(projectAliasPath,
+            request.Map.ProjectXml is { Length: > 0 } projectXml
+                ? XElement.Parse(projectXml, LoadOptions.PreserveWhitespace) : null,
+            request.Map.CoreLayerContext);
         ResolvedStyleSource? resolved = null;
         try
         {
-            if (request.Map.ProjectXml is { Length: > 0 } projectXml)
-                project.ApplyEditorMetadata(XElement.Parse(projectXml, LoadOptions.PreserveWhitespace));
             resolved = ResolveSource(project, new StyleSourceRequest(request.Map, request.Node,
                 request.SourcePath, request.SourceRevision, request.ContextToken,
                 request.GeometryNodes, request.PlanNodes, request.ResultOwner), captured,
@@ -105,12 +106,13 @@ public static class AssociatedRasterStyleService
 
         MapTreeRequest selectedMap = MapForSelectedResult(request.Map, request.ResultOwner);
         CapturedNode before = CaptureNode(selectedMap, request.Node);
-        Project project = new(projectAliasPath);
+        Project project = CoreLayerImportService.OpenProjectWithMetadata(projectAliasPath,
+            request.Map.ProjectXml is { Length: > 0 } projectXml
+                ? XElement.Parse(projectXml, LoadOptions.PreserveWhitespace) : null,
+            request.Map.CoreLayerContext);
         ResolvedStyleSource? resolved = null;
         try
         {
-            if (request.Map.ProjectXml is { Length: > 0 } projectXml)
-                project.ApplyEditorMetadata(XElement.Parse(projectXml, LoadOptions.PreserveWhitespace));
             StyleSourceRequest sourceRequest = new(request.Map, request.Node,
                 request.SourcePath, request.SourceRevision, request.ExpectedContextToken,
                 request.GeometryNodes, request.PlanNodes, request.ResultOwner);
@@ -1489,6 +1491,7 @@ public static class AssociatedRasterStyleService
         Add(projectRevision);
         Add(projectXmlSHA);
         Add(map.ExpectedVisualizationRevision ?? "");
+        Add(map.CoreLayerContext?.IdentityToken ?? "");
         Add(sourcePath);
         Add(sourceRevision);
         Add(captured.Node.ToString(SaveOptions.DisableFormatting));

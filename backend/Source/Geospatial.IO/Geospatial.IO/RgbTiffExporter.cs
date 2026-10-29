@@ -29,17 +29,17 @@ public static class RgbTiffExporter
 		return (long)((float)cellCount * 1f);
 	}
 
-	public static void ExportRgba(string destFilename, IRenderLayer renderLayer, RasterDefinition exportRdef, Projection projectionMetadata = null, ProgressReporter pr = null)
+	public static void ExportRgba(string destFilename, IRenderLayer renderLayer, RasterDefinition exportRdef, Projection? projectionMetadata = null, ProgressReporter pr = null)
 	{
 		ExportInternal(destFilename, renderLayer, exportRdef, projectionMetadata, pr, withAlpha: true);
 	}
 
-	public static void Export(string destFilename, IRenderLayer renderLayer, RasterDefinition exportRdef, Projection projectionMetadata = null, ProgressReporter pr = null)
+	public static void Export(string destFilename, IRenderLayer renderLayer, RasterDefinition exportRdef, Projection? projectionMetadata = null, ProgressReporter pr = null)
 	{
 		ExportInternal(destFilename, renderLayer, exportRdef, projectionMetadata, pr, withAlpha: false);
 	}
 
-	private static void ExportInternal(string destFilename, IRenderLayer renderLayer, RasterDefinition exportRdef, Projection projectionMetadata, ProgressReporter pr, bool withAlpha)
+	private static void ExportInternal(string destFilename, IRenderLayer renderLayer, RasterDefinition exportRdef, Projection? projectionMetadata, ProgressReporter pr, bool withAlpha)
 	{
 		if (renderLayer == null)
 		{

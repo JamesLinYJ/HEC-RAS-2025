@@ -28,6 +28,39 @@ enum MapContextComponentResolver {
     }
 }
 
+struct MapContextComponentFeatureTarget {
+    let row: MapSourceRenderRecord
+    let layer: MapVectorLayer
+    let feature: MapFeature
+}
+
+/// Re-resolves a displayed feature row against the current map tree and source
+/// layer before a context menu can select or act on it.
+enum MapContextComponentFeatureTargetResolver {
+    static func exactTarget(row displayedRow: MapSourceRenderRecord,
+                            displayedLayer: MapVectorLayer,
+                            featureIdentity: String,
+                            mapID: UUID,
+                            rows: [MapSourceRenderRecord],
+                            candidates: [MapVectorLayer]) -> MapContextComponentFeatureTarget? {
+        let currentRows = MapContextComponentResolver.visibleRows(rows, mapID: mapID)
+        guard let row = MapContextComponentResolver.exactRow(
+            contextIdentity: displayedRow.contextIdentity, among: currentRows),
+              row == displayedRow,
+              row.payloadKind == "MapLayer" else { return nil }
+        let exactLayers = MapContextComponentResolver.exactVectorLayers(for: row, candidates: candidates)
+        guard exactLayers.count == 1, let layer = exactLayers.first,
+              layer.id == displayedLayer.id,
+              SourceFilePaths.canonical(layer.url) == SourceFilePaths.canonical(displayedLayer.url),
+              layer.sourceRevision == displayedLayer.sourceRevision else { return nil }
+        let matchingFeatures = layer.features.filter {
+            $0.stableIdentity == featureIdentity && $0.hasUniqueStableIdentity
+        }
+        guard matchingFeatures.count == 1, let feature = matchingFeatures.first else { return nil }
+        return MapContextComponentFeatureTarget(row: row, layer: layer, feature: feature)
+    }
+}
+
 /// An exact, map-scoped component inspector. Rows are resolved by the full
 /// serialized locator and payload IDs produced for this MapState; names only
 /// label the controls and never join a component to source data.
@@ -53,6 +86,10 @@ struct MapContextComponentsPane: View {
     }
 
     private var currentWorkflowIdentity: String { store.mapWorkflowIdentity(mapState.id) }
+
+    private var featureActionCoordinator: MapVectorFeatureActionCoordinator {
+        MapVectorFeatureActionCoordinator(store: store, mapState: mapState, mapID: mapState.id)
+    }
 
     var body: some View {
         Group {
@@ -207,6 +244,8 @@ struct MapContextComponentsPane: View {
 
     @ViewBuilder
     private func vectorDetails(_ layer: MapVectorLayer, row: MapSourceRenderRecord) -> some View {
+        let actionCoordinator = featureActionCoordinator
+        let openWindowAction = openWindow
         VStack(alignment: .leading, spacing: 9) {
             sectionTitle("Features")
             detailRow("Feature Count", value: layer.features.count.formatted())
@@ -241,6 +280,26 @@ struct MapContextComponentsPane: View {
                             }
                             .buttonStyle(.plain)
                             .disabled(!feature.hasUniqueStableIdentity || !isCurrentMap)
+                            .overlay {
+                                MapVectorFeatureContextMenuInteraction(
+                                    isEnabled: isCurrentMap && mapState.kind != .unsupported
+                                        && row.isActiveAndVisible && feature.hasUniqueStableIdentity,
+                                    contextAt: { _, modifiers in
+                                        actionCoordinator.captureListFeature(
+                                            row: row, displayedLayer: layer,
+                                            featureIdentity: feature.stableIdentity,
+                                            modifiers: modifiers)
+                                    },
+                                    perform: { action, captured in
+                                        actionCoordinator.performContextAction(
+                                            action, captured: captured,
+                                            openAttributeTable: { openWindowAction(value: $0) })
+                                    },
+                                    captureIdentity: featureContextCaptureIdentity(
+                                        row: row, layer: layer, feature: feature)
+                                )
+                                .allowsHitTesting(false)
+                            }
                         }
                     }
                 }
@@ -270,6 +329,15 @@ struct MapContextComponentsPane: View {
         let name = sourceName ?? L10n.format("Feature %d", feature.id + 1)
         if let ordinal = feature.sourceFeatureIndex { return "\(name) · \(L10n.format("Row %d", ordinal + 1))" }
         return name
+    }
+
+    private func featureContextCaptureIdentity(row: MapSourceRenderRecord,
+                                               layer: MapVectorLayer,
+                                               feature: MapFeature) -> String {
+        [store.projectSessionID.uuidString, mapState.id.uuidString,
+         store.mapWorkflowIdentity(mapState.id), row.contextIdentity,
+         layer.id, SourceFilePaths.canonical(layer.url), layer.sourceRevision ?? "",
+         feature.stableIdentity].map { "\($0.utf8.count):\($0)" }.joined()
     }
 
     private func isSelected(_ feature: MapFeature, in layer: MapVectorLayer) -> Bool {
@@ -312,10 +380,10 @@ struct MapContextComponentsPane: View {
             if let columns = feature.sourceAttributeColumns, !columns.isEmpty {
                 ForEach(Array(columns.enumerated()), id: \.offset) { _, column in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(verbatim: "\(column.ordinal + 1). \(column.name)")
+                    Text(verbatim: sourceAttributeLabel(column))
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 4)
-                        Text(attributeValue(column.value))
+                        Text(attributeValue(column))
                             .textSelection(.enabled)
                     }
                     .font(.caption)
@@ -341,6 +409,24 @@ struct MapContextComponentsPane: View {
         }
     }
 
+    private func sourceAttributeLabel(_ column: MapSourceAttributeColumn) -> String {
+        let type = column.sourceMetadata?.sourceType
+        let typedName = type.map { "\(column.name) [\($0)]" } ?? column.name
+        return "\(column.ordinal + 1). \(typedName)"
+    }
+
+    private func attributeValue(_ column: MapSourceAttributeColumn) -> String {
+        if let source = column.sourceMetadata {
+            if !source.isSet { return L10n.text("Not set") }
+            if source.isNull { return L10n.text("Null") }
+            if let boolean = source.booleanValue {
+                return boolean ? L10n.text("True") : L10n.text("False")
+            }
+            if let raw = source.rawLexeme { return raw }
+        }
+        return attributeValue(column.value)
+    }
+
     private func sourceAttributeRow(_ name: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(verbatim: name).foregroundStyle(.secondary)
@@ -348,6 +434,15 @@ struct MapContextComponentsPane: View {
             Text(verbatim: value).multilineTextAlignment(.trailing).textSelection(.enabled)
         }
         .font(.caption)
+    }
+
+    private func rasterTypeLabel(for mapLayerType: String) -> String {
+        switch mapLayerType {
+        case "SingleBandRasterMapLayer": return L10n.text("Continuous Raster")
+        case "ImageRasterMapLayer": return L10n.text("Three-Band Image")
+        case "DiscreteRasterMapLayer": return L10n.text("Discrete Raster")
+        default: return L10n.text(mapLayerType)
+        }
     }
 
     @ViewBuilder
@@ -370,8 +465,7 @@ struct MapContextComponentsPane: View {
                 detailRow("Visualization", value: source.visualizationPath, selectable: true)
                 detailRow("Visualization Revision", value: source.visualizationRevision, selectable: true)
                 detailRow("Tree Path", value: source.nodePath.map(String.init).joined(separator: " › "))
-                detailRow("Raster Type", value: L10n.text(source.mapLayerType == "SingleBandRasterMapLayer"
-                    ? "Single-band raster" : source.mapLayerType))
+                detailRow("Raster Type", value: rasterTypeLabel(for: source.mapLayerType))
                 if let sourceProperties,
                    SourceFilePaths.canonical(URL(fileURLWithPath: sourceProperties.path))
                         == SourceFilePaths.canonical(URL(fileURLWithPath: source.sourcePath)),
@@ -605,6 +699,9 @@ struct MapContextComponentsPane: View {
                 detailRow("Geometry", value: source.capture.geometryName)
                 detailRow("Source", value: source.capture.geometryCanonicalPath, selectable: true)
                 detailRow("Source Revision", value: snapshot.geometryRevision, selectable: true)
+                GeometryPlotOptionsView(source: source, row: row, store: store,
+                    mapState: mapState,
+                    plotSession: mapState.projectGeometryMap.geometryPlotSession(for: source.capture.identity))
                 geometryLayerSummary("Topology", state: snapshot.topologyState,
                     count: source.topologyFeatures.count, progress: source.topologyProgress,
                     include: row.payloadKind == "Geometry" || row.payloadKind == "ConceptualMesh"
@@ -755,6 +852,12 @@ struct MapContextComponentsPane: View {
                                 if let status = selected.diagnosticStatus {
                                     detailRow("Diagnostic Status", value: L10n.text(status))
                                 }
+
+                                MapResultRenderOptionsControls(session: mapState.resultMap,
+                                    mapID: mapState.id, node: active.node,
+                                    mapType: active.selectedMapType,
+                                    selectionIndex: selection.selectionIndex,
+                                    resultPath: selected.resultPath, revision: selected.revision)
 
                                 let selectedPath = SourceFilePaths.canonical(URL(fileURLWithPath: selected.resultPath))
                                 let sourceStatuses = (availability?.sourceStatuses ?? []).enumerated().filter { _, status in

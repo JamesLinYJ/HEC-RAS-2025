@@ -74,16 +74,37 @@ struct RasterSymbologySnapshot: Sendable {
     let draft: RasterSymbologyDraft
     let palettes: [RasterPalette]
     let interpolatedSurfaceFillContext: InterpolatedSurfaceFillContext?
+    let additionalOptions: [RasterPlotOption]
 
     init(
         draft: RasterSymbologyDraft,
         palettes: [RasterPalette],
-        interpolatedSurfaceFillContext: InterpolatedSurfaceFillContext? = nil
+        interpolatedSurfaceFillContext: InterpolatedSurfaceFillContext? = nil,
+        additionalOptions: [RasterPlotOption] = []
     ) {
         self.draft = draft
         self.palettes = palettes
         self.interpolatedSurfaceFillContext = interpolatedSurfaceFillContext
+        self.additionalOptions = additionalOptions
     }
+}
+
+struct RasterPlotOptionChoice: Identifiable, Sendable, Equatable {
+    let id: String
+    let title: String
+}
+
+/// Runtime options reflected from the retained RasterRenderLayer. These are
+/// transient renderer state; the palette editor does not serialize them into
+/// the project's .vis RasterSymbology element.
+struct RasterPlotOption: Identifiable, Sendable, Equatable {
+    let id: String
+    let title: String
+    let isBoolean: Bool
+    var value: String
+    let choices: [RasterPlotOptionChoice]
+    let isEnabled: Bool
+    let description: String?
 }
 struct RasterSymbologyContext: Hashable, Sendable {
     let projectSessionID: UUID
@@ -97,7 +118,7 @@ protocol RasterSymbologyProvider {
     func snapshot(_ context: RasterSymbologyContext) async throws -> RasterSymbologySnapshot?
     func selectPalette(_ id: String, draft: RasterSymbologyDraft, context: RasterSymbologyContext) async throws -> RasterSymbologyDraft
     func histogram(count: Int, forView: Bool, context: RasterSymbologyContext) async throws -> [Double]
-    func apply(_ draft: RasterSymbologyDraft, context: RasterSymbologyContext) async throws
+    func apply(_ draft: RasterSymbologyDraft, additionalOptions: [RasterPlotOption], context: RasterSymbologyContext) async throws
     func reset(_ context: RasterSymbologyContext) async throws -> RasterSymbologySnapshot
     func savePalette(_ draft: RasterSymbologyDraft, name: String, context: RasterSymbologyContext) async throws -> [RasterPalette]
     func deletePalette(_ id: String, context: RasterSymbologyContext) async throws -> [RasterPalette]
@@ -108,6 +129,7 @@ final class RasterSymbologySession: ObservableObject {
     @Published private(set) var draft: RasterSymbologyDraft?
     @Published private(set) var palettes = RasterPalette.defaults
     @Published private(set) var interpolatedSurfaceFillContext: InterpolatedSurfaceFillContext?
+    @Published private(set) var additionalOptions: [RasterPlotOption] = []
     @Published var selectedPaletteID: String?
     @Published private(set) var busy = false
     @Published var error: String?
@@ -120,7 +142,7 @@ final class RasterSymbologySession: ObservableObject {
 
     func load(context: RasterSymbologyContext, provider: (any RasterSymbologyProvider)?) async {
         revision += 1; let captured = revision; self.context = context
-        draft = nil; palettes = RasterPalette.defaults; interpolatedSurfaceFillContext = nil
+        draft = nil; palettes = RasterPalette.defaults; interpolatedSurfaceFillContext = nil; additionalOptions = []
         selectedPaletteID = nil; error = nil; busy = false
         guard let provider else { return }
         busy = true
@@ -135,6 +157,12 @@ final class RasterSymbologySession: ObservableObject {
     func edit(_ operation: (inout RasterSymbologyDraft) -> Void) {
         guard !busy, var value = draft else { return }
         operation(&value); value.interpolate(); draft = value; revision += 1
+    }
+    func setAdditional(_ id: String, value: String) {
+        guard !busy, let index = additionalOptions.firstIndex(where: { $0.id == id && $0.isEnabled }) else { return }
+        guard additionalOptions[index].value != value else { return }
+        additionalOptions[index].value = value
+        revision += 1
     }
     func choose(_ id: String, provider: (any RasterSymbologyProvider)?) async {
         guard !busy else { return }
@@ -176,7 +204,7 @@ final class RasterSymbologySession: ObservableObject {
     }
     func apply(provider: (any RasterSymbologyProvider)?) async -> Bool {
         guard let draft, let provider, !busy else { return false }
-        return await run { try await provider.apply(draft, context: $0) }
+        return await run { try await provider.apply(draft, additionalOptions: additionalOptions, context: $0) }
     }
     func reset(provider: (any RasterSymbologyProvider)?) async {
         guard let provider else { return }
@@ -203,6 +231,7 @@ final class RasterSymbologySession: ObservableObject {
     private func install(_ snapshot: RasterSymbologySnapshot) {
         draft = snapshot.draft; palettes = snapshot.palettes
         interpolatedSurfaceFillContext = snapshot.interpolatedSurfaceFillContext
+        additionalOptions = snapshot.additionalOptions
         selectedPaletteID = snapshot.draft.paletteID
     }
     private func assign(_ values: [Double], to draft: inout RasterSymbologyDraft) throws {

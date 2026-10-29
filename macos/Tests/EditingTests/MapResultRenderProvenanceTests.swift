@@ -60,6 +60,8 @@ struct MapResultRenderProvenanceTests {
             terrainRevision: String(repeating: "D", count: 64), profileIndex: 0,
             profileName: "Profile 0", time: "2026-10-18T00:00:00.0000000", units: "ft",
             width: 1, height: 1, rgba: Data([0, 0, 0, 255]), minX: 0, minY: 0,
-            maxX: 1, maxY: 1, noDataValue: -9999, legendStops: [])
+            maxX: 1, maxY: 1, noDataValue: -9999, legendStops: [],
+            selectionIndices: [0, 2], velocityDisplay: "Magnitude", mapDiagnostics: false,
+            forceRecomputeMapPoints: false, diagnosticLabels: [])
     }
 }

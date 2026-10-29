@@ -1,6 +1,7 @@
 namespace Ras.Backend;
 
-public sealed record GeometryMeshModelRequest(string AssetPath, string Kind, string? ProjectPath, string? ProjectXml = null);
+public sealed record GeometryMeshModelRequest(string AssetPath, string Kind, string? ProjectPath,
+    string? ProjectXml = null, CoreLayerRequestContext? CoreLayerContext = null);
 public sealed record GeometryMeshLoadRequest(GeometryMeshModelRequest Model, string? Revision = null,
     string? DraftState = null, string? TopologyDraftState = null, int[]? SelectedRegionIDs = null);
 public sealed record GeometryMeshEditRequest(GeometryMeshModelRequest Model, string Revision, string DraftState,

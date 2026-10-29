@@ -1,4 +1,6 @@
 using Ras.Backend;
+using Geospatial;
+using Geospatial.Vectors;
 using System.Globalization;
 using Ras.Hydraulics.Culverts;
 using Ras.Layers;
@@ -12,20 +14,100 @@ internal static class GeometryCulvertResetChecks
         string projectPath = Path.Combine(directory.FullName, "Opening coefficient reset.ras");
         Project project = Project.CreateNew(projectPath, UnitSystem.SI);
         Geometry geometry = project.AddNewGeometry("Reset geometry");
+        geometry.BarrelPropertiesLayer.Add(new BarrelProperties
+        {
+            Name = "Barrel A", Rise = 1, Span = 1, Shape = BarrelShape.Circle, Mannings = .025,
+            ManningsSwitchDepth = .1, DepthBlocked = 0
+        });
+        geometry.BarrelPropertiesLayer.Add(new BarrelProperties
+        {
+            Name = "Barrel B", Rise = 1.2, Span = 1.2, Shape = BarrelShape.Circle, Mannings = .025,
+            ManningsSwitchDepth = .1, DepthBlocked = 0
+        });
+        geometry.BarrelPropertiesLayer.Add(new BarrelProperties
+        {
+            Name = "Barrel C", Rise = 1.4, Span = 1.4, Shape = BarrelShape.Circle, Mannings = .025,
+            ManningsSwitchDepth = .1, DepthBlocked = 0
+        });
         geometry.OpeningPropertiesLayer.Add(new OpeningProperties { Name = "First", KIn = .25, KOut = .35 });
         geometry.OpeningPropertiesLayer.Add(new OpeningProperties { Name = "Second", KIn = .5, KOut = .65,
             OpeningType = BarrelOpeningType.CorrugatedMetalPipeCulvert_Headwall });
         geometry.OpeningPropertiesLayer.Add(new OpeningProperties { Name = "Unselected", KIn = .75, KOut = .85 });
+        geometry.CulvertBarrelLayer.Add(new CulvertBarrel
+        {
+            Name = "First barrel", Polyline = BarrelLine(1), BarrelPropertyName = "Barrel A",
+            UpstreamInvert = 10, DownstreamInvert = 9, UpstreamOpeningName = "First", DownstreamOpeningName = "First"
+        });
+        geometry.CulvertBarrelLayer.Add(new CulvertBarrel
+        {
+            Name = "Second barrel", Polyline = BarrelLine(2), BarrelPropertyName = "Barrel B",
+            UpstreamInvert = 20, DownstreamInvert = 19, UpstreamOpeningName = "Second", DownstreamOpeningName = "Second"
+        });
+        geometry.CulvertBarrelLayer.Add(new CulvertBarrel
+        {
+            Name = "Unselected barrel", Polyline = BarrelLine(3), BarrelPropertyName = "Barrel C",
+            UpstreamInvert = 30, DownstreamInvert = 29, UpstreamOpeningName = "Unselected", DownstreamOpeningName = "Unselected"
+        });
         project.Save();
         geometry.Save();
         string assetPath = geometry.Filename;
         geometry.Dispose();
         byte[] projectXmlBytes = File.ReadAllBytes(projectPath);
+        byte[] sourceGeometryBytes = File.ReadAllBytes(assetPath);
 
         var model = new GeometryCulvertModelRequest(assetPath, "Geometry", projectPath, File.ReadAllText(projectPath));
         GeometryCulvertSnapshot loaded = await ModelEditorAdapter.LoadGeometryCulvertsAsync(new(model));
         GeometryCulvertFeatureRow[] rows = loaded.OpeningProperties.Rows;
         string[] selectedIDs = rows.Take(2).Select(row => row.ID).ToArray();
+        GeometryCulvertFeatureRow[] barrelRows = loaded.Barrels.Rows;
+        string[] selectedBarrelIDs = barrelRows.Take(2).Select(row => row.ID).ToArray();
+        Check(barrelRows.Length == 3 && selectedBarrelIDs.Length == 2,
+            "The fixture has two mixed selected barrels and one unselected barrel");
+        var barrelAssociationChoices = new[]
+        {
+            (FieldID: "BarrelPropertyName", Value: "Barrel A", First: "Barrel A", Second: "Barrel B", Unselected: "Barrel C"),
+            (FieldID: "UpstreamOpeningName", Value: "First", First: "First", Second: "Second", Unselected: "Unselected"),
+            (FieldID: "DownstreamOpeningName", Value: "First", First: "First", Second: "Second", Unselected: "Unselected")
+        };
+        GeometryCulvertSnapshot associationUndoBaseline = loaded;
+        foreach (var choice in barrelAssociationChoices)
+        {
+            GeometryCulvertSnapshot applied = await ModelEditorAdapter.EditGeometryCulvertsAsync(new(model,
+                associationUndoBaseline.Revision, associationUndoBaseline.DraftState,
+                new("setField", "barrel", selectedBarrelIDs, choice.FieldID, choice.Value)));
+            Check(selectedBarrelIDs.All(id => applied.Barrels.Rows.Single(row => row.ID == id).Values[choice.FieldID] == choice.Value)
+                && applied.Barrels.Rows.Single(row => row.ID == barrelRows[2].ID).Values[choice.FieldID] == choice.Unselected,
+                "A mixed association choice explicitly applies the first row's value to every selected barrel and leaves other rows unchanged: " + choice.FieldID);
+            Check(File.ReadAllBytes(assetPath).SequenceEqual(sourceGeometryBytes)
+                && File.ReadAllBytes(projectPath).SequenceEqual(projectXmlBytes),
+                "Staging a selected barrel association does not change the source geometry file");
+
+            GeometryCulvertSnapshot undo = await ModelEditorAdapter.EditGeometryCulvertsAsync(new(model,
+                applied.Revision, applied.DraftState, new("undo", "barrel", [])));
+            Check(!undo.IsDirty
+                && undo.Barrels.Rows.Single(row => row.ID == selectedBarrelIDs[0]).Values[choice.FieldID] == choice.First
+                && undo.Barrels.Rows.Single(row => row.ID == selectedBarrelIDs[1]).Values[choice.FieldID] == choice.Second
+                && undo.Barrels.Rows.Single(row => row.ID == barrelRows[2].ID).Values[choice.FieldID] == choice.Unselected,
+                "Undo restores the original mixed association values without changing the unselected row: " + choice.FieldID);
+            Check(File.ReadAllBytes(assetPath).SequenceEqual(sourceGeometryBytes)
+                && File.ReadAllBytes(projectPath).SequenceEqual(projectXmlBytes),
+                "Undoing a selected barrel association leaves the source geometry file unchanged");
+            associationUndoBaseline = undo;
+        }
+        GeometryCulvertSnapshot noneAssociation = await ModelEditorAdapter.EditGeometryCulvertsAsync(new(model,
+            associationUndoBaseline.Revision, associationUndoBaseline.DraftState,
+            new("setField", "barrel", selectedBarrelIDs, "UpstreamOpeningName", "")));
+        Check(selectedBarrelIDs.All(id => noneAssociation.Barrels.Rows.Single(row => row.ID == id)
+                .Values["UpstreamOpeningName"] == "")
+            && noneAssociation.Barrels.Rows.Single(row => row.ID == barrelRows[2].ID)
+                .Values["UpstreamOpeningName"] == "Unselected",
+            "Choosing None explicitly clears the selected upstream associations while leaving the unselected row intact");
+        GeometryCulvertSnapshot noneUndo = await ModelEditorAdapter.EditGeometryCulvertsAsync(new(model,
+            noneAssociation.Revision, noneAssociation.DraftState, new("undo", "barrel", [])));
+        Check(noneUndo.Barrels.Rows.Single(row => row.ID == selectedBarrelIDs[0]).Values["UpstreamOpeningName"] == "First"
+            && noneUndo.Barrels.Rows.Single(row => row.ID == selectedBarrelIDs[1]).Values["UpstreamOpeningName"] == "Second"
+            && File.ReadAllBytes(assetPath).SequenceEqual(sourceGeometryBytes),
+            "Undo restores both associations after explicitly choosing None, without writing the source HDF");
         Check(new[] { rows[0].Values["KIn"], rows[1].Values["KIn"] }.Distinct(StringComparer.Ordinal).Count() == 2,
             "The selected opening-property rows begin with a real KIn mismatch");
         GeometryCulvertField[] openingFields = loaded.OpeningProperties.EditableFields;
@@ -116,22 +198,43 @@ internal static class GeometryCulvertResetChecks
 
         ModelSnapshot parentBaseline = await ModelEditorAdapter.LoadAsync(new ModelRequest(
             assetPath, "Geometry", projectPath, File.ReadAllText(projectPath)));
+        GeometryCulvertSnapshot associationFinal = resetOut;
+        foreach (var choice in barrelAssociationChoices)
+        {
+            associationFinal = await ModelEditorAdapter.EditGeometryCulvertsAsync(new(model,
+                associationFinal.Revision, associationFinal.DraftState,
+                new("setField", "barrel", selectedBarrelIDs, choice.FieldID, choice.Value)));
+        }
+        Check(File.ReadAllBytes(assetPath).SequenceEqual(sourceGeometryBytes)
+            && File.ReadAllBytes(projectPath).SequenceEqual(projectXmlBytes),
+            "All selected-association edits remain staged until the parent geometry save");
+
         ModelSnapshot saved = await ModelEditorAdapter.SaveAsync(new ModelSaveRequest(assetPath, "Geometry",
             projectPath, parentBaseline.Revision, new(), new(), ProjectXml: File.ReadAllText(projectPath),
-            GeometryCulvertState: resetOut.DraftState));
+            GeometryCulvertState: associationFinal.DraftState));
         GeometryCulvertSnapshot persisted = await ModelEditorAdapter.LoadGeometryCulvertsAsync(new(model, saved.Revision));
         Check(selectedIDs.All(id => persisted.OpeningProperties.Rows.Single(row => row.ID == id).Values["KOut"] == string.Empty)
             && persisted.OpeningProperties.Rows.Single(row => row.ID == selectedIDs[0]).Values["KIn"] == "0.25"
             && persisted.OpeningProperties.Rows.Single(row => row.ID == selectedIDs[1]).Values["KIn"] == "0.5"
             && persisted.OpeningProperties.Rows.Single(row => row.Values["Name"] == "Unselected").Values["KOut"] == "0.85"
+            && selectedBarrelIDs.All(id => persisted.Barrels.Rows.Single(row => row.ID == id).Values["BarrelPropertyName"] == "Barrel A")
+            && selectedBarrelIDs.All(id => persisted.Barrels.Rows.Single(row => row.ID == id).Values["UpstreamOpeningName"] == "First")
+            && selectedBarrelIDs.All(id => persisted.Barrels.Rows.Single(row => row.ID == id).Values["DownstreamOpeningName"] == "First")
+            && persisted.Barrels.Rows.Single(row => row.ID == barrelRows[2].ID).Values["BarrelPropertyName"] == "Barrel C"
+            && persisted.Barrels.Rows.Single(row => row.ID == barrelRows[2].ID).Values["UpstreamOpeningName"] == "Unselected"
+            && persisted.Barrels.Rows.Single(row => row.ID == barrelRows[2].ID).Values["DownstreamOpeningName"] == "Unselected"
+            && !File.ReadAllBytes(assetPath).SequenceEqual(sourceGeometryBytes)
             && File.ReadAllBytes(projectPath).SequenceEqual(projectXmlBytes),
-            "The parent model save persists selected KOut resets as NaN, preserves KIn and unselected rows, and leaves project XML bytes unchanged");
+            "The parent model save persists selected KOut resets and all three selected barrel choices, preserves unselected rows, and leaves project XML bytes unchanged");
     }
 
     private static void Check(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
     }
+
+    private static Polyline BarrelLine(double y) =>
+        new(new Point[] { new Point(0, y), new Point(10, y) });
 
     private static async Task Expect<TException>(Func<Task> operation) where TException : Exception
     {

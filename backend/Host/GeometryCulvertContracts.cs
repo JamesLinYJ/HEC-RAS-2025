@@ -1,6 +1,7 @@
 namespace Ras.Backend;
 
-public sealed record GeometryCulvertModelRequest(string AssetPath, string Kind, string? ProjectPath, string? ProjectXml = null);
+public sealed record GeometryCulvertModelRequest(string AssetPath, string Kind, string? ProjectPath,
+    string? ProjectXml = null, CoreLayerRequestContext? CoreLayerContext = null);
 
 public sealed record GeometryCulvertLoadRequest(GeometryCulvertModelRequest Model, string? Revision = null,
     string? DraftState = null, string[]? SelectedBarrelIDs = null);

@@ -32,25 +32,30 @@ public static class StableChannelDebugService
         }
 
         string requestedPath = Path.GetFullPath(request.ProjectPath);
-        var project = new Project(requestedPath);
-        string projectPath = Path.GetFullPath(project.Filename);
-        string projectRevision = Revision(projectPath);
-        StableChannelDesign? design = project.HydraulicDesign.StableChannelDesigns.FirstOrDefault();
-        if (design is null)
+        Project project = CoreLayerImportService.OpenProject(requestedPath, null,
+            request.CoreLayerContext);
+        try
         {
-            string sourceID = NormalizeMemorySourceID(request.InMemorySourceID);
-            StableChannelDebugState state = request.InMemoryState is null
-                ? DefaultState()
-                : EnsureParts(request.InMemoryState);
-            return new StableChannelDebugOpenResponse(request.RequestID,
-                new StableChannelDebugSource(sourceID, projectPath, projectRevision, null, null, InMemory: true), state);
-        }
+            string projectPath = Path.GetFullPath(project.Filename);
+            string projectRevision = Revision(projectPath);
+            StableChannelDesign? design = project.HydraulicDesign.StableChannelDesigns.FirstOrDefault();
+            if (design is null)
+            {
+                string sourceID = NormalizeMemorySourceID(request.InMemorySourceID);
+                StableChannelDebugState state = request.InMemoryState is null
+                    ? DefaultState()
+                    : EnsureParts(request.InMemoryState);
+                return new StableChannelDebugOpenResponse(request.RequestID,
+                    new StableChannelDebugSource(sourceID, projectPath, projectRevision, null, null, InMemory: true), state);
+            }
 
-        string designPath = Path.GetFullPath(design.Filename);
-        return new StableChannelDebugOpenResponse(request.RequestID,
-            new StableChannelDebugSource(PersistedSourceID(projectPath, designPath), projectPath,
-                projectRevision, designPath, Revision(designPath), InMemory: false),
-            ReadState(design.TractiveForce));
+            string designPath = Path.GetFullPath(design.Filename);
+            return new StableChannelDebugOpenResponse(request.RequestID,
+                new StableChannelDebugSource(PersistedSourceID(projectPath, designPath), projectPath,
+                    projectRevision, designPath, Revision(designPath), InMemory: false),
+                ReadState(design.TractiveForce));
+        }
+        finally { MapResultChartService.DisposeProject(project); }
     }
 
     public static StableChannelDebugComputeResponse Compute(StableChannelDebugComputeRequest request)
@@ -61,7 +66,7 @@ public static class StableChannelDebugService
             throw new ArgumentException("The Stable Channel source identity is missing.");
         if (request.State is null) throw new ArgumentException("The Stable Channel draft is missing.");
 
-        string? sourceError = ValidateComputeSource(request.Source);
+        string? sourceError = ValidateComputeSource(request.Source, request.CoreLayerContext);
         if (sourceError is not null)
             return Rejected(request, request.SolveFor ?? [], sourceError);
 
@@ -138,7 +143,7 @@ public static class StableChannelDebugService
         // The request is tied to both the project and design file revisions.
         // Recheck after the source solve so a file replaced during calculation
         // cannot produce a result that appears current in the native window.
-        sourceError = ValidateComputeSource(request.Source);
+        sourceError = ValidateComputeSource(request.Source, request.CoreLayerContext);
         if (sourceError is not null)
             return Rejected(request, selected, sourceError);
 
@@ -167,35 +172,40 @@ public static class StableChannelDebugService
             EnsureRevision(projectPath, request.Source.ProjectRevision, "projectChanged");
             EnsureRevision(designPath, request.Source.DesignRevision, "designChanged");
 
-            var project = new Project(projectPath);
-            StableChannelDesign? design = project.HydraulicDesign.StableChannelDesigns.FirstOrDefault();
-            if (design is null || !SamePath(design.Filename, designPath))
-                throw new InvalidOperationException("The captured Stable Channel design is no longer the project's first design.");
-            if (!string.Equals(PersistedSourceID(projectPath, designPath), request.Source.SourceID, StringComparison.Ordinal))
-                throw new InvalidOperationException("The Stable Channel source identity changed.");
-
-            ApplyState(design.TractiveForce, EnsureParts(request.State));
-            string directory = Path.GetDirectoryName(designPath)
-                ?? throw new InvalidOperationException("The Stable Channel design has no parent directory.");
-            string stagingPath = Path.Combine(directory,
-                "." + Path.GetFileName(designPath) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+            Project project = CoreLayerImportService.OpenProject(projectPath, null,
+                request.CoreLayerContext);
             try
             {
-                File.Copy(designPath, stagingPath, overwrite: false);
-                using (var writer = new H5Assist.H5Writer(stagingPath))
-                    design.SaveAs(writer);
+                StableChannelDesign? design = project.HydraulicDesign.StableChannelDesigns.FirstOrDefault();
+                if (design is null || !SamePath(design.Filename, designPath))
+                    throw new InvalidOperationException("The captured Stable Channel design is no longer the project's first design.");
+                if (!string.Equals(PersistedSourceID(projectPath, designPath), request.Source.SourceID, StringComparison.Ordinal))
+                    throw new InvalidOperationException("The Stable Channel source identity changed.");
 
-                EnsureRevision(projectPath, request.Source.ProjectRevision, "projectChanged");
-                EnsureRevision(designPath, request.Source.DesignRevision, "designChanged");
-                File.Move(stagingPath, designPath, overwrite: true);
-            }
-            finally
-            {
-                if (File.Exists(stagingPath)) File.Delete(stagingPath);
-            }
+                ApplyState(design.TractiveForce, EnsureParts(request.State));
+                string directory = Path.GetDirectoryName(designPath)
+                    ?? throw new InvalidOperationException("The Stable Channel design has no parent directory.");
+                string stagingPath = Path.Combine(directory,
+                    "." + Path.GetFileName(designPath) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+                try
+                {
+                    File.Copy(designPath, stagingPath, overwrite: false);
+                    using (var writer = new H5Assist.H5Writer(stagingPath))
+                        design.SaveAs(writer);
 
-            return new StableChannelDebugSaveResponse(request.RequestID, request.Source.SourceID,
-                designPath, Revision(designPath), ReadState(design.TractiveForce));
+                    EnsureRevision(projectPath, request.Source.ProjectRevision, "projectChanged");
+                    EnsureRevision(designPath, request.Source.DesignRevision, "designChanged");
+                    File.Move(stagingPath, designPath, overwrite: true);
+                }
+                finally
+                {
+                    if (File.Exists(stagingPath)) File.Delete(stagingPath);
+                }
+
+                return new StableChannelDebugSaveResponse(request.RequestID, request.Source.SourceID,
+                    designPath, Revision(designPath), ReadState(design.TractiveForce));
+            }
+            finally { MapResultChartService.DisposeProject(project); }
         }
         finally
         {
@@ -355,7 +365,8 @@ public static class StableChannelDebugService
     private static string NormalizeMemorySourceID(string? sourceID) =>
         Guid.TryParse(sourceID, out Guid id) ? id.ToString("D") : Guid.NewGuid().ToString("D");
 
-    private static string? ValidateComputeSource(StableChannelDebugSource source)
+    private static string? ValidateComputeSource(StableChannelDebugSource source,
+        CoreLayerRequestContext? coreLayerContext)
     {
         if (source.InMemory)
         {
@@ -368,11 +379,15 @@ public static class StableChannelDebugService
             {
                 string projectPath = Path.GetFullPath(source.ProjectPath);
                 EnsureRevision(projectPath, source.ProjectRevision, "sourceChanged");
-                var project = new Project(projectPath);
-                if (project.HydraulicDesign.StableChannelDesigns.Count != 0)
-                    return "sourceChanged";
-                EnsureRevision(projectPath, source.ProjectRevision, "sourceChanged");
-                return null;
+                Project project = CoreLayerImportService.OpenProject(projectPath, null, coreLayerContext);
+                try
+                {
+                    if (project.HydraulicDesign.StableChannelDesigns.Count != 0)
+                        return "sourceChanged";
+                    EnsureRevision(projectPath, source.ProjectRevision, "sourceChanged");
+                    return null;
+                }
+                finally { MapResultChartService.DisposeProject(project); }
             }
             catch (Exception)
             {
@@ -391,12 +406,16 @@ public static class StableChannelDebugService
             EnsureRevision(designPath, source.DesignRevision, "sourceChanged");
             if (!string.Equals(PersistedSourceID(projectPath, designPath), source.SourceID, StringComparison.Ordinal))
                 return "sourceChanged";
-            var project = new Project(projectPath);
+            Project project = CoreLayerImportService.OpenProject(projectPath, null, coreLayerContext);
+            try
+            {
             StableChannelDesign? design = project.HydraulicDesign.StableChannelDesigns.FirstOrDefault();
             if (design is null || !SamePath(design.Filename, designPath)) return "sourceChanged";
             EnsureRevision(projectPath, source.ProjectRevision, "sourceChanged");
             EnsureRevision(designPath, source.DesignRevision, "sourceChanged");
             return null;
+            }
+            finally { MapResultChartService.DisposeProject(project); }
         }
         catch (Exception)
         {

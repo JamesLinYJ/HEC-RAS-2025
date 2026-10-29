@@ -90,11 +90,17 @@ public final class VisualizationDocument {
         node.detach(); views.removeAll { $0.id == id }; modified = true
     }
 
-    /// Lists only real single-band raster map nodes from this project's current
-    /// `.vis` document. The relative file reference is resolved first, matching
-    /// RasProjectTreeBase.AddUnmatchedMapLayer; the absolute reference is used
-    /// only when the relative target does not exist.
+    /// Compatibility view for palette and single-band geoprocessing consumers.
     public func singleBandRasterMapSources() throws -> [RasterMapSourceDescriptor] {
+        try mapRasterSources().filter { $0.mapLayerType == "SingleBandRasterMapLayer" }
+    }
+
+    /// Lists source-backed raster map nodes from this project's current `.vis`
+    /// document. The relative file reference is resolved first, matching
+    /// RasProjectTreeBase.AddUnmatchedMapLayer; the absolute reference is used
+    /// only when the relative target does not exist. GDB rasters stay on their
+    /// existing nested single-band identity route.
+    public func mapRasterSources() throws -> [RasterMapSourceDescriptor] {
         let diskBytes: Data
         if FileManager.default.fileExists(atPath: url.path) {
             diskBytes = try Data(contentsOf: url)
@@ -116,7 +122,8 @@ public final class VisualizationDocument {
             for (index, node) in roots.enumerated() {
                 collectRasterSources(node, path: [index], mapIndex: mapIndex,
                     mapName: mapName, mapType: mapType, revision: revision,
-                    projectDirectory: projectDirectory, into: &result)
+                    rootName: mapType == "Project" ? "Map Layers" : "Layers",
+                    projectDirectory: projectDirectory, gdbParent: nil, into: &result)
             }
         }
         return result
@@ -674,30 +681,74 @@ public final class VisualizationDocument {
 
     private func collectRasterSources(
         _ node: XMLElement, path: [Int], mapIndex: Int, mapName: String, mapType: String,
-        revision: String, projectDirectory: URL, into result: inout [RasterMapSourceDescriptor]
+        revision: String, rootName: String, projectDirectory: URL,
+        gdbParent: (url: URL, locator: GdbRasterSymbologyNodeCapture)?,
+        into result: inout [RasterMapSourceDescriptor]
     ) {
-        if node.attribute(forName: "Type")?.stringValue == "MapLayer",
-           node.attribute(forName: "MapType")?.stringValue == "SingleBandRasterMapLayer",
-           let sourceURL = Self.resolveSource(filename: node.attribute(forName: "Filename")?.stringValue,
-                                         relative: node.attribute(forName: "FilenameRelative")?.stringValue,
-                                         projectDirectory: projectDirectory),
-           let name = node.attribute(forName: "Name")?.stringValue {
+        let type = node.attribute(forName: "Type")?.stringValue
+        let name = node.attribute(forName: "Name")?.stringValue
+        let filename = node.attribute(forName: "Filename")?.stringValue
+        let filenameRelative = node.attribute(forName: "FilenameRelative")?.stringValue
+
+        if type == "GdbDataset", let name,
+           let package = Self.resolveSource(filename: filename, relative: filenameRelative,
+                                            allowDirectory: true, projectDirectory: projectDirectory),
+           package.pathExtension.caseInsensitiveCompare("gdb") == .orderedSame,
+           Self.isDirectory(package) {
+            let datasetLocator = GdbRasterSymbologyNodeCapture(rootName: rootName,
+                nodeType: "GdbDataset", nodeName: name, nodePath: path,
+                assetID: package.path, mapType: "GdbDataset", filename: filename,
+                filenameRelative: filenameRelative)
+            for (index, child) in node.elements(forName: "Node").enumerated() {
+                collectRasterSources(child, path: path + [index], mapIndex: mapIndex,
+                    mapName: mapName, mapType: mapType, revision: revision,
+                    rootName: rootName, projectDirectory: projectDirectory,
+                    gdbParent: (package, datasetLocator), into: &result)
+            }
+            return
+        }
+
+        let mapLayerType = node.attribute(forName: "MapType")?.stringValue
+        let supportedRasterTypes: Set<String> = [
+            "SingleBandRasterMapLayer", "ImageRasterMapLayer", "DiscreteRasterMapLayer"
+        ]
+        if type == "MapLayer", let mapLayerType, supportedRasterTypes.contains(mapLayerType),
+           (gdbParent == nil || mapLayerType == "SingleBandRasterMapLayer"),
+           let name, let filename,
+           let sourceURL = gdbParent?.url ?? Self.resolveSource(filename: filename,
+                relative: filenameRelative, projectDirectory: projectDirectory) {
             let address = path.map { String($0) }.joined(separator: ".")
             let identity = "vis-map-\(mapIndex)-node-\(address)"
+            let gdbContext: GdbRasterSymbologyContext?
+            if let gdbParent {
+                let mapCapture = GdbRasterSymbologyMapCapture(projectPath: projectURL.path,
+                    projectXml: nil, projectXmlSHA: nil, mapID: "", mapIndex: mapIndex,
+                    mapName: mapName, mapType: mapType, expectedVisualizationRevision: revision)
+                let nodeCapture = GdbRasterSymbologyNodeCapture(rootName: rootName,
+                    nodeType: "MapLayer", nodeName: name, nodePath: path,
+                    assetID: gdbParent.url.path, mapType: mapLayerType,
+                    filename: filename, filenameRelative: filenameRelative)
+                _ = gdbParent.locator
+                gdbContext = GdbRasterSymbologyContext(map: mapCapture, node: nodeCapture)
+            } else { gdbContext = nil }
             result.append(RasterMapSourceDescriptor(
                 id: identity, projectPath: projectURL.path, visualizationPath: url.path,
                 visualizationRevision: revision, mapIndex: mapIndex, mapName: mapName,
                 mapType: mapType, nodePath: path, nodeName: name,
-                mapLayerType: "SingleBandRasterMapLayer",
-                filename: node.attribute(forName: "Filename")?.stringValue,
-                filenameRelative: node.attribute(forName: "FilenameRelative")?.stringValue,
-                sourcePath: sourceURL.path))
+                mapLayerType: mapLayerType,
+                filename: filename, filenameRelative: filenameRelative,
+                sourcePath: sourceURL.path, gdbSourceContext: gdbContext))
         }
         for (index, child) in node.elements(forName: "Node").enumerated() {
             collectRasterSources(child, path: path + [index], mapIndex: mapIndex,
                 mapName: mapName, mapType: mapType, revision: revision,
-                projectDirectory: projectDirectory, into: &result)
+                rootName: rootName, projectDirectory: projectDirectory,
+                gdbParent: nil, into: &result)
         }
+    }
+
+    private static func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
     }
 
     private static func resolveSource(filename: String?, relative: String?, allowDirectory: Bool = false,

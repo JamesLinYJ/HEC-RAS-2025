@@ -44,6 +44,8 @@ public static class MapResultRenderService
 
         string sourceID = NodeIdentity(activeNode.Node);
         int[] blockedSelectionIndices = ValidateBlockedSelectionIndices(request, activeNode);
+        Dictionary<int, MapResultRenderOptions> renderOptionsBySelection =
+            ValidateRenderOptions(request, activeNode, blockedSelectionIndices);
         MapResultRenderLiveKeyframeAnchor? liveKeyframe = ValidateLiveKeyframeAnchor(request,
             activeNode, context.Map.ComputeReadLease);
         ResolvedMapResultNode[] selectedContexts = context.ResultContexts
@@ -96,79 +98,86 @@ public static class MapResultRenderService
         {
             int[] selectionIndices = SelectionIndicesFor(source, activeNode.Node)
                 .Where(index => !blockedSelectionIndices.Contains(index)).ToArray();
-            string? unavailable = null;
-            int? resultProfileIndex = null;
-            Terrain? terrain = source.Result.AssociatedTerrain;
-            TerrainSourceSnapshot? terrainSnapshot = null;
+            foreach (IGrouping<MapResultRenderOptions, int> optionGroup in selectionIndices
+                         .GroupBy(index => renderOptionsBySelection.GetValueOrDefault(index,
+                             MapResultRenderOptions.Default)))
+            {
+                int[] optionSelectionIndices = optionGroup.Order().ToArray();
+                MapResultRenderOptions renderOptions = optionGroup.Key;
+                string? unavailable = null;
+                int? resultProfileIndex = null;
+                Terrain? terrain = source.Result.AssociatedTerrain;
+                TerrainSourceSnapshot? terrainSnapshot = null;
 
-            if (source.Result.BaseOutputBlock is not IHorizontalOutputBlock outputBlock || outputBlock.ProfileCount <= 0)
-            {
-                unavailable = "This Result has no stored horizontal output profiles.";
-            }
-            else if (mapType is null)
-            {
-                unavailable = "The selected Result map type is not supported by the current map renderer.";
-            }
-            else if (terrain is null)
-            {
-                unavailable = "The selected Result has no current-project associated terrain.";
-            }
-            else if (keyContext is null && liveKeyframe is null)
-            {
-                unavailable = "The MultiResult has no selected first Result to anchor its profile timeline.";
-            }
-            else if (liveKeyframe is null && (selectedProfileIndex < 0 || selectedProfileIndex >= steps.Length))
-            {
-                unavailable = "The selected profile index is outside the Result timeline.";
-            }
-            else if (activeNode.NodeKind == "MultiResult" && liveKeyframe is not null &&
-                     (resultProfileIndex = MatchKeyedProfileName(liveKeyframe.ProfileName, outputBlock)) is null)
-            {
-                unavailable = "This Result has no profile within the 10 millisecond MultiResult timestamp tolerance.";
-            }
-            else if (activeNode.NodeKind == "MultiResult" && liveKeyframe is null &&
-                     (resultProfileIndex = MatchKeyedProfile(keyContext!.Result.BaseOutputBlock!,
-                         selectedProfileIndex, outputBlock)) is null)
-            {
-                unavailable = "This Result has no profile within the 10 millisecond MultiResult timestamp tolerance.";
-            }
-            else
-            {
-                resultProfileIndex ??= selectedProfileIndex;
-                if (resultProfileIndex < 0 || resultProfileIndex >= outputBlock.ProfileCount)
-                    unavailable = "The selected profile index is outside this Result's stored profiles.";
-            }
+                if (source.Result.BaseOutputBlock is not IHorizontalOutputBlock outputBlock || outputBlock.ProfileCount <= 0)
+                {
+                    unavailable = "This Result has no stored horizontal output profiles.";
+                }
+                else if (mapType is null)
+                {
+                    unavailable = "The selected Result map type is not supported by the current map renderer.";
+                }
+                else if (terrain is null)
+                {
+                    unavailable = "The selected Result has no current-project associated terrain.";
+                }
+                else if (keyContext is null && liveKeyframe is null)
+                {
+                    unavailable = "The MultiResult has no selected first Result to anchor its profile timeline.";
+                }
+                else if (liveKeyframe is null && (selectedProfileIndex < 0 || selectedProfileIndex >= steps.Length))
+                {
+                    unavailable = "The selected profile index is outside the Result timeline.";
+                }
+                else if (activeNode.NodeKind == "MultiResult" && liveKeyframe is not null &&
+                         (resultProfileIndex = MatchKeyedProfileName(liveKeyframe.ProfileName, outputBlock)) is null)
+                {
+                    unavailable = "This Result has no profile within the 10 millisecond MultiResult timestamp tolerance.";
+                }
+                else if (activeNode.NodeKind == "MultiResult" && liveKeyframe is null &&
+                         (resultProfileIndex = MatchKeyedProfile(keyContext!.Result.BaseOutputBlock!,
+                             selectedProfileIndex, outputBlock)) is null)
+                {
+                    unavailable = "This Result has no profile within the 10 millisecond MultiResult timestamp tolerance.";
+                }
+                else
+                {
+                    resultProfileIndex ??= selectedProfileIndex;
+                    if (resultProfileIndex < 0 || resultProfileIndex >= outputBlock.ProfileCount)
+                        unavailable = "The selected profile index is outside this Result's stored profiles.";
+                }
 
-            if (unavailable is null && terrain is not null)
-            {
-                try
+                if (unavailable is null && terrain is not null)
                 {
-                    terrainSnapshot = CaptureTerrainSources(terrain);
-                    RasterMapViewExtent sourceViewport = viewport ?? DefaultViewport(source.Result.Geometry?.Extent
-                        ?? throw new InvalidDataException("The selected Result has no embedded geometry extent."));
-                    MapResultRenderLayerPayload? rendered = RenderOne(context.Project, source, activeNode,
-                        request.Map.MapID, sourceID, mapType!.Value, resultProfileIndex!.Value, sourceViewport,
-                        terrainSnapshot, selectionIndices);
-                    if (rendered is null)
-                        unavailable = "The selected Result has no mapped cells in the current view.";
-                    else
-                        layers.Add(rendered);
+                    try
+                    {
+                        terrainSnapshot = CaptureTerrainSources(terrain);
+                        RasterMapViewExtent sourceViewport = viewport ?? DefaultViewport(source.Result.Geometry?.Extent
+                            ?? throw new InvalidDataException("The selected Result has no embedded geometry extent."));
+                        MapResultRenderLayerPayload? rendered = RenderOne(context.Project, source, activeNode,
+                            request.Map.MapID, sourceID, mapType!.Value, resultProfileIndex!.Value, sourceViewport,
+                            terrainSnapshot, optionSelectionIndices, renderOptions);
+                        if (rendered is null)
+                            unavailable = "The selected Result has no mapped cells in the current view.";
+                        else
+                            layers.Add(rendered);
+                    }
+                    catch (FileNotFoundException)
+                    {
+                        unavailable = "An associated terrain source file is missing.";
+                    }
+                    catch (NotSupportedException exception) when (
+                        exception.Message.Contains("VRT", StringComparison.OrdinalIgnoreCase) ||
+                        exception.Message.Contains("terrain raster", StringComparison.OrdinalIgnoreCase))
+                    {
+                        unavailable = exception.Message;
+                    }
                 }
-                catch (FileNotFoundException)
-                {
-                    unavailable = "An associated terrain source file is missing.";
-                }
-                catch (NotSupportedException exception) when (
-                    exception.Message.Contains("VRT", StringComparison.OrdinalIgnoreCase) ||
-                    exception.Message.Contains("terrain raster", StringComparison.OrdinalIgnoreCase))
-                {
-                    unavailable = exception.Message;
-                }
-            }
 
-            statuses.Add(new(source.ResultPath, source.Revision, source.Result.Name,
-                selectionIndices, terrainSnapshot?.Path, terrainSnapshot?.Revision,
-                unavailable is null, resultProfileIndex, unavailable));
+                statuses.Add(new(source.ResultPath, source.Revision, source.Result.Name,
+                    optionSelectionIndices, terrainSnapshot?.Path, terrainSnapshot?.Revision,
+                    unavailable is null, resultProfileIndex, unavailable));
+            }
         }
 
         context.EnsureUnchanged();
@@ -188,6 +197,43 @@ public static class MapResultRenderService
             indices.Any(index => !activeNode.Selections.Any(selection => selection.SelectionIndex == index)))
             throw new SourceFileChangedException();
         return indices;
+    }
+
+    private static Dictionary<int, MapResultRenderOptions> ValidateRenderOptions(
+        MapResultRenderRequest request, MapResultActiveNode activeNode,
+        IReadOnlyCollection<int> blockedSelectionIndices)
+    {
+        MapResultRenderOptionOverride[] overrides = request.RenderOptions ?? [];
+        if (overrides.Length > 32 || overrides.Select(item => item.SelectionIndex).Distinct().Count() != overrides.Length)
+            throw new ArgumentException("Result render options contain duplicate or excessive slot identities.", nameof(request));
+
+        Dictionary<int, MapResultRenderOptions> resolved = [];
+        foreach (MapResultRenderOptionOverride option in overrides)
+        {
+            if (option.SelectionIndex < 0 || option.SelectionIndex >= 32 ||
+                blockedSelectionIndices.Contains(option.SelectionIndex))
+                throw new SourceFileChangedException();
+            MapResultSelectionState? selection = activeNode.Selections.SingleOrDefault(item =>
+                item.SelectionIndex == option.SelectionIndex);
+            MapResultSourceChoice? selected = selection?.SelectedResult;
+            if (selected is null || selected.IsComputing ||
+                !Path.IsPathFullyQualified(option.ResultPath) ||
+                !SourceFilePaths.SameSourceFile(option.ResultPath, selected.ResultPath) ||
+                !string.Equals(option.Revision, selected.Revision, StringComparison.OrdinalIgnoreCase))
+                throw new SourceFileChangedException();
+
+            if (option.VelocityDisplay is not ("Magnitude" or "Vx" or "Vy"))
+                throw new ArgumentException("The requested Velocity display mode is not supported.", nameof(request));
+            resolved.Add(option.SelectionIndex, new MapResultRenderOptions(
+                option.VelocityDisplay, option.MapDiagnostics, option.ForceRecomputeMapPoints));
+        }
+        return resolved;
+    }
+
+    private sealed record MapResultRenderOptions(string VelocityDisplay,
+        bool MapDiagnostics, bool ForceRecomputeMapPoints)
+    {
+        internal static MapResultRenderOptions Default { get; } = new("Magnitude", false, false);
     }
 
     private static MapResultRenderLiveKeyframeAnchor? ValidateLiveKeyframeAnchor(
@@ -239,11 +285,14 @@ public static class MapResultRenderService
     private static MapResultRenderLayerPayload? RenderOne(Project project,
         ResolvedMapResultNode source, MapResultActiveNode activeNode, string mapID, string sourceID,
         MapTypes mapType, int profileIndex, RasterMapViewExtent viewport,
-        TerrainSourceSnapshot terrainSnapshot, int[] selectionIndices)
+        TerrainSourceSnapshot terrainSnapshot, int[] selectionIndices,
+        MapResultRenderOptions renderOptions)
     {
         string layerIdentity = string.Join(",", selectionIndices);
         return RenderStoredResult(project, source.Result, source.ResultPath, source.Revision,
-            mapID, sourceID, layerIdentity, mapType, profileIndex, viewport, terrainSnapshot);
+            mapID, sourceID, layerIdentity, mapType, profileIndex, viewport, terrainSnapshot,
+            selectionIndices, renderOptions.VelocityDisplay, renderOptions.MapDiagnostics,
+            renderOptions.ForceRecomputeMapPoints);
     }
 
     /// One retained CPU render shared by persisted map nodes and the linked
@@ -252,6 +301,14 @@ public static class MapResultRenderService
         Result result, string resultPath, string resultRevision, string mapID, string sourceID,
         string layerIdentity, MapTypes mapType, int profileIndex, RasterMapViewExtent viewport,
         TerrainSourceSnapshot terrainSnapshot)
+        => RenderStoredResult(project, result, resultPath, resultRevision, mapID, sourceID,
+            layerIdentity, mapType, profileIndex, viewport, terrainSnapshot, [], "Magnitude", false, false);
+
+    private static MapResultRenderLayerPayload? RenderStoredResult(Project project,
+        Result result, string resultPath, string resultRevision, string mapID, string sourceID,
+        string layerIdentity, MapTypes mapType, int profileIndex, RasterMapViewExtent viewport,
+        TerrainSourceSnapshot terrainSnapshot, int[] selectionIndices, string velocityDisplay,
+        bool mapDiagnostics, bool forceRecomputeMapPoints)
     {
         ValidateViewport(viewport);
         IHorizontalOutputBlock outputBlock = result.BaseOutputBlock
@@ -270,6 +327,15 @@ public static class MapResultRenderService
         var renderLayer = new ResultMapRenderLayer(outputBlock, mapType, terrain, tables);
         renderLayer.ProfileState.CurrentProfileIndex = profileIndex;
         renderLayer.SetDefaultSymbology(project.Units);
+        renderLayer.VelocityDisplay = velocityDisplay switch
+        {
+            "Magnitude" => ResultMapRenderLayer.VelocityDisplayMode.Magnitude,
+            "Vx" => ResultMapRenderLayer.VelocityDisplayMode.Vx,
+            "Vy" => ResultMapRenderLayer.VelocityDisplayMode.Vy,
+            _ => throw new ArgumentOutOfRangeException(nameof(velocityDisplay))
+        };
+        renderLayer.MapDiagnostics = mapDiagnostics;
+        renderLayer.ForceRecomputeMapPoints = forceRecomputeMapPoints;
 
         Extent extent = new(viewport.MinX, viewport.MaxX, viewport.MinY, viewport.MaxY);
         var definition = new RasterDefinition(extent, viewport.PixelHeight, viewport.PixelWidth);
@@ -278,46 +344,64 @@ public static class MapResultRenderService
 
         EnsureUnchanged(resultPath, resultRevision);
         VerifyTerrainSources(terrainSnapshot);
-        if (!renderLayer.Resample(definition, out float[] values) || values is null)
+        using var plot = new PlotRequest(definition) { CommonData = new CommonData() };
+        // The retained renderer accepts an opaque cache and replaces an
+        // unrecognized value with its own MapCache on the first render.
+        object renderCache = new();
+        bool rendered;
+        try
         {
+            rendered = renderLayer.Render(plot, ref renderCache);
+            if (!rendered || plot.SplatCount == 0)
+            {
+                EnsureUnchanged(resultPath, resultRevision);
+                VerifyTerrainSources(terrainSnapshot);
+                return null;
+            }
+
+            int[] argb = plot.ColorBufferARGB.Slice(0, definition.CellCount).ToArray();
+            byte[] rgba = new byte[checked(argb.Length * 4)];
+            for (int index = 0; index < argb.Length; index++)
+            {
+                uint pixel = unchecked((uint)argb[index]);
+                rgba[index * 4] = (byte)(pixel >> 16);
+                rgba[index * 4 + 1] = (byte)(pixel >> 8);
+                rgba[index * 4 + 2] = (byte)pixel;
+                rgba[index * 4 + 3] = (byte)(pixel >> 24);
+            }
+
             EnsureUnchanged(resultPath, resultRevision);
             VerifyTerrainSources(terrainSnapshot);
-            return null;
+
+            string profileTime = isLegacyMaximum ? string.Empty : FormatTime(outputBlock.Times[profileIndex]);
+            string profileName = isLegacyMaximum ? "Max" : outputBlock.ProfileNames[profileIndex];
+            string resultTypeName = ResultMapRenderLayer.LayerName(mapType);
+            string id = string.Join("|", sourceID, layerIdentity,
+                SourceFilePaths.Canonical(resultPath), mapType.ToString(), velocityDisplay,
+                mapDiagnostics ? "diagnostics" : "no-diagnostics");
+            MapResultRenderDiagnosticPoint[] labels = mapDiagnostics && mapType == MapTypes.Velocity
+                ? (plot.Labels ?? []).Select(label => new MapResultRenderDiagnosticPoint(
+                    label.Text, label.PointLocation.X, label.PointLocation.Y)).ToArray()
+                : [];
+            if (labels.Any(label => string.IsNullOrWhiteSpace(label.Text) ||
+                    !double.IsFinite(label.X) || !double.IsFinite(label.Y)))
+                throw new InvalidDataException("The source Result renderer returned an invalid diagnostic point.");
+            return new MapResultRenderLayerPayload(id, sourceID, mapID,
+                resultPath, resultRevision, result.Name, resultTypeName,
+                terrainSnapshot.Path, terrainSnapshot.Revision, profileIndex, profileName, profileTime,
+                LayerUnits(project.Units, mapType), definition.Cols, definition.Rows, rgba,
+                definition.MinX, definition.MinY, definition.MaxX, definition.MaxY, NoDataValue,
+                renderLayer.RasterSymbology.SurfaceFill?.Colors.Select((color, index) =>
+                    new MapResultRenderLegendStop(EncodeColor(color),
+                        renderLayer.RasterSymbology.SurfaceFill.ColorValues[index])).ToArray() ?? [],
+                selectionIndices, velocityDisplay, mapDiagnostics,
+                forceRecomputeMapPoints, labels);
         }
-
-        RasterSymbology symbology = renderLayer.RasterSymbology;
-        if (symbology.SurfaceFill is null || symbology.SurfaceFill.Colors.Count == 0 ||
-            symbology.SurfaceFill.ColorValues.Length != symbology.SurfaceFill.Colors.Count)
-            throw new InvalidDataException("The source Result map type has no usable default surface-fill ramp.");
-
-        var argb = new int[values.Length];
-        if (symbology.IsSurfaceFillEnabled)
-            symbology.PaintSurface(values, argb, NoDataValue);
-        byte[] rgba = new byte[checked(argb.Length * 4)];
-        for (int index = 0; index < argb.Length; index++)
+        finally
         {
-            uint pixel = unchecked((uint)argb[index]);
-            rgba[index * 4] = (byte)(pixel >> 16);
-            rgba[index * 4 + 1] = (byte)(pixel >> 8);
-            rgba[index * 4 + 2] = (byte)pixel;
-            rgba[index * 4 + 3] = (byte)(pixel >> 24);
+            plot.Clear();
+            (renderCache as IDisposable)?.Dispose();
         }
-
-        EnsureUnchanged(resultPath, resultRevision);
-        VerifyTerrainSources(terrainSnapshot);
-
-        string profileTime = isLegacyMaximum ? string.Empty : FormatTime(outputBlock.Times[profileIndex]);
-        string profileName = isLegacyMaximum ? "Max" : outputBlock.ProfileNames[profileIndex];
-        string resultTypeName = ResultMapRenderLayer.LayerName(mapType);
-        string id = string.Join("|", sourceID, layerIdentity,
-            SourceFilePaths.Canonical(resultPath), mapType.ToString());
-        return new MapResultRenderLayerPayload(id, sourceID, mapID,
-            resultPath, resultRevision, result.Name, resultTypeName,
-            terrainSnapshot.Path, terrainSnapshot.Revision, profileIndex, profileName, profileTime,
-            LayerUnits(project.Units, mapType), definition.Cols, definition.Rows, rgba,
-            definition.MinX, definition.MinY, definition.MaxX, definition.MaxY, NoDataValue,
-            symbology.SurfaceFill.Colors.Select((color, index) => new MapResultRenderLegendStop(
-                EncodeColor(color), symbology.SurfaceFill.ColorValues[index])).ToArray());
     }
 
     internal static string LayerUnits(UnitSystem units, MapTypes mapType)

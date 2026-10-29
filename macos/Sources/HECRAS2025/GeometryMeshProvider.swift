@@ -6,6 +6,7 @@ struct GeometryMeshModelRequest: Codable, Hashable, Sendable {
     let kind: String
     let projectPath: String?
     let projectXml: String?
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 struct GeometryMeshOperationControl: Encodable, Sendable {
@@ -289,21 +290,25 @@ extension GeometryMeshProvider {
 final class BackendGeometryMeshProvider: GeometryMeshProvider {
     private let client: BackendProcessClient
     private let currentProject: @MainActor () -> ProjectDocument?
+    private let currentCoreLayerContext: @MainActor () -> CoreLayerRequestContext?
     private let topologyDraft: @MainActor () -> String?
 
     init(client: BackendProcessClient? = nil,
          currentProject: @escaping @MainActor () -> ProjectDocument? = { nil },
+         currentCoreLayerContext: @escaping @MainActor () -> CoreLayerRequestContext? = { nil },
          currentTopologyDraftState: @escaping @MainActor () -> String? = { nil }) {
         self.client = client ?? BackendProcessClient(executableURL: Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/Backend/HECRASBackend"))
         self.currentProject = currentProject
+        self.currentCoreLayerContext = currentCoreLayerContext
         topologyDraft = currentTopologyDraftState
     }
 
     func modelRequest(for asset: ProjectAsset) -> GeometryMeshModelRequest {
         let project = currentProject()
         return GeometryMeshModelRequest(assetPath: asset.url.path, kind: "Geometry",
-            projectPath: project?.url?.path, projectXml: project?.editorXML)
+            projectPath: project?.url?.path, projectXml: project?.editorXML,
+            coreLayerContext: currentCoreLayerContext())
     }
 
     func currentTopologyDraftState() -> String? { topologyDraft() }

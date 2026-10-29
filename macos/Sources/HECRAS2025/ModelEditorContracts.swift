@@ -182,6 +182,20 @@ private extension SourceEditorField {
                 result.errorValidationPropertyName = "RightGrade"
             default: break
             }
+        } else if scope.hasSuffix("ConceptualMeshArcEditor") {
+            switch id {
+            case "ViewModel_ConstrainStretching":
+                result.mixedBy = "ViewModel_ConstrainStretchingHasMismatch"
+                result.forceSetCommand = GeometryArcForceSetCommand.constrainStretching.rawValue
+            case "ViewModel_LaplaceBC":
+                result.mixedBy = "ViewModel_LaplaceBCHasMismatch"
+                result.forceSetCommand = GeometryArcForceSetCommand.laplaceBC.rawValue
+            case "ViewModel_BiasString":
+                result.mixedBy = "ViewModel_BiasHasMismatch"
+                result.showClearButton = true
+                result.clearCommand = GeometryArcClearCommand.resetBias.rawValue
+            default: break
+            }
         } else if scope.hasSuffix("ConceptualMeshControlPointEditor") {
             switch id {
             case "PatchType":
@@ -420,7 +434,10 @@ struct PlanPrecomputeAssociatedDraftsCapture: Sendable {
 struct EditorSaveResult: Sendable {
     var sourceRevision: String? = nil
     var snapshot: EditorSnapshot? = nil
+    var refreshWarning: String? = nil
 }
+typealias GridImportCancelHandler = @MainActor @Sendable () -> Bool
+typealias GridImportCancellationInstaller = @MainActor @Sendable (GridImportCancelHandler?) -> Void
 struct EditorContextRefresh: Sendable {
     let baseline: EditorSnapshot
     let draft: EditorSnapshot
@@ -448,6 +465,9 @@ protocol ModelEditorProvider {
     func discardTerrainInputImportBatch(_ asset: ProjectAsset, draftToken: String, batchToken: String) async throws -> Bool
     func inspectGrid(_ asset: ProjectAsset, edits: EditorEdits, layerID: String, files: [URL], subdataset: String?, bands: [SpatialGridBand], previewID: String?) async throws -> SpatialGridInspection
     func importGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: SpatialGridSelection) async throws -> EditorSaveResult
+    func importGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: SpatialGridSelection,
+                    progress: @escaping @MainActor @Sendable (BackendProgressUpdate) -> Void,
+                    installCancellation: @escaping GridImportCancellationInstaller) async throws -> EditorSaveResult
     func importCumulusGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: CumulusGridImportSelection, progress: @escaping @MainActor (BackendProgressUpdate) -> Void) async throws -> EditorSaveResult
     func editSeries(_ asset: ProjectAsset, request: SeriesEditRequest) async throws -> SeriesEditResult
     func editClassification(_ asset: ProjectAsset, action: EditorAction, edits: EditorEdits) async throws -> EditorSnapshot
@@ -475,6 +495,11 @@ extension ModelEditorProvider {
     func discardTerrainInputImportBatch(_ asset: ProjectAsset, draftToken: String, batchToken: String) async throws -> Bool { throw CocoaError(.featureUnsupported) }
     func inspectGrid(_ asset: ProjectAsset, edits: EditorEdits, layerID: String, files: [URL], subdataset: String?, bands: [SpatialGridBand], previewID: String?) async throws -> SpatialGridInspection { throw CocoaError(.featureUnsupported) }
     func importGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: SpatialGridSelection) async throws -> EditorSaveResult { throw CocoaError(.featureUnsupported) }
+    func importGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: SpatialGridSelection,
+                    progress: @escaping @MainActor @Sendable (BackendProgressUpdate) -> Void,
+                    installCancellation: @escaping GridImportCancellationInstaller) async throws -> EditorSaveResult {
+        try await importGrid(asset, edits: edits, selection: selection)
+    }
     func importCumulusGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: CumulusGridImportSelection, progress: @escaping @MainActor (BackendProgressUpdate) -> Void) async throws -> EditorSaveResult { throw CocoaError(.featureUnsupported) }
     func setProject(_ document: ProjectDocument?) {}
     func catalogSurfaceLayers(_ assets: [ProjectAsset]) async throws -> [SurfaceCatalogEntry] { [] }
@@ -515,6 +540,113 @@ enum EditorAction: Sendable {
     case createBoundaryPayload(lineID: String, fields: [String: String])
     case removeBoundaryPayload(lineID: String, payloadID: String)
     case editSpatial(layerID: String, operation: String, itemID: String?)
+    case forceSetLeveeProperty(command: LeveePropertyForceSetCommand, value: String,
+                               rowIDs: Set<String>, identity: LeveeForceSetIdentity)
+}
+
+// These are source command identifiers from LeveeModPropertiesDetailEditor.
+// They intentionally remain protocol values and are never localized.
+enum LeveePropertyForceSetCommand: String, Equatable, Sendable {
+    case mode = "forceSetMode"
+    case modificationType = "forceSetModType"
+
+    var fieldID: String {
+        switch self {
+        case .mode: "Mode"
+        case .modificationType: "ModType"
+        }
+    }
+    var mismatchFieldID: String {
+        switch self {
+        case .mode: "ModeHasMismatch"
+        case .modificationType: "ModTypeHasMismatch"
+        }
+    }
+}
+
+// These are source command/field identities from ConceptualMeshArcEditor.
+// The display labels remain localized separately; the stable IDs are used to
+// route the original multi-selection commands into GeometryTopologySession.
+enum GeometryArcForceSetCommand: String, Equatable, Sendable {
+    case constrainStretching = "forceSetConstrainStretching"
+    case laplaceBC = "forceSetLaplaceBC"
+
+    var sourceFieldID: String {
+        switch self {
+        case .constrainStretching: "ViewModel_ConstrainStretching"
+        case .laplaceBC: "ViewModel_LaplaceBC"
+        }
+    }
+    var mismatchFieldID: String {
+        switch self {
+        case .constrainStretching: "ViewModel_ConstrainStretchingHasMismatch"
+        case .laplaceBC: "ViewModel_LaplaceBCHasMismatch"
+        }
+    }
+    var topologyFieldID: String {
+        switch self {
+        case .constrainStretching: "ConstrainStretching"
+        case .laplaceBC: "LaplaceBC"
+        }
+    }
+    var allowedValues: Set<String> {
+        switch self {
+        case .constrainStretching: ["Default", "Constrained", "Floating"]
+        case .laplaceBC: ["Default", "ZeroFlux", "Dirichlet"]
+        }
+    }
+}
+
+enum GeometryArcClearCommand: String, Sendable {
+    case resetBias = "forceResetBias"
+}
+
+// A ForceSet reply is a draft transformation for one exact selected-property
+// set. Keep the source, draft and selection generations together so an older
+// async response cannot replace a newer selection or session.
+struct LeveeForceSetIdentity: Equatable, Sendable {
+    let editorID: UUID
+    let assetID: String
+    let sourceInputID: String
+    let sourceRevision: String
+    let sourceStateFingerprint: String
+    let loadRevision: Int
+    let editRevision: Int
+    let selectionRevision: Int
+    let command: LeveePropertyForceSetCommand
+    let fieldID: String
+    let value: String
+    let rowIDs: [String]
+}
+
+struct GeometryArcForceSetIdentity: Equatable, Sendable {
+    let editorID: UUID
+    let assetID: String
+    let sourceRevision: String
+    let sourceStateFingerprint: String
+    let loadRevision: Int
+    let editRevision: Int
+    let selectionRevision: Int
+    let command: GeometryArcForceSetCommand
+    let fieldID: String
+    let mismatchFieldID: String
+    let value: String
+    let editorRowIDs: [String]
+    let topologyRowIDs: [String]
+}
+
+struct GeometryArcBiasResetIdentity: Equatable, Sendable {
+    let editorID: UUID
+    let assetID: String
+    let sourceRevision: String
+    let sourceStateFingerprint: String
+    let loadRevision: Int
+    let editRevision: Int
+    let selectionRevision: Int
+    let fieldID: String
+    let mismatchFieldID: String
+    let editorRowIDs: [String]
+    let topologyRowIDs: [String]
 }
 
 @MainActor
@@ -550,7 +682,7 @@ final class ModelEditorSession: ObservableObject {
         return draft
     }
     func setDateTimeInputDraft(_ draft: OriginalDateTimeInputDraft, for fieldID: String) {
-        guard !workspaceWriteLocked(), canEdit, !isSaving, !isPerforming,
+        guard !isWriteLocked, canEdit, !isSaving, !isPerforming,
               !readOnlyFieldIDs.contains(fieldID), fields[fieldID, default: ""] == draft.sourceValue,
               dateTimeInputDrafts[fieldID] != draft else { return }
         dateTimeInputDrafts[fieldID] = draft
@@ -628,7 +760,7 @@ final class ModelEditorSession: ObservableObject {
     func updateUnitNumberInput(rawText: String, owner: OriginalUnitNumberInputOwner, units: DisplayUnitData,
                                locale: Locale = .autoupdatingCurrent,
                                expectedContext: OriginalUnitNumberInputContext? = nil) -> OriginalUnitNumberInputContext? {
-        guard !workspaceWriteLocked(), canEdit, !isSaving, !isPerforming, !loadingSelection,
+        guard !isWriteLocked, canEdit, !isSaving, !isPerforming, !loadingSelection,
               !isReadOnlyUnitNumberOwner(owner),
               let current = unitNumberInputContext(for: owner, units: units, locale: locale) else { return nil }
 
@@ -712,7 +844,7 @@ final class ModelEditorSession: ObservableObject {
         units.choices.first { $0.id == (displayUnitSelections[units.selectionId] ?? units.sourceId) } ?? units.choices.first { $0.id == units.sourceId }
     }
     func selectDisplayUnit(_ id: String, units: DisplayUnitData) {
-        guard !workspaceWriteLocked(), !hasUnitNumberInputDraft(selectionID: units.selectionId),
+        guard !isWriteLocked, !hasUnitNumberInputDraft(selectionID: units.selectionId),
               units.choices.contains(where: { $0.id == id }), displayUnitSelections[units.selectionId] != id else { return }
         displayUnitSelections[units.selectionId] = id
     }
@@ -823,6 +955,7 @@ final class ModelEditorSession: ObservableObject {
     @Published private(set) var isSaving = false { didSet { if !isSaving { scheduleProjectContextRefresh() } } }
     @Published private(set) var isPerforming = false { didSet { if !isPerforming { scheduleProjectContextRefresh() } } }
     @Published private(set) var isRefreshingContext = false
+    @Published private(set) var saveWarning: String?
     @Published private(set) var loadingSelection = false
     @Published private(set) var terrainInputImportDraftToken: String?
     @Published private(set) var terrainInputImportCleanupWarning: String?
@@ -833,6 +966,8 @@ final class ModelEditorSession: ObservableObject {
     let terrainUSGSImportCleanup = TerrainUSGSImportCleanupSession()
     @Published private(set) var isTerrainInputImportCancelling = false
     @Published private(set) var terrainInputImportStatus: TerrainInputImportStatus?
+    @Published private(set) var coreLayerReferenceConflict: String?
+    var hasCoreLayerReferenceConflict: Bool { coreLayerReferenceConflict != nil }
     private var terrainInputImportAttempt: TerrainInputImportAttempt?
     var canRecheckTerrainInputImportStatus: Bool {
         guard terrainInputImportCleanupBatchToken != nil, let attempt = terrainInputImportAttempt,
@@ -848,10 +983,20 @@ final class ModelEditorSession: ObservableObject {
         hasPendingTopologyEdit || geometryMesh?.isEditing == true || geometryCulvert?.isEditing == true
             || geometryCulvert?.hasActiveSketch == true
     }
-    var isBusy: Bool { workspaceWriteLocked() || planCompute?.isRunning == true || isSaving || isPerforming || isTerrainInputImportRunning || hasPendingGeometryEdit || geometryMesh?.isSavingDiagnosticsPreferences == true || resultPlanSettings?.isBusy == true }
+    var isWriteLocked: Bool { hasCoreLayerReferenceConflict || workspaceWriteLocked() }
+    // Core source conflicts preserve a stale editor draft and block its writes,
+    // but they are not a running operation. Lifecycle and recovery actions need
+    // to distinguish that state so the user can explicitly discard or reload it.
+    var isBusyExceptCoreLayerConflict: Bool {
+        workspaceWriteLocked() || planCompute?.isRunning == true || isSaving || isPerforming
+            || isTerrainInputImportRunning || hasPendingGeometryEdit
+            || geometryMesh?.isSavingDiagnosticsPreferences == true || resultPlanSettings?.isBusy == true
+    }
+    var isBusy: Bool { hasCoreLayerReferenceConflict || isBusyExceptCoreLayerConflict }
     var hasUnsavedEditorChanges: Bool { modified || hasIncompleteEditorInput || hasPendingGeometryEdit || geometryMesh?.hasUnsavedDiagnosticsPreferences == true || resultPlanSettings?.hasUnsavedChanges == true }
     var canSave: Bool {
-        guard loaded, !loadingSelection, !isBusy, !hasIncompleteEditorInput else { return false }
+        guard loaded, !loadingSelection, !isBusy, !hasIncompleteEditorInput,
+              coreLayerReferenceConflict == nil else { return false }
         if resultPlanSettings?.hasUnsavedChanges == true {
             guard !hasGeometryDraftChanges, !hasOrdinaryDraftChanges,
                   geometryMesh?.hasUnsavedDiagnosticsPreferences != true,
@@ -865,6 +1010,7 @@ final class ModelEditorSession: ObservableObject {
     @Published var error: String?
     let provider: (any ModelEditorProvider)?
     var didSave: (@MainActor () -> Void)?
+    var didSaveModelSnapshot: (@MainActor (ProjectAsset, EditorSnapshot, CoreLayerRequestContext?, String?) -> Void)?
     var persistDiagnosticsPreferences: (@MainActor (GeometryMeshDiagnosticsPreferencesCapture) async throws -> String)?
     var workspaceWriteLocked: @MainActor () -> Bool = { false }
     var currentResultPlanSettingsContext: (@MainActor () -> PlanSettingsResultCapture?)?
@@ -919,18 +1065,21 @@ final class ModelEditorSession: ObservableObject {
         let backend = provider as? BackendModelProvider
         let sourceTopology: (any GeometryTopologyProvider)? = topologyProvider ?? backend.map { backend in
             BackendGeometryTopologyProvider(client: backend.client,
-                currentProject: { [weak backend] in backend?.project })
+                currentProject: { [weak backend] in backend?.project },
+                currentCoreLayerContext: { [weak backend] in backend?.captureCoreLayerContext() })
         }
         geometryTopology = sourceTopology.map { GeometryTopologySession(provider: $0) }
         let topologyChild = geometryTopology
         let sourceMesh: (any GeometryMeshProvider)? = meshProvider ?? backend.map { backend in
             BackendGeometryMeshProvider(client: backend.client,
                 currentProject: { [weak backend] in backend?.project },
+                currentCoreLayerContext: { [weak backend] in backend?.captureCoreLayerContext() },
                 currentTopologyDraftState: { [weak topologyChild] in topologyChild?.topologyStateForParentSave })
         }
         let sourceCulverts: (any GeometryCulvertProvider)? = culvertProvider ?? backend.map { backend in
             BackendGeometryCulvertProvider(client: backend.client,
-                currentProject: { [weak backend] in backend?.project })
+                currentProject: { [weak backend] in backend?.project },
+                currentCoreLayerContext: { [weak backend] in backend?.captureCoreLayerContext() })
         }
         geometryMesh = sourceMesh.map { GeometryMeshSession(provider: $0) }
         geometryCulvert = sourceCulverts.map { GeometryCulvertSession(provider: $0) }
@@ -1018,7 +1167,7 @@ final class ModelEditorSession: ObservableObject {
     }
     func currentPlanComputeContext() -> PlanPrecomputeContext? {
         guard loaded, let asset, asset.section == .plans, let sourceRevision,
-              (!workspaceWriteLocked() || planCompute?.isRunning == true),
+              (!isWriteLocked || planCompute?.isRunning == true),
               !isSaving, !isPerforming, !hasPendingGeometryEdit,
               !loadingSelection, !isRefreshingContext, !contextRefreshPending,
               !hasIncompleteEditorInput else { return nil }
@@ -1098,6 +1247,7 @@ final class ModelEditorSession: ObservableObject {
         await geometryCulvert?.ensureLoaded(asset: asset, sourceRevision: sourceRevision)
     }
     func ensureLoaded(_ asset: ProjectAsset?, kind: ModelEditorKind) async {
+        guard !hasCoreLayerReferenceConflict else { return }
         if loaded, self.asset == asset { return }
         await load(asset, kind: kind)
     }
@@ -1140,6 +1290,7 @@ final class ModelEditorSession: ObservableObject {
         unitNumberInputDrafts = [:]
         invalidateSelection()
         loadRevision += 1; let revision = loadRevision; self.asset = asset
+        saveWarning = nil
         sourceRevision = nil; sourceState = nil; readOnlyFieldIDs = []
         terrainInputImportDraftToken = nil; terrainInputImportCleanupWarning = nil; terrainInputImportCleanupToken = nil
         terrainInputImportCleanupBatchToken = nil; terrainInputImportCleanupAfterSave = false
@@ -1156,11 +1307,12 @@ final class ModelEditorSession: ObservableObject {
             guard revision == loadRevision, !Task.isCancelled else { return }
             try snapshot.validatePresentation()
             install(snapshot)
+            coreLayerReferenceConflict = nil
             scheduleProjectContextRefresh()
         } catch { if revision == loadRevision, !Task.isCancelled { self.error = L10n.text(error.localizedDescription) } }
     }
     func set(_ field: String, _ value: String) {
-        guard !workspaceWriteLocked(), !hasUnitNumberDraftBlockingField(field) else { return }
+        guard !isWriteLocked, !hasUnitNumberDraftBlockingField(field) else { return }
         if readOnlyFieldIDs.contains(field) || SourceEditorLibrary.shared.field(storageID: field)?.readOnly == true { return }
         let related = Set(fieldGroups.values.filter { $0.contains(field) }.flatMap { $0 }).union([field])
         let definition = SourceEditorLibrary.shared.field(storageID: field)
@@ -1185,13 +1337,311 @@ final class ModelEditorSession: ObservableObject {
         }
     }
 
+    func captureLeveeForceSetIdentity(field: SourceEditorField, value: String) -> LeveeForceSetIdentity? {
+        guard let command = field.forceSetCommand.flatMap(LeveePropertyForceSetCommand.init(rawValue:)),
+              field.id == command.fieldID,
+              field.mixedBy == command.mismatchFieldID,
+              field.hasMixedDraft(in: self),
+              !field.readOnly, field.isReadOnly != true,
+              !readOnlyFieldIDs.contains(field.storageID),
+              let asset, asset.section == .terrains, canEdit, loaded,
+              !isBusy, !loadingSelection, !isSaving, !isPerforming, !isWriteLocked,
+              let sourceRevision,
+              let rowIDs = currentTableSelections[Self.leveePropertyTableID],
+              rowIDs.count > 1, Set(rowIDs).count == rowIDs.count,
+              let selection = tablePresentations[Self.leveePropertyTableID]?.selection,
+              selection.rowIDs == Set(rowIDs),
+              Set(rowIDs).isSubset(of: Set((rows[Self.leveePropertyTableID] ?? []).map(\.id))),
+              let inputID = fields[TerrainEditorContract.sourceField], !inputID.isEmpty,
+              sourceCollections[TerrainEditorContract.sourceField]?.itemDetails[inputID]?.terrainInfo?.type == "Levee"
+        else { return nil }
+
+        let sortedIDs = rowIDs.sorted()
+        let selectionScope = "TerrainSelection/" + sortedIDs.joined(separator: "+")
+        let expectedScope = selectionScope + "/LeveeModPropertiesDetailEditor"
+        let fieldID = expectedScope + "/" + command.fieldID
+        let mismatchID = expectedScope + "/" + command.mismatchFieldID
+        guard field.scope == expectedScope, field.storageID == fieldID,
+              fields[mismatchID]?.lowercased() == "true",
+              choiceOptions[fieldID]?.contains(where: { $0.id == value }) == true else { return nil }
+
+        return LeveeForceSetIdentity(editorID: id, assetID: asset.id, sourceInputID: inputID,
+            sourceRevision: sourceRevision,
+            sourceStateFingerprint: Self.forceSetDraftFingerprint(sourceState),
+            loadRevision: loadRevision, editRevision: editRevision,
+            selectionRevision: selectionRevision, command: command,
+            fieldID: fieldID, value: value, rowIDs: sortedIDs)
+    }
+
+    func isCurrentLeveeForceSetIdentity(_ identity: LeveeForceSetIdentity) -> Bool {
+        guard identity.editorID == id, identity.loadRevision == loadRevision,
+              identity.editRevision == editRevision, identity.selectionRevision == selectionRevision,
+              let asset, asset.id == identity.assetID, sourceRevision == identity.sourceRevision,
+              Self.forceSetDraftFingerprint(sourceState) == identity.sourceStateFingerprint,
+              currentTableSelections[Self.leveePropertyTableID] == identity.rowIDs,
+              fields[TerrainEditorContract.sourceField] == identity.sourceInputID,
+              sourceCollections[TerrainEditorContract.sourceField]?.itemDetails[identity.sourceInputID]?.terrainInfo?.type == "Levee"
+        else { return false }
+        let selectionScope = "TerrainSelection/" + identity.rowIDs.joined(separator: "+")
+        let expectedScope = selectionScope + "/LeveeModPropertiesDetailEditor"
+        return identity.fieldID == expectedScope + "/" + identity.command.fieldID
+            && fields[expectedScope + "/" + identity.command.mismatchFieldID]?.lowercased() == "true"
+            && choiceOptions[identity.fieldID]?.contains(where: { $0.id == identity.value }) == true
+    }
+
+    @discardableResult
+    func forceSetLeveeProperty(_ field: SourceEditorField, value: String) async -> Bool {
+        guard let identity = captureLeveeForceSetIdentity(field: field, value: value) else { return false }
+        return await forceSetLeveeProperty(identity)
+    }
+
+    @discardableResult
+    func forceSetLeveeProperty(_ identity: LeveeForceSetIdentity) async -> Bool {
+        // The UI captures this value synchronously in the selection callback.
+        // Recheck before entering the provider path so a queued Task cannot
+        // retarget a click to a newer selection or draft.
+        guard isCurrentLeveeForceSetIdentity(identity) else { return false }
+        return await perform(.forceSetLeveeProperty(command: identity.command, value: identity.value,
+            rowIDs: Set(identity.rowIDs), identity: identity))
+    }
+
+    func captureGeometryArcForceSetIdentity(field: SourceEditorField,
+                                            value: String) -> GeometryArcForceSetIdentity? {
+        guard let command = field.forceSetCommand.flatMap(GeometryArcForceSetCommand.init(rawValue:)),
+              field.id == command.sourceFieldID,
+              field.mixedBy == command.mismatchFieldID,
+              field.hasMixedDraft(in: self),
+              !field.readOnly, field.isReadOnly != true,
+              !readOnlyFieldIDs.contains(field.storageID),
+              let asset, asset.section == .geometries, canEdit, loaded,
+              !isBusy, !loadingSelection, !isSaving, !isPerforming, !isWriteLocked,
+              let sourceRevision,
+              let selectedRowIDs = currentTableSelections["Arcs"], !selectedRowIDs.isEmpty,
+              Set(selectedRowIDs).count == selectedRowIDs.count,
+              let selection = tablePresentations["Arcs"]?.selection,
+              selection.rowIDs == Set(selectedRowIDs),
+              let detail = selection.detail,
+              detail.schemaIDs.contains("ConceptualMeshArcEditor"),
+              field.scope == detail.scope + "/ConceptualMeshArcEditor",
+              command.allowedValues.contains(value),
+              (choiceOptions[field.storageID] ?? field.choices).contains(where: { $0.id == value }),
+              let topology = geometryTopology,
+              topology.snapshot?.revision == sourceRevision,
+              topology.canEdit, let topologyRows = geometryArcTopologyRowIDs(Set(selectedRowIDs), topology: topology)
+        else { return nil }
+
+        let sortedEditorIDs = selectedRowIDs.sorted()
+        let fieldID = detail.scope + "/ConceptualMeshArcEditor/" + command.sourceFieldID
+        let mismatchFieldID = detail.scope + "/ConceptualMeshArcEditor/" + command.mismatchFieldID
+        return GeometryArcForceSetIdentity(editorID: id, assetID: asset.id,
+            sourceRevision: sourceRevision,
+            sourceStateFingerprint: Self.forceSetDraftFingerprint(sourceState),
+            loadRevision: loadRevision, editRevision: editRevision,
+            selectionRevision: selectionRevision, command: command, fieldID: fieldID,
+            mismatchFieldID: mismatchFieldID, value: value,
+            editorRowIDs: sortedEditorIDs, topologyRowIDs: topologyRows)
+    }
+
+    func isCurrentGeometryArcForceSetIdentity(_ identity: GeometryArcForceSetIdentity,
+                                              childDraftEditAccepted: Bool = false) -> Bool {
+        let expectedEditRevision = identity.editRevision + (childDraftEditAccepted ? 1 : 0)
+        guard identity.editorID == id, identity.loadRevision == loadRevision,
+              editRevision == expectedEditRevision,
+              identity.selectionRevision == selectionRevision,
+              let asset, asset.id == identity.assetID,
+              sourceRevision == identity.sourceRevision,
+              Self.forceSetDraftFingerprint(sourceState) == identity.sourceStateFingerprint,
+              currentTableSelections["Arcs"] == identity.editorRowIDs,
+              tablePresentations["Arcs"]?.selection?.rowIDs == Set(identity.editorRowIDs),
+              let detail = tablePresentations["Arcs"]?.selection?.detail,
+              detail.schemaIDs.contains("ConceptualMeshArcEditor"),
+              identity.fieldID == detail.scope + "/ConceptualMeshArcEditor/" + identity.command.sourceFieldID,
+              identity.mismatchFieldID == detail.scope + "/ConceptualMeshArcEditor/" + identity.command.mismatchFieldID,
+              fields[identity.mismatchFieldID]?.lowercased() == "true",
+              (choiceOptions[identity.fieldID]
+                ?? SourceEditorLibrary.shared.field(storageID: identity.fieldID)?.choices
+                ?? []).contains(where: { $0.id == identity.value }),
+              let topology = geometryTopology,
+              topology.snapshot?.revision == identity.sourceRevision,
+              geometryArcTopologyRowIDs(Set(identity.editorRowIDs), topology: topology) == identity.topologyRowIDs
+        else { return false }
+        return true
+    }
+
+    @discardableResult
+    func forceSetGeometryArcChoice(_ field: SourceEditorField, value: String) async -> Bool {
+        guard let identity = captureGeometryArcForceSetIdentity(field: field, value: value),
+              geometryTopology != nil else {
+            error = L10n.text("The selected Arc rows changed. Select them again before applying this value.")
+            return false
+        }
+        return await forceSetGeometryArcChoice(identity)
+    }
+
+    @discardableResult
+    func forceSetGeometryArcChoice(_ identity: GeometryArcForceSetIdentity) async -> Bool {
+        // This first check is deliberately before any await or child selection
+        // mutation. A stale click must not issue a topology request.
+        guard isCurrentGeometryArcForceSetIdentity(identity),
+              let topology = geometryTopology else { return false }
+        let command = identity.command
+        isPerforming = true
+        error = nil
+        defer { isPerforming = false }
+        await ensureGeometryTopologyLoaded()
+        guard isCurrentGeometryArcForceSetIdentity(identity) else { return false }
+        topology.select(Set(identity.topologyRowIDs), featureKind: "arc")
+        let didApply = await topology.forceSetArcChoice(rowIDs: identity.topologyRowIDs,
+            fieldID: command.topologyFieldID, value: identity.value)
+        guard didApply else {
+            if isCurrentGeometryArcForceSetIdentity(identity) {
+                error = L10n.text(topology.error ?? "The selected Arc rows changed. Select them again before applying this value.")
+            }
+            return false
+        }
+        guard isCurrentGeometryArcForceSetIdentity(identity, childDraftEditAccepted: true) else { return false }
+        fields[identity.fieldID] = identity.value
+        fields[identity.mismatchFieldID] = "false"
+        updateArcRowDisplay(rowIDs: identity.editorRowIDs,
+            fieldID: command.topologyFieldID, value: identity.value)
+        modified = hasGeometryDraftChanges || hasOrdinaryDraftChanges
+        return true
+    }
+
+    func captureGeometryArcBiasResetIdentity(field: SourceEditorField) -> GeometryArcBiasResetIdentity? {
+        guard field.clearCommand == GeometryArcClearCommand.resetBias.rawValue,
+              field.id == "ViewModel_BiasString",
+              field.mixedBy == "ViewModel_BiasHasMismatch",
+              field.hasMixedDraft(in: self), field.showClearButton == true,
+              !field.readOnly, field.isReadOnly != true,
+              !readOnlyFieldIDs.contains(field.storageID),
+              let asset, asset.section == .geometries, canEdit, loaded,
+              !isBusy, !loadingSelection, !isSaving, !isPerforming, !isWriteLocked,
+              let sourceRevision,
+              let selectedRowIDs = currentTableSelections["Arcs"], !selectedRowIDs.isEmpty,
+              Set(selectedRowIDs).count == selectedRowIDs.count,
+              let selection = tablePresentations["Arcs"]?.selection,
+              selection.rowIDs == Set(selectedRowIDs),
+              let detail = selection.detail,
+              detail.schemaIDs.contains("ConceptualMeshArcEditor"),
+              field.scope == detail.scope + "/ConceptualMeshArcEditor",
+              let topology = geometryTopology,
+              topology.snapshot?.revision == sourceRevision,
+              topology.canEdit, let topologyRows = geometryArcTopologyRowIDs(Set(selectedRowIDs), topology: topology)
+        else { return nil }
+
+        let sortedEditorIDs = selectedRowIDs.sorted()
+        return GeometryArcBiasResetIdentity(editorID: id, assetID: asset.id,
+            sourceRevision: sourceRevision,
+            sourceStateFingerprint: Self.forceSetDraftFingerprint(sourceState),
+            loadRevision: loadRevision, editRevision: editRevision,
+            selectionRevision: selectionRevision,
+            fieldID: detail.scope + "/ConceptualMeshArcEditor/ViewModel_BiasString",
+            mismatchFieldID: detail.scope + "/ConceptualMeshArcEditor/ViewModel_BiasHasMismatch",
+            editorRowIDs: sortedEditorIDs, topologyRowIDs: topologyRows)
+    }
+
+    func isCurrentGeometryArcBiasResetIdentity(_ identity: GeometryArcBiasResetIdentity,
+                                                childDraftEditAccepted: Bool = false) -> Bool {
+        let expectedEditRevision = identity.editRevision + (childDraftEditAccepted ? 1 : 0)
+        guard identity.editorID == id, identity.loadRevision == loadRevision,
+              editRevision == expectedEditRevision,
+              identity.selectionRevision == selectionRevision,
+              let asset, asset.id == identity.assetID,
+              sourceRevision == identity.sourceRevision,
+              Self.forceSetDraftFingerprint(sourceState) == identity.sourceStateFingerprint,
+              currentTableSelections["Arcs"] == identity.editorRowIDs,
+              tablePresentations["Arcs"]?.selection?.rowIDs == Set(identity.editorRowIDs),
+              let detail = tablePresentations["Arcs"]?.selection?.detail,
+              detail.schemaIDs.contains("ConceptualMeshArcEditor"),
+              identity.fieldID == detail.scope + "/ConceptualMeshArcEditor/ViewModel_BiasString",
+              fields[identity.mismatchFieldID]?.lowercased() == "true",
+              let topology = geometryTopology,
+              topology.snapshot?.revision == identity.sourceRevision,
+              geometryArcTopologyRowIDs(Set(identity.editorRowIDs), topology: topology) == identity.topologyRowIDs
+        else { return false }
+        return true
+    }
+
+    @discardableResult
+    func resetGeometryArcBias(_ field: SourceEditorField) async -> Bool {
+        guard let identity = captureGeometryArcBiasResetIdentity(field: field),
+              geometryTopology != nil else {
+            error = L10n.text("The selected Arc rows changed. Select them again before applying this value.")
+            return false
+        }
+        return await resetGeometryArcBias(identity)
+    }
+
+    @discardableResult
+    func resetGeometryArcBias(_ identity: GeometryArcBiasResetIdentity) async -> Bool {
+        // Reject before awaiting or touching the child draft if selection or
+        // parent edits changed after the clear click captured its owner.
+        guard isCurrentGeometryArcBiasResetIdentity(identity),
+              let topology = geometryTopology else { return false }
+        isPerforming = true
+        error = nil
+        defer { isPerforming = false }
+        await ensureGeometryTopologyLoaded()
+        guard isCurrentGeometryArcBiasResetIdentity(identity) else { return false }
+        topology.select(Set(identity.topologyRowIDs), featureKind: "arc")
+        let didReset = await topology.forceResetArcBias(rowIDs: identity.topologyRowIDs)
+        guard didReset else {
+            if isCurrentGeometryArcBiasResetIdentity(identity) {
+                error = L10n.text(topology.error ?? "The selected Arc rows changed. Select them again before applying this value.")
+            }
+            return false
+        }
+        guard isCurrentGeometryArcBiasResetIdentity(identity, childDraftEditAccepted: true) else { return false }
+        // ArcEditorVM.ForceResetBias assigns float.NaN; BiasString then
+        // presents the uniform selection as an empty string.
+        fields[identity.fieldID] = ""
+        fields[identity.mismatchFieldID] = "false"
+        updateArcRowDisplay(rowIDs: identity.editorRowIDs, fieldID: "Bias", value: "NaN")
+        modified = hasGeometryDraftChanges || hasOrdinaryDraftChanges
+        return true
+    }
+
+    private func geometryArcTopologyRowIDs(_ editorRowIDs: Set<String>,
+                                           topology: GeometryTopologySession) -> [String]? {
+        guard !editorRowIDs.isEmpty else { return nil }
+        let selectedRows = (rows["Arcs"] ?? []).filter { editorRowIDs.contains($0.id) }
+        guard selectedRows.count == editorRowIDs.count else { return nil }
+        let fids = selectedRows.compactMap { row -> Int? in
+            guard let raw = row.values["FID"] else { return nil }
+            return Int(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        guard fids.count == editorRowIDs.count, Set(fids).count == fids.count else { return nil }
+        let selectedFIDs = Set(fids)
+        let mapped = topology.table(for: "arc").rows.filter { selectedFIDs.contains($0.fid) }
+        guard mapped.count == fids.count, Set(mapped.map(\.fid)) == selectedFIDs,
+              mapped.allSatisfy({ $0.id == "arc:\($0.fid)" }) else { return nil }
+        return mapped.map(\.id)
+    }
+
+    private func updateArcRowDisplay(rowIDs: [String], fieldID: String, value: String) {
+        guard var tableRows = rows["Arcs"] else { return }
+        let selected = Set(rowIDs)
+        for index in tableRows.indices where selected.contains(tableRows[index].id)
+            && tableRows[index].values[fieldID] != nil {
+            tableRows[index].values[fieldID] = value
+        }
+        rows["Arcs"] = tableRows
+    }
+
+    private static let leveePropertyTableID = "LeveeModPropertiesEditor/PropertySets"
+    private static func forceSetDraftFingerprint(_ sourceState: String?) -> String {
+        guard let sourceState else { return "missing" }
+        return SHA256.hash(data: Data(sourceState.utf8)).map { String(format: "%02X", $0) }.joined()
+    }
+
     private func sourcePropertyValidationRequest(for field: SourceEditorField,
                                                  text: String? = nil) -> SourcePropertyValidationRequest? {
         guard let validationSource = field.errorValidationSource,
               let propertyName = field.errorValidationPropertyName,
               let asset, let sourceRevision, let provider = provider as? BackendModelProvider,
               loaded, canEdit, !isSaving, !isPerforming, !isBusy, !loadingSelection,
-              !workspaceWriteLocked(), !hasIncompleteEditorInput,
+              !isWriteLocked, !hasIncompleteEditorInput,
               !field.readOnly, field.isReadOnly != true,
               !readOnlyFieldIDs.contains(field.storageID),
               ModelEditorKind.allCases.contains(where: { $0.section == asset.section }) else { return nil }
@@ -1278,7 +1728,7 @@ final class ModelEditorSession: ObservableObject {
               !field.readOnly, field.isReadOnly != true, !readOnlyFieldIDs.contains(field.storageID),
               let asset, asset.section == .geometries,
               let topology = geometryTopology, topology.isWritingRegionInputs,
-              canEdit, !loadingSelection, !workspaceWriteLocked(), !isSaving, !isPerforming,
+              canEdit, !loadingSelection, !isWriteLocked, !isSaving, !isPerforming,
               !isTerrainInputImportRunning, planCompute?.isRunning != true,
               geometryMesh?.isEditing != true, geometryMesh?.isSavingDiagnosticsPreferences != true,
               geometryCulvert?.isEditing != true, geometryCulvert?.hasActiveSketch != true,
@@ -1293,7 +1743,7 @@ final class ModelEditorSession: ObservableObject {
               !field.readOnly, field.isReadOnly != true, !readOnlyFieldIDs.contains(field.storageID),
               let asset, asset.section == .geometries, canEdit,
               (!isBusy || canContinueGeometryRegionInput(field)), !loadingSelection,
-              !workspaceWriteLocked(), !isSaving, !isPerforming,
+              !isWriteLocked, !isSaving, !isPerforming,
               let topology = geometryTopology else { return }
         let capturedLoadRevision = loadRevision
         let capturedSelectionRevision = selectionRevision
@@ -1326,7 +1776,7 @@ final class ModelEditorSession: ObservableObject {
               let rowIDs = currentTableSelections["Regions"], !rowIDs.isEmpty,
               !field.readOnly, field.isReadOnly != true, !readOnlyFieldIDs.contains(field.storageID),
               let asset, asset.section == .geometries, canEdit, !isBusy, !loadingSelection,
-              !workspaceWriteLocked(), !isSaving, !isPerforming,
+              !isWriteLocked, !isSaving, !isPerforming,
               let topology = geometryTopology else { return }
         let capturedLoadRevision = loadRevision
         let capturedSelectionRevision = selectionRevision
@@ -1360,7 +1810,7 @@ final class ModelEditorSession: ObservableObject {
               let rowIDs = currentTableSelections["Regions"], rowIDs.count > 1,
               !field.readOnly, field.isReadOnly != true, !readOnlyFieldIDs.contains(field.storageID),
               let asset, asset.section == .geometries, canEdit, !isBusy, !loadingSelection,
-              !workspaceWriteLocked(), !isSaving, !isPerforming,
+              !isWriteLocked, !isSaving, !isPerforming,
               let topology = geometryTopology else { return }
         let capturedLoadRevision = loadRevision
         let capturedSelectionRevision = selectionRevision
@@ -1417,11 +1867,11 @@ final class ModelEditorSession: ObservableObject {
               planTimeWindowEdits.prefix(edits.count).map(\.id) == edits.map(\.id) else { return }
         planTimeWindowEdits.removeFirst(edits.count)
     }
-    func clearMixedFlag(_ field: String?) { guard !workspaceWriteLocked() else { return }; if let field { fields[field] = "false"; clearedMixedFieldIDs.insert(field) } }
-    func addImage(_ field: String, image: ImageAttachment) { guard !workspaceWriteLocked() else { return }; images[field, default: []].append(image); changedImageFieldIDs.insert(field); editRevision += 1; modified = true }
-    func removeImage(_ field: String, id: String) { guard !workspaceWriteLocked() else { return }; images[field]?.removeAll { $0.id == id }; changedImageFieldIDs.insert(field); editRevision += 1; modified = true }
+    func clearMixedFlag(_ field: String?) { guard !isWriteLocked else { return }; if let field { fields[field] = "false"; clearedMixedFieldIDs.insert(field) } }
+    func addImage(_ field: String, image: ImageAttachment) { guard !isWriteLocked else { return }; images[field, default: []].append(image); changedImageFieldIDs.insert(field); editRevision += 1; modified = true }
+    func removeImage(_ field: String, id: String) { guard !isWriteLocked else { return }; images[field]?.removeAll { $0.id == id }; changedImageFieldIDs.insert(field); editRevision += 1; modified = true }
     func setCell(table: String, rowID: String, column: String, value: String) {
-        guard !workspaceWriteLocked(), !hasUnitNumberDraftBlockingCell(tableID: table, rowID: rowID, columnID: column) else { return }
+        guard !isWriteLocked, !hasUnitNumberDraftBlockingCell(tableID: table, rowID: rowID, columnID: column) else { return }
         if column != "Value", SourceEditorLibrary.shared.field(storageID: table)?.kind == "classificationMapping" { return }
         if let presentation = tablePresentations[table] {
             guard let definition = presentation.columns.first(where: { $0.id == column }), definition.readOnly != true else { return }
@@ -1585,6 +2035,7 @@ final class ModelEditorSession: ObservableObject {
         dateTimeInputDrafts = [:]
         unitNumberInputDrafts = [:]
         sourceRevision = nil; sourceState = nil; readOnlyFieldIDs = []
+        coreLayerReferenceConflict = nil
         terrainInputImportDraftToken = nil; terrainInputImportCleanupWarning = nil; terrainInputImportCleanupToken = nil
         terrainInputImportCleanupBatchToken = nil; terrainInputImportCleanupAfterSave = false
         terrainInputImportAttempt = nil; terrainInputImportStatus = nil
@@ -1605,6 +2056,14 @@ final class ModelEditorSession: ObservableObject {
         asset = nil
         startDraft()
         loaded = false; canEdit = false; error = nil
+    }
+
+    func markCoreLayerReferenceConflict(_ message: String) {
+        guard !message.isEmpty else { return }
+        coreLayerReferenceConflict = L10n.text(message)
+    }
+    func clearCoreLayerReferenceConflictAfterExplicitDiscard() {
+        coreLayerReferenceConflict = nil
     }
     // Refresh source metadata/options without overwriting unsaved tool inputs.
     func mergeToolPresentation(_ snapshot: EditorSnapshot, overwriteRows: Bool = false, sourceWins: Set<String> = []) {
@@ -1845,8 +2304,12 @@ final class ModelEditorSession: ObservableObject {
     }
     @discardableResult
     func perform(_ action: EditorAction) async -> Bool {
+        guard coreLayerReferenceConflict == nil else {
+            error = coreLayerReferenceConflict
+            return false
+        }
         if case .compute = action {
-            guard !workspaceWriteLocked(), let compute = planCompute, !compute.isRunning,
+            guard !isWriteLocked, let compute = planCompute, !compute.isRunning,
                   let context = currentPlanComputeContext(),
                   let beginPlanCompute, let endPlanCompute, let didComputePlan else { return false }
             error = nil
@@ -1885,6 +2348,7 @@ final class ModelEditorSession: ObservableObject {
         }
         switch action {
         case .addTerrainInput: return await editBoundary(action)
+        case .forceSetLeveeProperty: return await editBoundary(action)
         case .addRow, .copyRows, .removeRows:
             if asset?.section == .terrains { return await editBoundary(action) }
         case .editClassificationGeometry: return await editBoundary(action)
@@ -1950,6 +2414,12 @@ final class ModelEditorSession: ObservableObject {
                   ids.isSubset(of: Set((rows[table] ?? []).map(\.id))) else { return false }
         case .addTerrainInput:
             guard asset.section == .terrains, sourceCollections[TerrainEditorContract.sourceField] != nil else { return false }
+        case .forceSetLeveeProperty(let command, let value, let rowIDs, let identity):
+            guard asset.section == .terrains, canEdit,
+                  !rowIDs.isEmpty, Set(rowIDs).count == rowIDs.count,
+                  Set(rowIDs) == Set(currentTableSelections[Self.leveePropertyTableID] ?? []),
+                  identity.command == command, identity.value == value,
+                  Set(identity.rowIDs) == Set(rowIDs), isCurrentLeveeForceSetIdentity(identity) else { return false }
         case .editClassificationGeometry(let mutation):
             guard let tools = sourceCollections[ClassificationEditorContract.sourceField]?.classificationTools else { return false }
             if mutation.operation == "undo", !tools.canUndo { return false }
@@ -1990,6 +2460,8 @@ final class ModelEditorSession: ObservableObject {
             switch action {
             case .addRow, .copyRows, .removeRows:
                 snapshot = try await provider.editTerrain(asset, action: action, edits: edits)
+            case .forceSetLeveeProperty:
+                snapshot = try await provider.editTerrain(asset, action: action, edits: edits)
             case .addTerrainInput: snapshot = try await provider.editTerrain(asset, action: action, edits: edits)
             case .selectSource(let field, _) where isTerrainSource(field):
                 snapshot = try await provider.editTerrain(asset, action: action, edits: edits)
@@ -2003,6 +2475,8 @@ final class ModelEditorSession: ObservableObject {
             default: snapshot = try await provider.editBoundary(asset, action: action, edits: edits)
             }
             guard loadedRevision == loadRevision, asset == self.asset, revision == editRevision else { return false }
+            if case .forceSetLeveeProperty(_, _, _, let identity) = action,
+               !isCurrentLeveeForceSetIdentity(identity) { return false }
             try Task.checkCancellation()
             try snapshot.validatePresentation()
             guard snapshot.sourceRevision == edits.sourceRevision else { throw ProjectFileError.invalid("The source revision changed during a draft operation.") }
@@ -2171,13 +2645,16 @@ final class ModelEditorSession: ObservableObject {
     @discardableResult
     func save(_ requestedAsset: ProjectAsset?, gridImport: SpatialGridSelection? = nil, classificationImport: [ClassificationImportFile]? = nil,
               cumulusImport: CumulusGridImportSelection? = nil,
-              cumulusProgress: (@MainActor (BackendProgressUpdate) -> Void)? = nil) async -> Bool {
+              cumulusProgress: (@MainActor (BackendProgressUpdate) -> Void)? = nil,
+              gridProgress: (@MainActor @Sendable (BackendProgressUpdate) -> Void)? = nil,
+              gridCancellationAvailable: GridImportCancellationInstaller? = nil) async -> Bool {
         guard geometryMesh?.isSavingDiagnosticsPreferences != true else { return false }
         if resultPlanSettings?.hasUnsavedChanges == true {
             return await saveResultPlanSettings(requestedAsset)
         }
         guard await saveModel(requestedAsset, gridImport: gridImport, classificationImport: classificationImport,
-                              cumulusImport: cumulusImport, cumulusProgress: cumulusProgress) else { return false }
+                              cumulusImport: cumulusImport, cumulusProgress: cumulusProgress,
+                              gridProgress: gridProgress, gridCancellationAvailable: gridCancellationAvailable) else { return false }
         guard let mesh = geometryMesh, mesh.hasUnsavedDiagnosticsPreferences else { return true }
         guard let persistDiagnosticsPreferences, let capture = mesh.beginDiagnosticsPreferencesSave() else {
             error = L10n.text("Save the mesh diagnostics settings before continuing.")
@@ -2276,7 +2753,13 @@ final class ModelEditorSession: ObservableObject {
     }
     private func saveModel(_ requestedAsset: ProjectAsset?, gridImport: SpatialGridSelection? = nil, classificationImport: [ClassificationImportFile]? = nil,
                            cumulusImport: CumulusGridImportSelection? = nil,
-                           cumulusProgress: (@MainActor (BackendProgressUpdate) -> Void)? = nil) async -> Bool {
+                           cumulusProgress: (@MainActor (BackendProgressUpdate) -> Void)? = nil,
+                           gridProgress: (@MainActor @Sendable (BackendProgressUpdate) -> Void)? = nil,
+                           gridCancellationAvailable: GridImportCancellationInstaller? = nil) async -> Bool {
+        guard coreLayerReferenceConflict == nil else {
+            error = coreLayerReferenceConflict
+            return false
+        }
         guard !hasIncompleteEditorInput else {
             if hasIncompleteDateTimeInput {
                 error = L10n.text("Complete or discard the invalid date or time input before saving.")
@@ -2296,7 +2779,7 @@ final class ModelEditorSession: ObservableObject {
             return false
         }
         guard modified || gridImport != nil || classificationImport != nil || cumulusImport != nil else { return true }
-        guard let requestedAsset, requestedAsset == asset, let provider, canEdit, !workspaceWriteLocked(), !isSaving, !loadingSelection, !isEditingSourceDraft else { return false }
+        guard let requestedAsset, requestedAsset == asset, let provider, canEdit, !isWriteLocked, !isSaving, !loadingSelection, !isEditingSourceDraft else { return false }
         let topology = requestedAsset.section == .geometries ? geometryTopology : nil
         let mesh = requestedAsset.section == .geometries ? geometryMesh : nil
         let culverts = requestedAsset.section == .geometries ? geometryCulvert : nil
@@ -2326,11 +2809,16 @@ final class ModelEditorSession: ObservableObject {
             geometryMeshState: meshCapture?.draftState,
             geometryCulvertState: culvertCapture?.draftState, tableSelections: currentTableSelections, changedCells: currentChangedCells)
         let capturedPlanTimeWindowEdits = changes.planTimeWindowEdits
+        // Retain the same exact session reference capture that BackendModelProvider
+        // serializes before its first suspension. A late save must not rebase a
+        // newer registry entry for the same external HDF path.
+        let capturedCoreLayerContext = (provider as? BackendModelProvider)?.captureCoreLayerContext()
+        let committedSnapshotHandler = didSaveModelSnapshot
         protectPlanTimeWindowPrefix(capturedPlanTimeWindowEdits)
         var savedBaseline = EditorSnapshot(fields: fields, rows: rows, samples: samples, canEdit: canEdit, images: images, editableSamplePages: editableSamplePages, choiceOptions: choiceOptions, fieldTitles: fieldTitles, textSuggestions: textSuggestions, sourceCollections: sourceCollections, tablePresentations: tablePresentations, boundaryLines: boundaryLines?.selecting(lineID: selectedBoundaryLineID, payloadIDs: selectedBoundaryPayloadIDs), sourceRevision: sourceRevision, fieldGroups: fieldGroups, availableOperations: availableOperations, diagnosticHistory: diagnosticHistory, seriesPresentations: seriesPresentations, spatialPresentations: spatialPresentations, sourceState: sourceState, readOnlyFieldIDs: readOnlyFieldIDs, planTimeWindowFieldIDs: planTimeWindowFieldIDs,
             terrainInputImportDraftToken: terrainInputImportDraftToken, terrainInputImportCleanupWarning: terrainInputImportCleanupWarning, terrainInputImportCleanupToken: terrainInputImportCleanupToken)
         invalidateProjectContextRefresh(keepPending: true)
-        isSaving = true; error = nil
+        isSaving = true; error = nil; saveWarning = nil
         defer {
             releasePlanTimeWindowPrefix(capturedPlanTimeWindowEdits)
             isSaving = false
@@ -2338,16 +2826,32 @@ final class ModelEditorSession: ObservableObject {
         do {
             let result: EditorSaveResult
             if let classificationImport { result = try await provider.importClassification(requestedAsset, edits: changes, files: classificationImport) }
-            else if let gridImport { result = try await provider.importGrid(requestedAsset, edits: changes, selection: gridImport) }
+            else if let gridImport {
+                if let gridProgress, let gridCancellationAvailable {
+                    result = try await provider.importGrid(requestedAsset, edits: changes, selection: gridImport,
+                        progress: gridProgress, installCancellation: gridCancellationAvailable)
+                } else {
+                    result = try await provider.importGrid(requestedAsset, edits: changes, selection: gridImport)
+                }
+            }
             else if let cumulusImport {
                 result = try await provider.importCumulusGrid(requestedAsset, edits: changes,
                     selection: cumulusImport, progress: { cumulusProgress?($0) })
             }
             else { result = try await provider.saveModel(requestedAsset, changes: changes) }
-            guard loadedRevision == loadRevision, requestedAsset == asset else { return false }
-            if asset?.section == .plans, (changes.sourceState != nil || !capturedPlanTimeWindowEdits.isEmpty), result.snapshot?.planTimeWindowFieldIDs == nil {
+            if requestedAsset.section == .plans, (changes.sourceState != nil || !capturedPlanTimeWindowEdits.isEmpty), result.snapshot?.planTimeWindowFieldIDs == nil {
                 throw ProjectFileError.invalid("The plan save did not return its canonical time-window state.")
             }
+            // A committed file belongs to its captured asset even if its editor
+            // closed or changed selection while the backend drained its receipt.
+            // The project callback verifies the captured registry reference; UI
+            // installation below still requires the original editor generation.
+            if let committedSnapshot = result.snapshot {
+                committedSnapshotHandler?(requestedAsset, committedSnapshot, capturedCoreLayerContext,
+                    capturedCoreLayerContext?.projectRevision)
+            }
+            guard loadedRevision == loadRevision, requestedAsset == asset else { return false }
+            saveWarning = result.refreshWarning.map(L10n.text)
             sourceRevision = result.sourceRevision ?? result.snapshot?.sourceRevision ?? sourceRevision
             savedBaseline = result.snapshot ?? savedBaseline
             if let classificationBefore, classificationImport == nil { Self.rebaseClassificationSelection(in: &savedBaseline, from: classificationBefore) }
@@ -2388,6 +2892,10 @@ final class ModelEditorSession: ObservableObject {
             modified = false; changedFieldIDs = []; changedSamplePages = []; changedImageFieldIDs = []; clearedMixedFieldIDs = []; patchDisplayFieldIDs = []; changedToolCells = [:]; changedSeriesPages = []
             return true
         }
+        catch is CancellationError {
+            if loadedRevision == loadRevision { self.error = nil }
+            return false
+        }
         catch { if loadedRevision == loadRevision { self.error = L10n.text(error.localizedDescription) }; return false }
     }
     @discardableResult func saveLoadedModel() async -> Bool { await save(asset) }
@@ -2395,7 +2903,7 @@ final class ModelEditorSession: ObservableObject {
                                           documentXML: String, submittedProjectXML: String,
                                           descriptionDraft: String) throws -> BoundaryInitialConditionsCapture {
         guard loaded, canEdit, !isSaving, !isPerforming, !loadingSelection, !isRefreshingContext,
-              !workspaceWriteLocked(), !hasIncompleteEditorInput,
+              !isWriteLocked, !hasIncompleteEditorInput,
               let asset, asset.section == .boundaryConditions, let sourceRevision,
               let backend = provider as? BackendModelProvider,
               let project = backend.project, project.url?.standardizedFileURL == projectURL.standardizedFileURL,
@@ -2416,7 +2924,8 @@ final class ModelEditorSession: ObservableObject {
             projectXml: submittedProjectXML, sourceState: base.sourceState,
             rows: base.rows, samples: base.samples, planTimeWindowEdits: base.planTimeWindowEdits,
             geometryTopologyState: base.geometryTopologyState,
-            geometryMeshState: base.geometryMeshState, geometryCulvertState: base.geometryCulvertState)
+            geometryMeshState: base.geometryMeshState, geometryCulvertState: base.geometryCulvertState,
+            coreLayerContext: base.coreLayerContext)
         return BoundaryInitialConditionsCapture(
             id: UUID().uuidString.lowercased(), projectSessionID: projectSessionID,
             editorID: id, loadRevision: loadRevision, editRevision: editRevision,
@@ -2432,7 +2941,7 @@ final class ModelEditorSession: ObservableObject {
                                                     projectRevision: String, documentXML: String,
                                                     submittedProjectXML: String) -> Bool {
         guard loaded, canEdit, !isSaving, !isPerforming, !loadingSelection, !isRefreshingContext,
-              !workspaceWriteLocked(), !hasIncompleteEditorInput,
+              !isWriteLocked, !hasIncompleteEditorInput,
               capture.editorID == id, capture.projectSessionID == projectSessionID,
               capture.loadRevision == loadRevision, capture.editRevision == editRevision,
               capture.asset == asset, capture.asset.section == .boundaryConditions,
@@ -2515,6 +3024,7 @@ final class ModelEditorSession: ObservableObject {
             !changedImageFieldIDs.isEmpty || !changedSamplePages.isEmpty ||
             !changedSeriesPages.isEmpty || !changedTables.isEmpty || sourceState != snapshot.sourceState
         didSave?()
+        didSaveModelSnapshot?(capture.asset, snapshot, capture.model.coreLayerContext, receipt.projectRevision)
         return true
     }
 
@@ -3066,6 +3576,13 @@ final class ModelEditorSession: ObservableObject {
     @discardableResult func importClassification(_ files: [ClassificationImportFile]) async -> Bool { await save(asset, classificationImport: files) }
     @discardableResult func importGrid(_ selection: SpatialGridSelection) async -> Bool { await save(asset, gridImport: selection) }
     @discardableResult
+    func importGrid(_ selection: SpatialGridSelection,
+                    progress: @escaping @MainActor @Sendable (BackendProgressUpdate) -> Void,
+                    cancellationAvailable: @escaping GridImportCancellationInstaller) async -> Bool {
+        await save(asset, gridImport: selection, gridProgress: progress,
+            gridCancellationAvailable: cancellationAvailable)
+    }
+    @discardableResult
     func importCumulusGrid(_ selection: CumulusGridImportSelection,
                            progress: @escaping @MainActor (BackendProgressUpdate) -> Void) async -> Bool {
         guard asset?.section == .boundaryConditions, spatialPresentations[selection.layerId] != nil,
@@ -3073,7 +3590,11 @@ final class ModelEditorSession: ObservableObject {
         return await save(asset, cumulusImport: selection, cumulusProgress: progress)
     }
     func discardEdits() {
-        guard !isBusy, let baseline else { return }
+        guard !workspaceWriteLocked(), !isSaving, !isPerforming, !isTerrainInputImportRunning,
+              planCompute?.isRunning != true, !hasPendingGeometryEdit,
+              geometryMesh?.isSavingDiagnosticsPreferences != true,
+              resultPlanSettings?.isBusy != true,
+              let baseline else { return }
         let terrainDraftToDiscard = terrainInputImportDraftToken ?? terrainInputImportCleanupToken
         let terrainAssetToDiscard = asset
         geometryMesh?.discardDiagnosticsPreferences()

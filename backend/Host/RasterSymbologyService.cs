@@ -10,6 +10,7 @@ using Geospatial.IO;
 using Geospatial.Rasters;
 using Geospatial.Rendering;
 using Geospatial.Rendering.Layers;
+using Geospatial.Rendering.Layers.Attributes;
 using Geospatial.Transformers;
 using Geospatial.Vectors;
 
@@ -19,7 +20,18 @@ public sealed record RasterMapSourceIdentity(
     string Id, string ProjectPath, string VisualizationPath, string VisualizationRevision,
     int MapIndex, string MapName, string MapType, int[] NodePath, string NodeName,
     string MapLayerType, string? Filename, string? FilenameRelative, string SourcePath,
-    string? SourceMapID = null, string? SourceRevision = null);
+    string? SourceMapID = null, string? SourceRevision = null,
+    GdbRasterSymbologyIdentity? GdbSource = null);
+
+/// <summary>
+/// Exact source owner for a raster stored as a subdataset in a file geodatabase.
+/// The directory manifest and persisted map-tree locator are required alongside
+/// the outer raster descriptor; a connection string alone is not an identity.
+/// </summary>
+public sealed record GdbRasterSymbologyIdentity(
+    MapTreeRequest Map,
+    CatalogTreeNodeLocator Node,
+    GdbMapSourceIdentity Source);
 
 public sealed record RasterMapViewExtent(double MinX, double MinY, double MaxX, double MaxY,
     int PixelWidth = 1024, int PixelHeight = 1024);
@@ -30,7 +42,12 @@ public sealed record RasterSymbologyDraftContract(string? PaletteID, string Name
 public sealed record RasterSymbologyPalette(string Id, string Name, string[] Colors,
     double[]? Values = null, bool IsCustom = false);
 public sealed record RasterSymbologySnapshotContract(RasterSymbologyDraftContract Draft,
-    RasterSymbologyPalette[] Palettes, double[]? SurfaceFillValues);
+    RasterSymbologyPalette[] Palettes, double[]? SurfaceFillValues,
+    RasterPlotOptionDescriptor[] PlotOptions);
+public sealed record RasterPlotOptionChoice(string Value, string Label);
+public sealed record RasterPlotOptionDescriptor(string PropertyName, string Name, string Label,
+    string Description, string Kind, string Value, RasterPlotOptionChoice[] EnumValues,
+    bool IsEnabled, string? EnabledIf);
 public sealed record RasterMapLayerPayload(string Id, string? SourceMapID, string Name, int Width,
     int Height, byte[] Rgba, double MinX, double MinY, double MaxX, double MaxY);
 public sealed record RasterSymbologyInspectResult(string PreviousVisualizationRevision,
@@ -49,7 +66,8 @@ public sealed record RasterSymbologyHistogramRequest(RasterMapSourceIdentity Sou
 public sealed record RasterSymbologySelectPaletteRequest(RasterMapSourceIdentity Source,
     string? ProjectXml, string PaletteID, RasterSymbologyDraftContract Draft);
 public sealed record RasterSymbologyApplyRequest(RasterMapSourceIdentity Source,
-    string? ProjectXml, RasterSymbologyDraftContract Draft);
+    string? ProjectXml, RasterSymbologyDraftContract Draft,
+    Dictionary<string, string>? PlotOptions = null);
 public sealed record RasterSymbologySavePaletteRequest(RasterMapSourceIdentity Source,
     string? ProjectXml, RasterSymbologyDraftContract Draft, string Name);
 public sealed record RasterSymbologyDeletePaletteRequest(RasterMapSourceIdentity Source,
@@ -60,7 +78,7 @@ public sealed record RasterSymbologyDeletePaletteRequest(RasterMapSourceIdentity
 /// layers. Every request re-resolves its exact map/node identity from disk before
 /// reading a source raster or replacing any visualization XML.
 /// </summary>
-public static class RasterSymbologyService
+public static partial class RasterSymbologyService
 {
     private const int MaximumRasterSide = 1536;
     private const long MaximumVisualizationBytes = 32L * 1024 * 1024;
@@ -72,154 +90,171 @@ public static class RasterSymbologyService
 
     private static RasterSymbologyInspectResult Inspect(RasterSymbologyRequest request, bool includeRasterInfoStats)
     {
-        using var context = Open(request.Source, request.ProjectXml);
-        var symbology = ReadSymbology(context.SourceNode.Element("RasterSymbology"), context.Raster,
-            context.SourceRoot, out string valueSource);
-        var snapshot = MakeSnapshot(context, symbology, valueSource);
-        var raster = Render(context, symbology, null);
-        RasterImportContextSource? rasterInfoStats = null;
-        if (includeRasterInfoStats)
+        return WithContext<RasterSymbologyInspectResult>(request.Source, request.ProjectXml, context =>
         {
-            rasterInfoStats = RasterImportContextPropertiesService.Inspect(
-                new RasterImportContextPropertiesRequest([context.SourcePath])).Sources.Single();
-            if (!PathEquals(rasterInfoStats.Path, context.SourcePath) ||
-                !rasterInfoStats.Revision.Equals(context.SourceRevision, StringComparison.OrdinalIgnoreCase))
-                throw new SourceFileChangedException();
-        }
-        VerifySourceRevision(context);
-        return new(context.PreviousVisualizationRevision, context.VisualizationRevision,
-            context.SourceRevision, snapshot, raster, rasterInfoStats);
+            var symbology = ReadSymbology(context.SourceNode.Element("RasterSymbology"), context.Raster,
+                context.SourceRoot, out string valueSource);
+            var snapshot = MakeSnapshot(context, symbology, valueSource);
+            var raster = Render(context, symbology, null);
+            RasterImportContextSource? rasterInfoStats = null;
+            if (includeRasterInfoStats && context.GdbSource is null)
+            {
+                rasterInfoStats = RasterImportContextPropertiesService.Inspect(
+                    new RasterImportContextPropertiesRequest([context.SourcePath])).Sources.Single();
+                if (!PathEquals(rasterInfoStats.Path, context.SourcePath))
+                    throw new SourceFileChangedException();
+                // Statistics carry the properties helper's root-file SHA. The
+                // map source identity uses GDAL's full local dataset manifest,
+                // so expose that stable revision after the full post-read check.
+                rasterInfoStats = rasterInfoStats with { Revision = context.SourceRevision };
+            }
+            VerifySourceRevision(context);
+            return new(context.PreviousVisualizationRevision, context.VisualizationRevision,
+                context.SourceRevision, snapshot, raster, rasterInfoStats);
+        });
     }
 
     public static double[] Histogram(RasterSymbologyHistogramRequest request)
     {
         ValidateCount(request.Count);
-        using var context = Open(request.Source, request.ProjectXml);
-        if (request.ForView)
+        return WithContext<double[]>(request.Source, request.ProjectXml, context =>
         {
-            if (request.Viewport is not RasterMapViewExtent viewport)
-                throw new ArgumentException("A current map extent is required to update the histogram for this view.");
-            ValidateExtent(viewport);
-            var requestedExtent = new Extent(viewport.MinX, viewport.MaxX, viewport.MinY, viewport.MaxY);
-            double[] values = InterpolatedSurfaceFill.EstimateColorValuesFrom(context.Raster, requestedExtent, request.Count).ToArray();
+            if (request.ForView)
+            {
+                if (request.Viewport is not RasterMapViewExtent viewport)
+                    throw new ArgumentException("A current map extent is required to update the histogram for this view.");
+                ValidateExtent(viewport);
+                var requestedExtent = new Extent(viewport.MinX, viewport.MaxX, viewport.MinY, viewport.MaxY);
+                double[] values = InterpolatedSurfaceFill.EstimateColorValuesFrom(context.Raster, requestedExtent, request.Count).ToArray();
+                VerifySourceRevision(context);
+                return values;
+            }
+            double[] histogramValues = InterpolatedSurfaceFill.EstimateColorValuesFrom(context.Raster, request.Count).ToArray();
             VerifySourceRevision(context);
-            return values;
-        }
-        double[] histogramValues = InterpolatedSurfaceFill.EstimateColorValuesFrom(context.Raster, request.Count).ToArray();
-        VerifySourceRevision(context);
-        return histogramValues;
+            return histogramValues;
+        });
     }
 
     public static RasterSymbologyDraftResult SelectPalette(RasterSymbologySelectPaletteRequest request)
     {
-        using var context = Open(request.Source, request.ProjectXml);
-        var palettes = ReadPalettes(context.SourceRoot);
-        var palette = palettes.FirstOrDefault(candidate => candidate.Id == request.PaletteID)
-            ?? throw new ArgumentException("The selected raster palette is no longer available.");
-        var colors = palette.Colors;
-        if (colors.Length == 0) throw new ArgumentException("The selected raster palette has no colors.");
-        double[] values;
-        if (string.Equals(request.Draft.ValueSource, "Histogram", StringComparison.OrdinalIgnoreCase))
+        return WithContext<RasterSymbologyDraftResult>(request.Source, request.ProjectXml, context =>
         {
-            values = InterpolatedSurfaceFill.EstimateColorValuesFrom(context.Raster, colors.Length).ToArray();
-        }
-        else if (palette.Values is { Length: > 1 } savedValues && savedValues.Length == colors.Length)
-        {
-            values = savedValues;
-        }
-        else if (request.Draft.Stops.Length > 1)
-        {
-            double first = request.Draft.Stops[0].Value;
-            double last = request.Draft.Stops[^1].Value;
-            values = Enumerable.Range(0, colors.Length)
-                .Select(index => first + (last - first) * index / (colors.Length - 1d)).ToArray();
-        }
-        else
-        {
-            values = InterpolatedSurfaceFill.EstimateColorValuesFrom(context.Raster, colors.Length).ToArray();
-        }
-        var draft = request.Draft with
-        {
-            PaletteID = palette.Id,
-            Name = palette.Name,
-            Stops = colors.Select((color, index) => new RasterSymbologyColorStop(
-                index < request.Draft.Stops.Length ? request.Draft.Stops[index].Id : Guid.NewGuid(),
-                color, values[index])).ToArray(),
-            Grayscale = palette.Id.Equals("Grayscale", StringComparison.OrdinalIgnoreCase)
-        };
-        VerifySourceRevision(context);
-        return new(draft);
+            var palettes = ReadPalettes(context.SourceRoot);
+            var palette = palettes.FirstOrDefault(candidate => candidate.Id == request.PaletteID)
+                ?? throw new ArgumentException("The selected raster palette is no longer available.");
+            var colors = palette.Colors;
+            if (colors.Length == 0) throw new ArgumentException("The selected raster palette has no colors.");
+            double[] values;
+            if (string.Equals(request.Draft.ValueSource, "Histogram", StringComparison.OrdinalIgnoreCase))
+            {
+                values = InterpolatedSurfaceFill.EstimateColorValuesFrom(context.Raster, colors.Length).ToArray();
+            }
+            else if (palette.Values is { Length: > 1 } savedValues && savedValues.Length == colors.Length)
+            {
+                values = savedValues;
+            }
+            else if (request.Draft.Stops.Length > 1)
+            {
+                double first = request.Draft.Stops[0].Value;
+                double last = request.Draft.Stops[^1].Value;
+                values = Enumerable.Range(0, colors.Length)
+                    .Select(index => first + (last - first) * index / (colors.Length - 1d)).ToArray();
+            }
+            else
+            {
+                values = InterpolatedSurfaceFill.EstimateColorValuesFrom(context.Raster, colors.Length).ToArray();
+            }
+            var draft = request.Draft with
+            {
+                PaletteID = palette.Id,
+                Name = palette.Name,
+                Stops = colors.Select((color, index) => new RasterSymbologyColorStop(
+                    index < request.Draft.Stops.Length ? request.Draft.Stops[index].Id : Guid.NewGuid(),
+                    color, values[index])).ToArray(),
+                Grayscale = palette.Id.Equals("Grayscale", StringComparison.OrdinalIgnoreCase)
+            };
+            VerifySourceRevision(context);
+            return new(draft);
+        });
     }
 
     public static RasterSymbologySnapshotResult Reset(RasterSymbologyRequest request)
     {
-        using var context = Open(request.Source, request.ProjectXml);
-        var defaultLayer = new RasterRenderLayer(context.Raster);
-        RasterSymbology defaultSymbology = defaultLayer.GetDefaultTerrainHistoSymbology();
-        var snapshot = MakeSnapshot(context, defaultSymbology, "Histogram");
-        VerifySourceRevision(context);
-        return new(context.PreviousVisualizationRevision, context.VisualizationRevision,
-            context.SourceRevision, snapshot);
+        return WithContext<RasterSymbologySnapshotResult>(request.Source, request.ProjectXml, context =>
+        {
+            var defaultLayer = new RasterRenderLayer(context.Raster);
+            RasterSymbology defaultSymbology = defaultLayer.GetDefaultTerrainHistoSymbology();
+            var snapshot = MakeSnapshot(context, defaultSymbology, "Histogram");
+            VerifySourceRevision(context);
+            return new(context.PreviousVisualizationRevision, context.VisualizationRevision,
+                context.SourceRevision, snapshot);
+        });
     }
 
     public static RasterSymbologyApplyResult Apply(RasterSymbologyApplyRequest request)
     {
         ValidateDraft(request.Draft);
-        using var context = Open(request.Source, request.ProjectXml);
-        var symbology = ApplyDraftToCurrent(context.SourceNode.Element("RasterSymbology"), request.Draft,
-            context.Raster, context.SourceRoot);
-        RasterMapLayerPayload raster = Render(context, symbology, null);
-        VerifySourceRevision(context);
-        WriteRasterSymbology(context.SourceNode, request.Draft);
-        string newRevision = Commit(context);
-        return new(context.VisualizationRevision, newRevision, context.SourceRevision, raster);
+        return WithContext<RasterSymbologyApplyResult>(request.Source, request.ProjectXml, context =>
+        {
+            var symbology = ApplyDraftToCurrent(context.SourceNode.Element("RasterSymbology"), request.Draft,
+                context.Raster, context.SourceRoot);
+            RasterMapLayerPayload raster = Render(context, symbology, null, request.PlotOptions);
+            VerifySourceRevision(context);
+            WriteRasterSymbology(context.SourceNode, request.Draft);
+            string newRevision = Commit(context);
+            return new(context.PreviousVisualizationRevision, newRevision, context.SourceRevision, raster);
+        });
     }
 
     public static RasterSymbologyPalettesResult SavePalette(RasterSymbologySavePaletteRequest request)
     {
         ValidateDraft(request.Draft);
         string name = ValidatePaletteName(request.Name);
-        using var context = Open(request.Source, request.ProjectXml);
-        var all = ReadPalettes(context.SourceRoot);
-        if (all.Any(palette => !palette.IsCustom && palette.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
-            throw new ArgumentException("A default palette already uses that name.");
-        var root = EnsureSymbologyRoot(context.VisualizationRoot);
-        root.Elements("CustomSymbology").Where(element =>
-            string.Equals(element.Attribute("Name")?.Value, name, StringComparison.OrdinalIgnoreCase)).Remove();
-        var paletteNode = new XElement("CustomSymbology",
-            new XAttribute("Name", name),
-            new XAttribute("ValueSource", NormalizeValueSource(request.Draft.ValueSource)),
-            new XAttribute("IsChanged", true));
-        for (int index = 0; index < request.Draft.Stops.Length; index++)
+        return WithContext<RasterSymbologyPalettesResult>(request.Source, request.ProjectXml, context =>
         {
-            var stop = request.Draft.Stops[index];
-            var color = ParseColor(stop.Color);
-            var node = new XElement("Color", new XAttribute("R", color.R),
-                new XAttribute("G", color.G), new XAttribute("B", color.B));
-            if (ValueIsPersisted(request.Draft.ValueSource, index, request.Draft.Stops.Length))
-                node.SetAttributeValue("Value", stop.Value.ToString("R", CultureInfo.InvariantCulture));
-            paletteNode.Add(node);
-        }
-        root.Add(paletteNode);
-        VerifySourceRevision(context);
-        string newRevision = Commit(context);
-        return new(context.VisualizationRevision, newRevision, context.SourceRevision,
-            ReadPalettes(context.Visualization));
+            var all = ReadPalettes(context.SourceRoot);
+            if (all.Any(palette => !palette.IsCustom && palette.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                throw new ArgumentException("A default palette already uses that name.");
+            var root = EnsureSymbologyRoot(context.VisualizationRoot);
+            root.Elements("CustomSymbology").Where(element =>
+                string.Equals(element.Attribute("Name")?.Value, name, StringComparison.OrdinalIgnoreCase)).Remove();
+            var paletteNode = new XElement("CustomSymbology",
+                new XAttribute("Name", name),
+                new XAttribute("ValueSource", NormalizeValueSource(request.Draft.ValueSource)),
+                new XAttribute("IsChanged", true));
+            for (int index = 0; index < request.Draft.Stops.Length; index++)
+            {
+                var stop = request.Draft.Stops[index];
+                var color = ParseColor(stop.Color);
+                var node = new XElement("Color", new XAttribute("R", color.R),
+                    new XAttribute("G", color.G), new XAttribute("B", color.B));
+                if (ValueIsPersisted(request.Draft.ValueSource, index, request.Draft.Stops.Length))
+                    node.SetAttributeValue("Value", stop.Value.ToString("R", CultureInfo.InvariantCulture));
+                paletteNode.Add(node);
+            }
+            root.Add(paletteNode);
+            VerifySourceRevision(context);
+            string newRevision = Commit(context);
+            return new(context.PreviousVisualizationRevision, newRevision, context.SourceRevision,
+                ReadPalettes(context.Visualization));
+        });
     }
 
     public static RasterSymbologyPalettesResult DeletePalette(RasterSymbologyDeletePaletteRequest request)
     {
-        using var context = Open(request.Source, request.ProjectXml);
-        var root = context.VisualizationRoot.Element("Symbology");
-        var target = root?.Elements("CustomSymbology").FirstOrDefault(element =>
-            PaletteID(element.Attribute("Name")?.Value ?? "") == request.PaletteID ||
-            string.Equals(element.Attribute("Name")?.Value, request.PaletteID, StringComparison.Ordinal));
-        if (target is null) throw new ArgumentException("Only a saved custom palette can be deleted.");
-        target.Remove();
-        VerifySourceRevision(context);
-        string newRevision = Commit(context);
-        return new(context.VisualizationRevision, newRevision, context.SourceRevision,
-            ReadPalettes(context.Visualization));
+        return WithContext<RasterSymbologyPalettesResult>(request.Source, request.ProjectXml, context =>
+        {
+            var root = context.VisualizationRoot.Element("Symbology");
+            var target = root?.Elements("CustomSymbology").FirstOrDefault(element =>
+                PaletteID(element.Attribute("Name")?.Value ?? "") == request.PaletteID ||
+                string.Equals(element.Attribute("Name")?.Value, request.PaletteID, StringComparison.Ordinal));
+            if (target is null) throw new ArgumentException("Only a saved custom palette can be deleted.");
+            target.Remove();
+            VerifySourceRevision(context);
+            string newRevision = Commit(context);
+            return new(context.PreviousVisualizationRevision, newRevision, context.SourceRevision,
+                ReadPalettes(context.Visualization));
+        });
     }
 
     private static RasterSymbologySnapshotContract MakeSnapshot(OperationContext context,
@@ -235,7 +270,8 @@ public static class RasterSymbologyService
         var draft = new RasterSymbologyDraftContract(paletteID, surfaceFill.Name ?? "", stops,
             NormalizeValueSource(valueSource), paletteID == "Grayscale", false, false,
             context.Raster.ValidExtent.IsFiniteAndValid());
-        return new(draft, palettes, surfaceFill.ColorValues);
+        return new(draft, palettes, surfaceFill.ColorValues,
+            DescribeRasterPlotOptions(context.Raster, symbology));
     }
 
     private static RasterSymbology ReadSymbology(XElement? node, IResample<float> raster,
@@ -337,7 +373,7 @@ public static class RasterSymbologyService
     }
 
     private static RasterMapLayerPayload Render(OperationContext context, RasterSymbology symbology,
-        RasterMapViewExtent? viewport)
+        RasterMapViewExtent? viewport, Dictionary<string, string>? plotOptions = null)
     {
         Extent bounds = context.Raster.ValidExtent;
         if (!bounds.IsFiniteAndValid()) throw new NotSupportedException("The raster has no finite map extent.");
@@ -361,10 +397,14 @@ public static class RasterSymbologyService
             height = Math.Clamp((int)Math.Round(baseDef.Rows * factor), 1, MaximumRasterSide);
         }
         var definition = new RasterDefinition(bounds, height, width);
-        var values = new float[definition.CellCount];
-        context.Raster.Resample(new ResampleArgs(definition, symbology.InterpolationMode), values);
-        var colors = new int[definition.CellCount];
-        if (symbology.IsSurfaceFillEnabled) symbology.PaintSurface(values, colors, context.Raster.NoDataValue ?? -9999f);
+        var renderer = new RasterRenderLayer(context.Raster, symbology);
+        Dictionary<string, (PlotOption Option, PropertyInfo Property)> options = renderer.GetPlotOptions()
+            .ToDictionary(pair => pair.Key.Name, pair => (pair.Key, pair.Value), StringComparer.Ordinal);
+        ApplyRasterPlotOptions(renderer, options, plotOptions ?? []);
+        using PlotRequest plot = renderer.Render(definition);
+        Span<int> colors = plot.ColorBufferARGB.Span;
+        if (colors.Length != definition.CellCount)
+            throw new InvalidDataException("The retained raster renderer returned an incomplete pixel buffer.");
         byte[] rgba = new byte[checked(colors.Length * 4)];
         for (int index = 0; index < colors.Length; index++)
         {
@@ -376,6 +416,75 @@ public static class RasterSymbologyService
         }
         return new(context.Source.Id, context.Source.SourceMapID, context.Source.NodeName,
             width, height, rgba, bounds.MinX, bounds.MinY, bounds.MaxX, bounds.MaxY);
+    }
+
+    private static RasterPlotOptionDescriptor[] DescribeRasterPlotOptions(IResample<float> raster,
+        RasterSymbology symbology)
+    {
+        var renderer = new RasterRenderLayer(raster, symbology);
+        Dictionary<string, (PlotOption Option, PropertyInfo Property)> options = renderer.GetPlotOptions()
+            .ToDictionary(pair => pair.Key.Name, pair => (pair.Key, pair.Value), StringComparer.Ordinal);
+        return options.Select(pair =>
+        {
+            PlotOption sourceOption = pair.Value.Option;
+            PropertyInfo property = pair.Value.Property;
+            bool enabled = IsRasterPlotOptionEnabled(renderer, sourceOption);
+            object? current = property.GetValue(renderer);
+            string value = current switch
+            {
+                bool boolean => boolean ? "true" : "false",
+                Enum enumeration => enumeration.ToString(),
+                _ => throw new InvalidDataException("The retained raster renderer exposed an unsupported PlotOption type.")
+            };
+            if (property.PropertyType == typeof(bool))
+                return new RasterPlotOptionDescriptor(property.Name, sourceOption.Name, sourceOption.Label,
+                    sourceOption.Description, "bool", value, [], IsEnabled: enabled, EnabledIf: sourceOption.EnabledIf);
+            RasterPlotOptionChoice[] choices = Enum.GetNames(property.PropertyType).Select(name =>
+            {
+                MemberInfo member = property.PropertyType.GetMember(name).First();
+                return new RasterPlotOptionChoice(name,
+                    member.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()?.Description ?? name);
+            }).ToArray();
+            return new RasterPlotOptionDescriptor(property.Name, sourceOption.Name, sourceOption.Label,
+                sourceOption.Description, "enum", value, choices, IsEnabled: enabled, EnabledIf: sourceOption.EnabledIf);
+        }).OrderBy(option => option.PropertyName, StringComparer.Ordinal).ToArray();
+    }
+
+    private static void ApplyRasterPlotOptions(RasterRenderLayer renderer,
+        Dictionary<string, (PlotOption Option, PropertyInfo Property)> sourceOptions,
+        Dictionary<string, string> values)
+    {
+        foreach ((string name, string value) in values)
+        {
+            if (!sourceOptions.TryGetValue(name, out var sourceOption))
+                throw new ArgumentException($"The RasterRenderLayer has no PlotOption named '{name}'.");
+            Type type = sourceOption.Property.PropertyType;
+            object parsed;
+            if (type == typeof(bool) && bool.TryParse(value, out bool boolean)) parsed = boolean;
+            else if (type.IsEnum && Enum.TryParse(type, value, ignoreCase: false, out object? enumeration)
+                     && enumeration is not null && Enum.IsDefined(type, enumeration)) parsed = enumeration;
+            else throw new ArgumentException($"PlotOption '{name}' has an unsupported value.");
+            sourceOption.Property.SetValue(renderer, parsed);
+        }
+        foreach (string name in values.Keys)
+        {
+            PlotOption option = sourceOptions[name].Option;
+            if (string.IsNullOrWhiteSpace(option.EnabledIf)) continue;
+            PropertyInfo? gate = renderer.GetType().GetProperty(option.EnabledIf,
+                BindingFlags.Instance | BindingFlags.Public);
+            if (gate?.PropertyType != typeof(bool) || gate.GetValue(renderer) is not true)
+                throw new ArgumentException($"PlotOption '{name}' is unavailable for the current renderer state.");
+        }
+    }
+
+    private static bool IsRasterPlotOptionEnabled(RasterRenderLayer renderer, PlotOption option)
+    {
+        if (string.IsNullOrWhiteSpace(option.EnabledIf)) return true;
+        PropertyInfo? gate = renderer.GetType().GetProperty(option.EnabledIf,
+            BindingFlags.Instance | BindingFlags.Public);
+        if (gate?.PropertyType != typeof(bool))
+            throw new InvalidOperationException($"Raster PlotOption condition '{option.EnabledIf}' is not a Boolean source property.");
+        return gate.GetValue(renderer) is true;
     }
 
     private static OperationContext Open(RasterMapSourceIdentity source, string? projectXml)
@@ -427,7 +536,7 @@ public static class RasterSymbologyService
         if (!PathEquals(CanonicalPath(source.SourcePath), CanonicalPath(resolved)))
             throw new ArgumentException("The raster source path does not match the current visualization node.");
         if (!File.Exists(resolved)) throw new FileNotFoundException("The source raster was not found.", resolved);
-        string sourceRevision = RevisionFile(resolved);
+        string sourceRevision = MapRasterLayerSourceManifest.CaptureRevision(resolved);
         if (source.SourceRevision is not null && !source.SourceRevision.Equals(sourceRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
 
@@ -441,8 +550,6 @@ public static class RasterSymbologyService
             if (!result.Result) throw new ArgumentException("The current project projection could not be evaluated.");
         }
         using var gdal = new GDALRaster(resolved);
-        if (gdal.DriverShortName.Equals("VRT", StringComparison.OrdinalIgnoreCase))
-            throw new NotSupportedException("VRT raster sources are not supported because their external dependencies cannot be tracked. Convert the source to a single-file GeoTIFF and reconnect it.");
         Type dataType = gdal.GetDataType();
         if (gdal.GetBandCount() != 1) throw new NotSupportedException("Only single-band rasters are supported.");
         if (!dataType.IsEquivalentTo(typeof(float)) && !dataType.IsEquivalentTo(typeof(double)))
@@ -473,6 +580,142 @@ public static class RasterSymbologyService
             cleanup?.Dispose();
             throw;
         }
+    }
+
+    private static T WithContext<T>(RasterMapSourceIdentity source, string? projectXml,
+        Func<OperationContext, T> operation)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(operation);
+        if (source.GdbSource is null)
+        {
+            using OperationContext context = Open(source, projectXml);
+            return operation(context);
+        }
+
+        GdbRasterSymbologyIdentity identity = source.GdbSource;
+        MapTreeRequest map = CreateGdbMapRequest(identity.Map, projectXml);
+        CatalogTreeNodeLocator node = identity.Node;
+        ValidateGdbOuterIdentity(source, identity, map, node);
+
+        var request = new GdbRasterSourceLoadRequest(map, node, identity.Source);
+        (T Result, OperationContext Context) staged = GdbRasterSourceService.WithOpenedRasterSource(
+            request, opened =>
+            {
+                OperationContext context = OpenGdb(source, map, identity, opened);
+                try
+                {
+                    T result = operation(context);
+                    return (result, context);
+                }
+                catch
+                {
+                    context.Dispose();
+                    throw;
+                }
+            });
+
+        try
+        {
+            if (staged.Context.PendingVisualizationBytes is not null)
+                CommitStagedGdbVisualization(staged.Context);
+            return staged.Result;
+        }
+        finally
+        {
+            staged.Context.Dispose();
+        }
+    }
+
+    private static MapTreeRequest CreateGdbMapRequest(MapTreeRequest capture,
+        string? requestProjectXml)
+    {
+        if (!string.Equals(capture.ProjectXml, requestProjectXml, StringComparison.Ordinal))
+            throw new SourceFileChangedException();
+        return capture;
+    }
+
+    private static void ValidateGdbOuterIdentity(RasterMapSourceIdentity source,
+        GdbRasterSymbologyIdentity identity, MapTreeRequest map, CatalogTreeNodeLocator node)
+    {
+        if (source.MapLayerType != "SingleBandRasterMapLayer" ||
+            source.NodePath is null || node.NodePath is null || !source.NodePath.SequenceEqual(node.NodePath) ||
+            source.Id != SourceID(source.MapIndex, source.NodePath) || source.NodeName != node.NodeName ||
+            source.MapIndex != map.MapIndex || source.MapName != map.MapName || source.MapType != map.MapType ||
+            source.VisualizationRevision != map.ExpectedVisualizationRevision ||
+            !MapIDsMatch(source.SourceMapID, map.MapID) ||
+            !PathEquals(source.ProjectPath, map.ProjectPath) ||
+            !PathEquals(source.VisualizationPath, Path.ChangeExtension(map.ProjectPath, ".vis")) ||
+            !PathEquals(source.SourcePath, identity.Source.SourcePath) ||
+            source.SourceRevision is null ||
+            !source.SourceRevision.Equals(identity.Source.Revision, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(source.Filename, node.Filename, StringComparison.Ordinal) ||
+            !string.Equals(source.FilenameRelative, node.FilenameRelative, StringComparison.Ordinal) ||
+            node.NodeType != "MapLayer" || node.MapType != "SingleBandRasterMapLayer" ||
+            string.IsNullOrWhiteSpace(node.Filename) || string.IsNullOrWhiteSpace(node.AssetID) ||
+            !PathEquals(node.AssetID, identity.Source.SourcePath))
+            throw new SourceFileChangedException();
+    }
+
+    private static bool MapIDsMatch(string? sourceMapID, string? mapID)
+    {
+        if (Guid.TryParse(sourceMapID, out Guid sourceGuid) && Guid.TryParse(mapID, out Guid mapGuid))
+            return sourceGuid == mapGuid;
+        return string.Equals(sourceMapID, mapID, StringComparison.Ordinal);
+    }
+
+    private static OperationContext OpenGdb(RasterMapSourceIdentity source, MapTreeRequest map,
+        GdbRasterSymbologyIdentity identity, GdbRasterOpenedSource opened)
+    {
+        if (!SameGdbSource(identity.Source, opened.Capture.Source) ||
+            opened.Capture.Map.MapIndex != source.MapIndex ||
+            !MapIDsMatch(source.SourceMapID, opened.Capture.Map.MapID) ||
+            opened.Capture.Map.MapName != source.MapName || opened.Capture.Map.MapType != source.MapType ||
+            !PathEquals(opened.Capture.Map.ProjectPath, source.ProjectPath) ||
+            !PathEquals(opened.Capture.Map.VisualizationPath, source.VisualizationPath) ||
+            !string.Equals(opened.Capture.Map.VisualizationRevision, source.VisualizationRevision,
+                StringComparison.OrdinalIgnoreCase))
+            throw new SourceFileChangedException();
+
+        XDocument visualization = opened.VisualizationSnapshot;
+        var projectDocument = ReadProjectDocument(source.ProjectPath, map.ProjectXml);
+        Projection? targetProjection = null;
+        XElement? projectionElement = projectDocument.Root?.Element("Projection");
+        if (projectionElement is not null)
+        {
+            var definition = Ras.Layers.ProjectionDefinition.Deserialize(projectionElement);
+            var result = definition.Evaluate(out targetProjection, out _);
+            if (!result.Result) throw new ArgumentException("The current project projection could not be evaluated.");
+        }
+
+        IResample<float> raster = opened.Raster;
+        Projection? sourceProjection = opened.Dataset.GetProjection();
+        if (targetProjection is not null && sourceProjection is not null && !targetProjection.IsEqual(sourceProjection))
+            raster = raster.WithTransformer(new ReprojectionTransformer(sourceProjection, targetProjection));
+
+        return new OperationContext(source, visualization,
+            opened.Capture.Map.VisualizationRevision ?? throw new SourceFileChangedException(),
+            CanonicalPath(source.VisualizationPath), opened.Capture.Source.SourcePath,
+            opened.Capture.Source.Revision, opened.BaseDefinition, raster, null,
+            identity, map, opened.Capture);
+    }
+
+    private static bool SameGdbSource(GdbMapSourceIdentity first, GdbMapSourceIdentity second)
+    {
+        if (!PathEquals(first.SourcePath, second.SourcePath) ||
+            !string.Equals(first.Revision, second.Revision, StringComparison.OrdinalIgnoreCase) ||
+            first.Files.Length != second.Files.Length)
+            return false;
+        for (int index = 0; index < first.Files.Length; index++)
+        {
+            GdbMapSourceFileRevision left = first.Files[index];
+            GdbMapSourceFileRevision right = second.Files[index];
+            if (!string.Equals(left.RelativePath, right.RelativePath, StringComparison.Ordinal) ||
+                left.Length != right.Length ||
+                !string.Equals(left.Revision, right.Revision, StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+        return true;
     }
 
     private static XDocument ReadProjectDocument(string projectPath, string? projectXml)
@@ -529,7 +772,19 @@ public static class RasterSymbologyService
 
     private static string Commit(OperationContext context)
     {
+        if (context.GdbSource is not null)
+        {
+            using var memory = new MemoryStream();
+            context.Visualization.Save(memory, SaveOptions.DisableFormatting);
+            byte[] bytes = memory.ToArray();
+            if (bytes.LongLength > MaximumVisualizationBytes)
+                throw new NotSupportedException("The visualization file is too large to edit.");
+            context.PendingVisualizationBytes = bytes;
+            return Revision(bytes);
+        }
+
         string tempPath = context.VisualizationPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        bool replacementCompleted = false;
         try
         {
             using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
@@ -538,15 +793,79 @@ public static class RasterSymbologyService
                 stream.Flush(flushToDisk: true);
             }
             VerifySourceRevision(context);
-            if (!Revision(File.ReadAllBytes(context.VisualizationPath)).Equals(context.PreviousVisualizationRevision, StringComparison.OrdinalIgnoreCase))
-                throw new SourceFileChangedException();
-            File.Move(tempPath, context.VisualizationPath, overwrite: true);
-            return Revision(File.ReadAllBytes(context.VisualizationPath));
+            string receiptRevision = ReplaceStagedVisualizationFile(tempPath,
+                context.VisualizationPath, context.PreviousVisualizationRevision);
+            replacementCompleted = true;
+            return receiptRevision;
         }
         finally
         {
-            if (File.Exists(tempPath)) File.Delete(tempPath);
+            if (!replacementCompleted && File.Exists(tempPath)) File.Delete(tempPath);
         }
+    }
+
+    private static void CommitStagedGdbVisualization(OperationContext context)
+    {
+        byte[] bytes = context.PendingVisualizationBytes ??
+            throw new InvalidOperationException("The GDB visualization change was not staged.");
+        MapTreeRequest map = context.GdbMap ??
+            throw new InvalidOperationException("The GDB map identity is missing.");
+        GdbRasterNodeCapture capture = context.GdbCapture ??
+            throw new InvalidOperationException("The GDB raster capture is missing.");
+        string expectedRevision = Revision(bytes);
+        string tempPath = context.VisualizationPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        bool replacementCompleted = false;
+        try
+        {
+            using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+
+            VerifySourceRevision(context);
+            if (!RevisionFile(context.VisualizationPath).Equals(
+                    context.PreviousVisualizationRevision, StringComparison.OrdinalIgnoreCase))
+                throw new SourceFileChangedException();
+            GdbRasterSourceService.VerifyCapture(map, capture);
+            GdbMapSourceService.VerifySource(capture.Source);
+
+            // The mutation result already carries SHA256(staged bytes). Validate
+            // the complete read/source/map capture before replacement, then make
+            // the rename the final fallible operation. Reading or validating
+            // after replacement could turn a committed change into a failed RPC
+            // with no receipt for the caller to accept.
+            _ = ReplaceStagedVisualizationFile(tempPath, context.VisualizationPath,
+                context.PreviousVisualizationRevision, expectedRevision);
+            replacementCompleted = true;
+        }
+        finally
+        {
+            if (!replacementCompleted && File.Exists(tempPath)) File.Delete(tempPath);
+        }
+    }
+
+    /// <summary>
+    /// Verifies the staged payload and current file before the rename. Once the
+    /// move succeeds, the staged-byte SHA is the receipt; no post-commit read or
+    /// validation is allowed to turn success into an unreported failure.
+    /// </summary>
+    internal static string ReplaceStagedVisualizationFile(string tempPath, string visualizationPath,
+        string expectedPreviousRevision, string? expectedStagedRevision = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(tempPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(visualizationPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedPreviousRevision);
+
+        string stagedRevision = RevisionFile(tempPath);
+        if (expectedStagedRevision is not null &&
+            !stagedRevision.Equals(expectedStagedRevision, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The staged visualization bytes do not match their receipt revision.");
+        if (!RevisionFile(visualizationPath).Equals(expectedPreviousRevision, StringComparison.OrdinalIgnoreCase))
+            throw new SourceFileChangedException();
+
+        File.Move(tempPath, visualizationPath, overwrite: true);
+        return stagedRevision;
     }
 
     private static RasterSymbologyPalette[] ReadPalettes(XDocument visualization)
@@ -677,7 +996,18 @@ public static class RasterSymbologyService
 
     private static void VerifySourceRevision(OperationContext context)
     {
-        string current = RevisionFile(context.SourcePath);
+        if (context.GdbSource is not null)
+        {
+            GdbRasterNodeCapture capture = context.GdbCapture ??
+                throw new InvalidOperationException("The GDB raster capture is missing.");
+            MapTreeRequest map = context.GdbMap ??
+                throw new InvalidOperationException("The GDB map identity is missing.");
+            GdbMapSourceService.VerifySource(context.GdbSource.Source);
+            GdbRasterSourceService.VerifyCapture(map, capture);
+            return;
+        }
+
+        string current = MapRasterLayerSourceManifest.CaptureRevision(context.SourcePath);
         if (!current.Equals(context.SourceRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
     }
@@ -715,17 +1045,24 @@ public static class RasterSymbologyService
         public string SourceRevision { get; }
         public RasterDefinition SourceRasterDefinition { get; }
         public IResample<float> Raster { get; }
+        public GdbRasterSymbologyIdentity? GdbSource { get; }
+        public MapTreeRequest? GdbMap { get; }
+        public GdbRasterNodeCapture? GdbCapture { get; }
+        public byte[]? PendingVisualizationBytes { get; set; }
         private readonly IDisposable? cleanup;
 
         public OperationContext(RasterMapSourceIdentity source, XDocument visualization,
             string revision, string visualizationPath, string sourcePath, string sourceRevision, RasterDefinition sourceRasterDefinition,
-            IResample<float> raster, IDisposable? cleanup)
+            IResample<float> raster, IDisposable? cleanup,
+            GdbRasterSymbologyIdentity? gdbSource = null, MapTreeRequest? gdbMap = null,
+            GdbRasterNodeCapture? gdbCapture = null)
         {
             Source = source; Visualization = visualization;
             PreviousVisualizationRevision = revision; VisualizationPath = visualizationPath;
             SourcePath = sourcePath;
             SourceRevision = sourceRevision; SourceRasterDefinition = sourceRasterDefinition;
             Raster = raster; this.cleanup = cleanup;
+            GdbSource = gdbSource; GdbMap = gdbMap; GdbCapture = gdbCapture;
             var maps = VisualizationRoot.Element("Maps")?.Elements("Map").ToArray() ?? [];
             var map = maps[source.MapIndex];
             var nodes = map.Element("Tree")?.Element("Nodes")?.Elements("Node").ToArray() ?? [];

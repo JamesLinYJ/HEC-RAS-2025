@@ -58,6 +58,53 @@ struct MapContextComponentsTests {
             for: duplicate, candidates: [exact]).isEmpty)
     }
 
+    @Test
+    func featureRowTargetRequiresCurrentVisibleRowExactLayerAndUniqueIdentity() {
+        let mapID = UUID()
+        let visibleRow = row(mapID: mapID, nodeName: "Roads", context: "road-row",
+            payloadKind: "MapLayer", payloadIDs: ["map-road-node"])
+        let feature = MapFeature(id: 4, kind: .line,
+            paths: [[.init(x: 0, y: 0), .init(x: 1, y: 1)]],
+            attributes: [:], stableIdentity: "source-row/4")
+        let displayedLayer = MapVectorLayer(
+            url: URL(fileURLWithPath: "/tmp/map-context/roads.geojson"),
+            features: [feature], sourceMapID: mapID, sourceRevision: "rev-1",
+            visualIdentity: "map-road-node")
+
+        let target = MapContextComponentFeatureTargetResolver.exactTarget(
+            row: visibleRow, displayedLayer: displayedLayer,
+            featureIdentity: feature.stableIdentity, mapID: mapID,
+            rows: [visibleRow], candidates: [displayedLayer])
+        #expect(target?.row == visibleRow)
+        #expect(target?.layer.id == displayedLayer.id)
+        #expect(target?.feature.stableIdentity == feature.stableIdentity)
+
+        let changedSource = MapVectorLayer(url: displayedLayer.url, features: [feature],
+            sourceMapID: mapID, sourceRevision: "rev-2", visualIdentity: displayedLayer.id)
+        #expect(MapContextComponentFeatureTargetResolver.exactTarget(
+            row: visibleRow, displayedLayer: displayedLayer,
+            featureIdentity: feature.stableIdentity, mapID: mapID,
+            rows: [visibleRow], candidates: [changedSource]) == nil)
+
+        let hiddenRow = row(mapID: mapID, nodeName: "Roads", context: "road-row",
+            payloadKind: "MapLayer", payloadIDs: ["map-road-node"], checked: false)
+        #expect(MapContextComponentFeatureTargetResolver.exactTarget(
+            row: visibleRow, displayedLayer: displayedLayer,
+            featureIdentity: feature.stableIdentity, mapID: mapID,
+            rows: [hiddenRow], candidates: [displayedLayer]) == nil)
+
+        let duplicateFeature = MapFeature(id: 5, kind: .line,
+            paths: [[.init(x: 2, y: 2), .init(x: 3, y: 3)]],
+            attributes: [:], stableIdentity: feature.stableIdentity)
+        let ambiguousLayer = MapVectorLayer(url: displayedLayer.url,
+            features: [feature, duplicateFeature], sourceMapID: mapID,
+            sourceRevision: "rev-1", visualIdentity: displayedLayer.id)
+        #expect(MapContextComponentFeatureTargetResolver.exactTarget(
+            row: visibleRow, displayedLayer: displayedLayer,
+            featureIdentity: feature.stableIdentity, mapID: mapID,
+            rows: [visibleRow], candidates: [ambiguousLayer]) == nil)
+    }
+
     private func row(mapID: UUID, nodeName: String, context: String,
                      family: Int = 0, ordinal: Int = 0, payloadKind: String = "Terrain",
                      payloadIDs: [String] = [], checked: Bool = true,

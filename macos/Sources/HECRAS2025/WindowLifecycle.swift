@@ -56,13 +56,16 @@ final class WorkspaceApplicationDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 private enum CloseDecision { case save, cancel, discard }
 @MainActor
-private func closeDecision(_ store: WorkspaceStore, name: String? = nil) -> CloseDecision {
+private func closeDecision(_ store: WorkspaceStore, name: String? = nil,
+                           allowsSave: Bool = true) -> CloseDecision {
     let alert = NSAlert()
     alert.messageText = L10n.format("Save changes to %@?", name ?? store.document?.name ?? L10n.text("Project"))
     alert.informativeText = L10n.text("Your unsaved edits will be lost if you close without saving.")
-    alert.addButton(withTitle: L10n.text("Save")); alert.addButton(withTitle: L10n.text("Cancel")); alert.addButton(withTitle: L10n.text("Discard"))
+    if allowsSave { alert.addButton(withTitle: L10n.text("Save")) }
+    alert.addButton(withTitle: L10n.text("Cancel")); alert.addButton(withTitle: L10n.text("Discard"))
     switch alert.runModal() {
-    case .alertFirstButtonReturn: return .save
+    case .alertFirstButtonReturn: return allowsSave ? .save : .cancel
+    case .alertSecondButtonReturn: return allowsSave ? .cancel : .discard
     case .alertThirdButtonReturn: return .discard
     default: return .cancel
     }
@@ -114,7 +117,7 @@ struct WindowLifecycleGuard: NSViewRepresentable {
         func windowShouldClose(_ sender: NSWindow) -> Bool {
             if allowNextClose { allowNextClose = false; return originalDelegate?.windowShouldClose?(sender) ?? true }
             guard !closePending, store?.isSavingAll != true, store?.isClosingTab != true, store?.isRunningProjectTool != true else { return false }
-            guard session?.isBusy != true,
+            guard session?.isBusyExceptCoreLayerConflict != true,
                   !(session == nil && guardsProjectChanges && store?.hasBusyModelEditors == true) else { return false }
             if let beforeClose {
                 closePending = true
@@ -125,12 +128,17 @@ struct WindowLifecycleGuard: NSViewRepresentable {
                 return false
             }
             if guardsProjectChanges, let store, session?.hasUnsavedEditorChanges ?? store.hasUnsavedChanges {
-                switch closeDecision(store, name: session?.modelName) {
+                switch closeDecision(store, name: session?.modelName,
+                                     allowsSave: session?.hasCoreLayerReferenceConflict != true) {
                 case .cancel: return false
                 case .discard:
                     if let session {
                         session.discardEdits()
-                        guard !session.hasUnsavedEditorChanges, !session.isBusy else { return false }
+                        if session.hasCoreLayerReferenceConflict {
+                            session.clearCoreLayerReferenceConflictAfterExplicitDiscard()
+                        }
+                        guard !session.hasUnsavedEditorChanges,
+                              !session.isBusyExceptCoreLayerConflict else { return false }
                     }
                     else { guard store.discardAllChanges() else { return false } }
                 case .save:

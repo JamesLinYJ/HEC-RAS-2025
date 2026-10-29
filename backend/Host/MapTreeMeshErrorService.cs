@@ -310,12 +310,11 @@ public static partial class MapTreeService
         if (request.FlowAreaNode.ParentGeometryAssetID is not { Length: > 0 } geometryPath ||
             !SameCanonical(geometryPath, sourcePath)) throw new SourceFileChangedException();
 
-        var project = new Project(request.Map.ProjectPath,
+        var project = CoreLayerImportService.OpenProject(request.Map.ProjectPath,
+            request.Map.ProjectXml, request.Map.CoreLayerContext,
             candidate => readLease?.IsProtected(candidate) != true);
         try
         {
-            if (request.Map.ProjectXml is { Length: > 0 } xml)
-                project.ApplyEditorMetadata(XElement.Parse(xml, LoadOptions.PreserveWhitespace));
             Geometry[] geometries = project.Geometries.Where(geometry =>
                 SameCanonical(geometry.Filename, sourcePath) &&
                 string.Equals(geometry.Name, request.FlowAreaNode.ParentGeometryNodeName, StringComparison.Ordinal)).ToArray();

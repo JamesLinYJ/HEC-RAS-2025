@@ -76,7 +76,73 @@ internal static class MapResultRenderChecks
         CheckComputeLeasePreservesReadableSiblingSlots(directory.FullName);
         MapResultVelocityFieldChecks.Run();
         ExportFixtureIfRequested(directory.FullName);
+        CheckPlotOptions(directory.FullName);
         Console.WriteLine("Map-scoped Result raster rendering, real HDF profile changes, terrain association, RGBA/no-data/ramp metadata, stale context rejection and read-only source checks passed.");
+    }
+
+    private static void CheckPlotOptions(string directory)
+    {
+        string fixtureDirectory = Path.Combine(directory, "plot-options");
+        Directory.CreateDirectory(fixtureDirectory);
+        Fixture fixture = CreateFixture(fixtureDirectory, velocityVariesByProfile: true);
+        XDocument visualization = XDocument.Load(fixture.VisualizationPath, LoadOptions.PreserveWhitespace);
+        XElement resultNode = visualization.Root!.Element("Maps")!.Elements("Map")
+            .ElementAt(fixture.Map.MapIndex).Element("Tree")!.Element("Nodes")!
+            .Descendants("Node").Single(node => (string?)node.Attribute("Type") == "Result");
+        resultNode.SetAttributeValue("SelectedMapType", "Velocity");
+        visualization.Save(fixture.VisualizationPath, SaveOptions.DisableFormatting);
+        MapTreeRequest map = fixture.Map with
+        { ExpectedVisualizationRevision = Hash(fixture.VisualizationPath) };
+        MapResultSourcesResult sources = MapResultChartService.Sources(new(map, []));
+        MapResultActiveNode node = sources.ActiveNodes.Single(item => item.NodeKind == "Result");
+        MapResultSourceChoice selected = node.Selections.Single().SelectedResult
+            ?? throw new InvalidDataException("The velocity option fixture has no selected Result.");
+        RasterMapViewExtent viewport = new(0, 0, 1, 1, 48, 48);
+        byte[] projectBefore = File.ReadAllBytes(fixture.ProjectPath);
+        byte[] visualizationBefore = File.ReadAllBytes(fixture.VisualizationPath);
+        byte[] resultBefore = File.ReadAllBytes(fixture.ResultPath);
+        byte[] terrainBefore = File.ReadAllBytes(fixture.TerrainPath);
+
+        MapResultRenderResult Render(string mode, bool diagnostics = false, bool force = false,
+            string? resultPath = null, string? revision = null) =>
+            MapResultRenderService.Render(new(map, [], sources.ContextToken, node.Node, 1, viewport,
+                RenderOptions:
+                [
+                    new MapResultRenderOptionOverride(0, resultPath ?? selected.ResultPath,
+                        revision ?? selected.Revision, mode, diagnostics, force)
+                ]));
+
+        MapResultRenderResult magnitude = Render("Magnitude");
+        MapResultRenderResult vx = Render("Vx");
+        MapResultRenderResult vy = Render("Vy");
+        MapResultRenderResult diagnostic = Render("Vx", diagnostics: true);
+        MapResultRenderResult forced = Render("Vx", force: true);
+        Check(magnitude.Layers.Single().VelocityDisplay == "Magnitude"
+            && vx.Layers.Single().VelocityDisplay == "Vx"
+            && vy.Layers.Single().VelocityDisplay == "Vy"
+            && magnitude.Layers.Single().SelectionIndices is { } selectionIndices
+            && selectionIndices.SequenceEqual([0]),
+            "The map renderer echoes the exact per-slot VelocityDisplay option on each exact owned raster.");
+        Check(!magnitude.Layers.Single().Rgba.SequenceEqual(vx.Layers.Single().Rgba)
+            && !magnitude.Layers.Single().Rgba.SequenceEqual(vy.Layers.Single().Rgba)
+            && !vx.Layers.Single().Rgba.SequenceEqual(vy.Layers.Single().Rgba),
+            "Magnitude, absolute Vx component and absolute Vy component are rendered by the retained ResultMapRenderLayer and produce distinct source pixels.");
+        Check(diagnostic.Layers.Single().MapDiagnostics
+            && diagnostic.Layers.Single().DiagnosticLabels is { Length: > 0 } diagnosticLabels
+            && diagnosticLabels.All(label =>
+                label.Text.Length > 0 && double.IsFinite(label.X) && double.IsFinite(label.Y)
+                && label.X >= 0 && label.X <= 1 && label.Y >= 0 && label.Y <= 1),
+            "MapDiagnostics returns the retained renderer's face-point ordinals and world coordinates.");
+        Check(forced.Layers.Single().ForceRecomputeMapPoints
+            && forced.Layers.Single().Rgba.SequenceEqual(vx.Layers.Single().Rgba),
+            "ForceRecomputeMapPoints is applied to the retained render layer while preserving deterministic pixels.");
+        Expect<SourceFileChangedException>(() => Render("Magnitude",
+            revision: new string('0', 64)));
+        Check(File.ReadAllBytes(fixture.ProjectPath).SequenceEqual(projectBefore)
+            && File.ReadAllBytes(fixture.VisualizationPath).SequenceEqual(visualizationBefore)
+            && File.ReadAllBytes(fixture.ResultPath).SequenceEqual(resultBefore)
+            && File.ReadAllBytes(fixture.TerrainPath).SequenceEqual(terrainBefore),
+            "Temporary per-slot render options do not write the project, .vis, Result HDF or terrain bytes.");
     }
 
     internal static Fixture CreateFixture(string directory, bool velocityVariesByProfile = false)
@@ -189,7 +255,7 @@ internal static class MapResultRenderChecks
                 .SetAttributeValue("IsChecked", false);
             resultRoot.Add(new XElement("Node", new XAttribute("Type", "MultiResult"),
                 new XAttribute("Name", planName), new XAttribute("IsChecked", true),
-                new XAttribute("SelectedMapType", "Depth"), new XAttribute("ProfileIndex", 0)));
+                new XAttribute("SelectedMapType", "Velocity"), new XAttribute("ProfileIndex", 0)));
             visualization.Save(fixture.VisualizationPath, SaveOptions.DisableFormatting);
 
             byte[] projectBytes = File.ReadAllBytes(fixture.ProjectPath);
@@ -236,15 +302,32 @@ internal static class MapResultRenderChecks
                 "A protected explicit slot remains in the MultiResult selection array while its readable sibling retains index one.");
             MapResultRenderResult writerFirstFrame = MapResultRenderService.Render(new(leasedMap,
                 writerFirstOverrides, writerFirstSources.ContextToken, writerFirstGroup.Node,
-                1, viewport, [0], anchor));
-            Check(writerFirstFrame.Layers.Length == 1
-                && SourceFilePaths.SameSourceFile(writerFirstFrame.Layers[0].ResultPath, stablePath)
-                && writerFirstFrame.Layers[0].ProfileIndex == 1
-                && writerFirstFrame.Sources.Length == 1
-                && writerFirstFrame.Sources[0].SelectionIndices.SequenceEqual([1])
-                && !writerFirstFrame.Sources.Any(status => SourceFilePaths.SameSourceFile(status.ResultPath,
+                1, viewport, [0], anchor,
+                [new MapResultRenderOptionOverride(1, stablePath, stableChoice.Revision,
+                    "Vx", MapDiagnostics: true, ForceRecomputeMapPoints: true)]));
+            Check(writerFirstFrame.Layers.Length == 1,
+                "A callback-owned slot-zero ProfileName/time anchor renders exactly one readable sibling slot.");
+            MapResultRenderLayerPayload renderedSibling = writerFirstFrame.Layers.Single();
+            Check(SourceFilePaths.SameSourceFile(renderedSibling.ResultPath, stablePath),
+                "The anchored raster belongs to the exact readable sibling Result path.");
+            Check(renderedSibling.ProfileIndex == 1,
+                "The readable sibling raster uses the profile matched to the callback-owned keyframe.");
+            Check(renderedSibling.SelectionIndices is { Length: 1 } renderedIndices && renderedIndices[0] == 1,
+                "The sibling raster retains its original slot-one selection identity.");
+            Check(renderedSibling.VelocityDisplay == "Vx",
+                "The exact slot-one Velocity display option is applied to its raster.");
+            Check(renderedSibling.MapDiagnostics,
+                "The exact slot-one MapDiagnostics option is applied to its raster.");
+            Check(renderedSibling.ForceRecomputeMapPoints,
+                "The exact slot-one ForceRecomputeMapPoints option is applied to its raster.");
+            Check(renderedSibling.DiagnosticLabels is { Length: > 0 },
+                "The exact slot-one MapDiagnostics option returns actual diagnostic labels.");
+            Check(writerFirstFrame.Sources.Length == 1 &&
+                  writerFirstFrame.Sources[0].SelectionIndices.SequenceEqual([1]),
+                "Only the readable sibling's slot-one source status is returned.");
+            Check(!writerFirstFrame.Sources.Any(status => SourceFilePaths.SameSourceFile(status.ResultPath,
                     fixture.ResultPath)),
-                "A callback-owned slot-zero ProfileName/time anchors real rendering for the safe slot one without returning writer-owned source status or pixels.");
+                "No writer-owned Result status is returned while slot zero is protected.");
 
             MapResultSelectionOverride[] writerSecondOverrides =
             [
@@ -262,12 +345,18 @@ internal static class MapResultRenderChecks
                 "A protected explicit slot one stays pending without shifting readable slot zero.");
             MapResultRenderResult writerSecondFrame = MapResultRenderService.Render(new(leasedMap,
                 writerSecondOverrides, writerSecondSources.ContextToken, writerSecondGroup.Node,
-                2, viewport, [1]));
+                2, viewport, [1], RenderOptions:
+                [new MapResultRenderOptionOverride(0, stablePath, stableChoice.Revision,
+                    "Vy", MapDiagnostics: false, ForceRecomputeMapPoints: true)]));
             Check(writerSecondFrame.Layers.Length == 1
                 && SourceFilePaths.SameSourceFile(writerSecondFrame.Layers[0].ResultPath, stablePath)
                 && writerSecondFrame.Layers[0].ProfileIndex == 2
+                && writerSecondFrame.Layers[0].SelectionIndices!.SequenceEqual([0])
+                && writerSecondFrame.Layers[0].VelocityDisplay == "Vy"
+                && !writerSecondFrame.Layers[0].MapDiagnostics
+                && writerSecondFrame.Layers[0].ForceRecomputeMapPoints
                 && writerSecondFrame.Sources.Single().SelectionIndices.SequenceEqual([0]),
-                "A safe slot-zero Result keeps its stored timeline and frame while the protected slot one is excluded from rendering.");
+                "A safe slot-zero Result receives only its exact per-slot options and timeline while the protected slot one is excluded from rendering.");
 
             Check(File.ReadAllBytes(fixture.ProjectPath).SequenceEqual(projectBytes)
                 && File.ReadAllBytes(fixture.VisualizationPath).SequenceEqual(visualizationBytes)

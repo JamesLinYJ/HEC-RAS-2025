@@ -27,7 +27,9 @@ public sealed record MapBoundaryGeometryRequest(
     string ExpectedBoundaryRevision,
     string? BoundarySourceState = null,
     string? ExpectedContextToken = null,
-    MapResultGeometryOwner? ResultOwner = null);
+    MapResultGeometryOwner? ResultOwner = null,
+    RasterMapViewExtent? AttachedFacesViewport = null,
+    double RenderScale = 1.0);
 
 /// <summary>
 /// Read-only source line projection for a saved map. SourceOrdinal is the
@@ -57,7 +59,8 @@ public sealed record MapBoundaryGeometrySnapshot(
     bool BoundaryEffectiveVisible,
     string BoundarySourceState,
     MapBoundaryLineData[] Lines,
-    MapResultOwnerIdentity? ResultOwner);
+    MapResultOwnerIdentity? ResultOwner,
+    MapSourceRasterFrame? AttachedFaces = null);
 
 public sealed record MapResultGeometryRequest(
     MapTreeRequest Map,
@@ -111,7 +114,12 @@ public sealed record MapResultCulvertBarrel(
     string ID,
     int SourceOrdinal,
     string Name,
-    MapResultCulvertCoordinate[] Coordinates);
+    MapResultCulvertCoordinate[] Coordinates,
+    string BarrelPropertyName,
+    string UpstreamInvert,
+    string DownstreamInvert,
+    string UpstreamOpeningName,
+    string DownstreamOpeningName);
 
 public sealed record MapResultCulvertProfileSnapshot(
     string ProjectCanonicalPath,

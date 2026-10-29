@@ -23,6 +23,7 @@ struct MapWindVelocityMapRequest: Encodable, Equatable, Sendable {
     let mapType: String
     let expectedVisualizationRevision: String
     let resultSelectionOverrides: [MapTreeResultSelectionOverride]
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 struct MapWindVelocityParticleSource: Equatable, Sendable {

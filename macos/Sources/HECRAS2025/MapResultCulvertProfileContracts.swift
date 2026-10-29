@@ -31,6 +31,11 @@ struct MapResultCulvertBarrel: Decodable, Identifiable, Hashable, Sendable {
     let sourceOrdinal: Int
     let name: String
     let coordinates: [MapResultCulvertCoordinate]
+    let barrelPropertyName: String
+    let upstreamInvert: String
+    let downstreamInvert: String
+    let upstreamOpeningName: String
+    let downstreamOpeningName: String
 }
 
 /// The host returns arrays only when `OutputBlock.TryReadCulvertData` succeeds.

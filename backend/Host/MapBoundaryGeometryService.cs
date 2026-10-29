@@ -1,5 +1,6 @@
 using Ras.Layers;
 using Ras.Observables;
+using Ras.Rendering;
 using Utility.Files;
 
 namespace Ras.Backend;
@@ -40,6 +41,7 @@ public static partial class ModelEditorAdapter
         bool boundaryChecked;
         bool boundaryEffectiveVisible;
         MapResultOwnerIdentity? resultOwnerIdentity = null;
+        MapSourceRasterFrame? attachedFaces = null;
         string contextToken;
 
         if (request.ResultOwner is { } owner)
@@ -67,6 +69,17 @@ public static partial class ModelEditorAdapter
                 boundaryRevision, request.BoundarySourceState);
             BoundaryEditorData snapshot = editor.Snapshot();
             lines = ProjectBoundaryLines(snapshot.Lines);
+            if (request.AttachedFacesViewport is { } attachedFacesViewport)
+            {
+                var baseline = new BoundaryConditionLineRenderLayer(condition.BoundaryConditionLines);
+                var withAttachedFaces = new BoundaryConditionLineRenderLayer(condition.BoundaryConditionLines)
+                {
+                    ShowAttachedFaces = true
+                };
+                attachedFaces = MapSourceRasterRendering.Difference(
+                    baseline, withAttachedFaces, attachedFacesViewport,
+                    renderScale: request.RenderScale);
+            }
             boundarySourceState = editor.State();
             boundaryChecked = boundaryRow.Checked == "checked";
             boundaryEffectiveVisible = MapTreeService.IsEffectivelyVisible(resultContext.Tree.Roots, boundaryRow);
@@ -96,7 +109,7 @@ public static partial class ModelEditorAdapter
 
             ModelSnapshot snapshot = await LoadAsync(new ModelRequest(boundaryPath,
                 "Boundary Conditions", request.Map.ProjectPath, request.Map.ProjectXml,
-                request.BoundarySourceState));
+                request.BoundarySourceState, request.Map.CoreLayerContext));
             if (snapshot.Boundary is null || snapshot.SourceState is null)
                 throw new InvalidDataException("The selected source has no boundary-line data.");
             lines = ProjectBoundaryLines(snapshot.Boundary.Lines);
@@ -155,7 +168,7 @@ public static partial class ModelEditorAdapter
             request.Map.MapIndex, request.Map.MapName, request.Map.MapType,
             contextToken, request.BoundaryNode, boundaryPath, boundaryRevision,
             boundaryChecked, boundaryEffectiveVisible, boundarySourceState, lines,
-            resultOwnerIdentity);
+            resultOwnerIdentity, attachedFaces);
     }
 
     private static void ValidateMapBoundaryGeometryRequest(MapBoundaryGeometryRequest request)
@@ -163,6 +176,8 @@ public static partial class ModelEditorAdapter
         if (request.Map is null || request.BoundaryNode is null ||
             string.IsNullOrWhiteSpace(request.ExpectedBoundaryRevision))
             throw new ArgumentException("A saved map, exact BoundaryCondition row and source revision are required.");
+        if (!double.IsFinite(request.RenderScale) || request.RenderScale <= 0 || request.RenderScale > 64)
+            throw new ArgumentOutOfRangeException(nameof(request.RenderScale));
         if (request.BoundaryNode.NodeType != "BoundaryCondition")
             throw new ArgumentException("The selected map row is not a BoundaryCondition source.");
         if (request.ResultOwner is { } owner &&
@@ -171,6 +186,8 @@ public static partial class ModelEditorAdapter
         if (request.ResultOwner is null &&
             request.BoundaryNode.ParentResultAssetID is not null)
             throw new ArgumentException("A Result-owned BoundaryCondition requires its exact Result selection context.");
+        if (request.AttachedFacesViewport is not null && request.ResultOwner is null)
+            throw new ArgumentException("Attached boundary faces are available only from the exact selected Result.");
     }
 
     private static CatalogTreeNode ResolveDirectBoundaryRow(CatalogTreeNode[] roots,

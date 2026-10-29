@@ -199,6 +199,38 @@ public class CPUPolylineRenderer : IPolylineRenderer
 
 	public bool Render(PlotRequest request, IReadOnlyList<Segment> segments, VectorSymbology symbology)
 	{
+		if (symbology.PenWidth * VectorManagerOptions.RenderScaling > 1.0)
+		{
+			Memory<int> thickLineMemory;
+			using (SharedMemoryPool<int>.Rent(request.RasterQuery.CellCount, 0, out thickLineMemory))
+			{
+				bool renderedAnySegment = false;
+				PoolHandle<Polygon> polygonHandle = scratchSpacePolygons.Acquire();
+				PoolHandle<PolygonRasterizer> rasterizerHandle = scratchSpaceRasterizers.Acquire();
+				try
+				{
+					Polygon polygon = polygonHandle.Data;
+					PolygonRasterizer rasterizer = rasterizerHandle.Data;
+					rasterizer.Reset(request.RasterQuery);
+					double distance = symbology.PenWidth * VectorManagerOptions.RenderScaling
+						* request.RasterQuery.CellSize / 2.0;
+					Extent extent = request.RasterQuery.Extent;
+					int color = symbology.PenColor.ToArgb();
+					foreach (Segment segment in segments)
+						renderedAnySegment |= Render_Internal(in segment, extent, distance, polygon,
+							rasterizer, thickLineMemory, color);
+					if (renderedAnySegment)
+						request.Splat(thickLineMemory);
+					return renderedAnySegment;
+				}
+				finally
+				{
+					scratchSpacePolygons.Return(polygonHandle);
+					scratchSpaceRasterizers.Return(rasterizerHandle);
+				}
+			}
+		}
+
 		int cellCount = request.RasterQuery.CellCount;
 		bool condition = false;
 		int toArgb = symbology.PenColor.ToArgb();

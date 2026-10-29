@@ -16,6 +16,7 @@ public static class MapStreamModeService
     private const int ConnectTimeoutMilliseconds = 15_000;
     private const int MaximumCoordinatesPerObject = 1_000_000;
     private const int MaximumTrianglesPerObject = 2_000_000;
+    private const int MaximumTinProfilesPerSession = 512;
 
     private static readonly IReadOnlyDictionary<string, Type> SupportedStreamTypes =
         new[] { typeof(Polygon), typeof(Polyline), typeof(Topology), typeof(Tin), typeof(Segment) }
@@ -37,7 +38,7 @@ public static class MapStreamModeService
 
         try
         {
-            return await ConnectAndReadAsync(request.PipeName, unixEndpoint, onFrame, operationStop.Token)
+            return await ConnectAndReadAsync(request.PipeName, unixEndpoint, request.SessionID, onFrame, operationStop.Token)
                 .ConfigureAwait(false);
         }
         finally
@@ -50,23 +51,53 @@ public static class MapStreamModeService
     private static async Task<StreamModeConnectResult> ConnectAndReadAsync(
         string pipeName,
         UnixDomainSocketEndPoint? unixEndpoint,
+        Guid sessionID,
         Action<StreamModeMapFrame>? onFrame,
         CancellationToken cancellationToken)
     {
         using Stream client = await ConnectAsync(pipeName, unixEndpoint, cancellationToken).ConfigureAwait(false);
 
         long sequence = 0;
+        int tinProfileCount = 0;
         while (true)
         {
+            using var capture = new StreamModeTinRecordCaptureStream(client);
             IStreamableObject? source = await StreamableObjectHelper.ReadAsync(
-                client, SupportedStreamTypes, cancellationToken).ConfigureAwait(false);
+                capture, SupportedStreamTypes, cancellationToken).ConfigureAwait(false);
             if (source is null)
             {
                 return new StreamModeConnectResult(pipeName, sequence);
             }
 
+            if (source is Tin && tinProfileCount == MaximumTinProfilesPerSession)
+                throw new InvalidDataException("The stream contains more TIN profiles than the retained BandedTin renderer can represent.");
+
             StreamModeMapFrame frame = ConvertSourceObject(sequence, source);
-            onFrame?.Invoke(frame);
+            StreamModeTinAssetReference? tinAsset = null;
+            if (source is Tin)
+            {
+                tinAsset = StreamModeTinAssetStore.Store(sessionID, sequence, capture.CapturedBytes);
+                frame = frame with { TinAsset = tinAsset };
+                tinProfileCount++;
+            }
+            try
+            {
+                if (onFrame is null)
+                {
+                    if (tinAsset is not null)
+                        _ = StreamModeTinAssetStore.Release(tinAsset);
+                }
+                else
+                {
+                    onFrame(frame);
+                }
+            }
+            catch
+            {
+                if (tinAsset is not null)
+                    _ = StreamModeTinAssetStore.Release(tinAsset);
+                throw;
+            }
             sequence = checked(sequence + 1);
         }
     }
@@ -145,6 +176,10 @@ public static class MapStreamModeService
         if (string.IsNullOrWhiteSpace(request.PipeName))
         {
             throw new ArgumentException("A stream endpoint is required.", nameof(request.PipeName));
+        }
+        if (request.SessionID == Guid.Empty)
+        {
+            throw new ArgumentException("A stream session identity is required.", nameof(request.SessionID));
         }
 
         if (!OperatingSystem.IsWindows())

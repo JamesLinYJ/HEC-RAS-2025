@@ -1,15 +1,49 @@
 import Foundation
 import RASWorkspaceCore
 
+private final class SpatialGridImportCancelSender: @unchecked Sendable {
+    private let lock = NSLock()
+    private let operation: BackendDuplexOperation<DssGridImportControl,
+        BackendProgressUpdate, DssGridImportDuplexResult>
+    private var sent = false
+    private var sequence: UInt64 = 0
+
+    init(operation: BackendDuplexOperation<DssGridImportControl,
+         BackendProgressUpdate, DssGridImportDuplexResult>) {
+        self.operation = operation
+    }
+
+    func cancel() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !sent else { return true }
+        sequence &+= 1
+        do {
+            try operation.sendControl(.cancel, sequence: sequence)
+            sent = true
+            return true
+        } catch {
+            // Never terminate the child as a cancellation fallback. It may
+            // already have committed the model and still need to return it.
+            return false
+        }
+    }
+}
+
 @MainActor
 final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
     let client: BackendProcessClient
     private(set) var project: ProjectDocument?
+    private var coreLayerContextProvider: @MainActor () -> CoreLayerRequestContext? = { nil }
     init(client: BackendProcessClient? = nil) {
         self.client = client ?? BackendProcessClient(executableURL: Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/Backend/HECRASBackend"))
     }
     func setProject(_ document: ProjectDocument?) { project = document }
+    func setCoreLayerContextProvider(_ provider: @escaping @MainActor () -> CoreLayerRequestContext?) {
+        coreLayerContextProvider = provider
+    }
+    func captureCoreLayerContext() -> CoreLayerRequestContext? { coreLayerContextProvider() }
     var supportsProjectContextRefresh: Bool { true }
     func refreshProjectContext(_ asset: ProjectAsset, edits: EditorEdits) async throws -> EditorContextRefresh {
         struct Response: Decodable, Sendable { let baseline: ModelSnapshot; let draft: ModelSnapshot }
@@ -32,7 +66,11 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
                 resultPath: asset.url, projectPath: projectURL, projectXML: project.editorXML, revision: nil)
             return snapshot.editorSnapshot
         }
-        let result = try await client.request("model.load", parameters: ModelRequest(assetPath: asset.url.path, kind: kind.rawValue, projectPath: project?.url?.path, projectXml: project?.editorXML), as: ModelSnapshot.self)
+        let capturedContext = captureCoreLayerContext()
+        let request = ModelRequest(assetPath: asset.url.path, kind: kind.rawValue,
+            projectPath: project?.url?.path, projectXml: project?.editorXML,
+            coreLayerContext: capturedContext)
+        let result = try await client.request("model.load", parameters: request, as: ModelSnapshot.self)
         return try result.editorSnapshot
     }
     func save(_ asset: ProjectAsset, changes: EditorEdits) async throws {
@@ -69,7 +107,19 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
         return try await client.request("model.classificationTransform", parameters: request, as: ModelSnapshot.self).editorSnapshot
     }
     func editTerrain(_ asset: ProjectAsset, action: EditorAction, edits: EditorEdits) async throws -> EditorSnapshot {
-        struct Request: Encodable, Sendable { let model: ModelSaveRequest; let operation: String; let itemId: String?; let from: Int?; let to: Int?; var inputKind: String? = nil; var hintExtent: TerrainInputValidExtent? = nil; var tableId: String? = nil; var rowIDs: [String]? = nil }
+        struct LeveeForceSet: Encodable, Sendable { let command: String; let value: String; let rowIDs: [String] }
+        struct Request: Encodable, Sendable {
+            let model: ModelSaveRequest
+            let operation: String
+            let itemId: String?
+            let from: Int?
+            let to: Int?
+            var inputKind: String? = nil
+            var hintExtent: TerrainInputValidExtent? = nil
+            var tableId: String? = nil
+            var rowIDs: [String]? = nil
+            var leveeForceSet: LeveeForceSet? = nil
+        }
         let request: Request
         switch action {
         case .addRow(let table): request = .init(model: try saveRequest(asset, changes: edits), operation: "addRow", itemId: nil, from: nil, to: nil, tableId: table)
@@ -81,6 +131,11 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
         case .addTerrainInput(let kind, let hintExtent): request = .init(model: try saveRequest(asset, changes: edits), operation: "add", itemId: nil, from: nil, to: nil, inputKind: kind.rawValue, hintExtent: hintExtent)
         case .reorderSource(_, let from, let to): request = .init(model: try saveRequest(asset, changes: edits), operation: "reorder", itemId: nil, from: from, to: to)
         case .removeSource(_, let id): request = .init(model: try saveRequest(asset, changes: edits), operation: "remove", itemId: id, from: nil, to: nil)
+        case .forceSetLeveeProperty(let command, let value, let rowIDs, _):
+            request = .init(model: try saveRequest(asset, changes: edits), operation: "forceSetLeveeProperty",
+                itemId: nil, from: nil, to: nil, tableId: "LeveeModPropertiesEditor/PropertySets",
+                rowIDs: rowIDs.sorted(),
+                leveeForceSet: .init(command: command.rawValue, value: value, rowIDs: rowIDs.sorted()))
         default: throw CocoaError(.featureUnsupported)
         }
         return try await client.request("model.terrainTransform", parameters: request, as: ModelSnapshot.self).editorSnapshot
@@ -166,7 +221,8 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
             throw BackendServiceError(code: "sourceChanged", message: "Terrain import cancellation no longer matches the active model.")
         }
         let model = ModelRequest(assetPath: request.model.assetPath, kind: request.model.kind,
-            projectPath: request.model.projectPath, projectXml: request.model.projectXml)
+            projectPath: request.model.projectPath, projectXml: request.model.projectXml,
+            coreLayerContext: request.model.coreLayerContext)
         return try await client.request("model.terrainInputImportCancel",
             parameters: Request(model: model, draftToken: request.draftToken, batchToken: request.batchToken, operationID: operationID),
             as: TerrainInputImportCancelReceipt.self)
@@ -177,13 +233,15 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
             let kind: String
             let projectPath: String?
             let projectXml: String?
+            let coreLayerContext: CoreLayerRequestContext?
         }
         struct Request: Encodable, Sendable { let model: ModelRequest; let draftToken: String }
         guard let kind = ModelEditorKind.allCases.first(where: { $0.section == asset.section }) else {
             throw BackendServiceError(code: "unsupported", message: "Terrain input cleanup is unavailable for this model.")
         }
         let model = ModelRequest(assetPath: asset.url.path, kind: kind.rawValue,
-            projectPath: project?.url?.path, projectXml: project?.editorXML)
+            projectPath: project?.url?.path, projectXml: project?.editorXML,
+            coreLayerContext: captureCoreLayerContext())
         return try await client.request("model.terrainInputImportDiscard",
             parameters: Request(model: model, draftToken: draftToken), as: Bool.self)
     }
@@ -193,13 +251,15 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
             let kind: String
             let projectPath: String?
             let projectXml: String?
+            let coreLayerContext: CoreLayerRequestContext?
         }
         struct Request: Encodable, Sendable { let model: ModelRequest; let draftToken: String; let batchToken: String }
         guard asset.section == .terrains else {
             throw BackendServiceError(code: "unsupported", message: "Terrain import batch cleanup is unavailable for this model.")
         }
         let model = ModelRequest(assetPath: asset.url.path, kind: ModelEditorKind.terrain.rawValue,
-            projectPath: project?.url?.path, projectXml: project?.editorXML)
+            projectPath: project?.url?.path, projectXml: project?.editorXML,
+            coreLayerContext: captureCoreLayerContext())
         return try await client.request("model.terrainInputImportDiscardBatch",
             parameters: Request(model: model, draftToken: draftToken, batchToken: batchToken), as: Bool.self)
     }
@@ -207,6 +267,52 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
         struct Request: Encodable, Sendable { let model: ModelSaveRequest; let selection: SpatialGridSelection }
         let result = try await client.request("model.gridImport", parameters: Request(model: try saveRequest(asset, changes: edits), selection: selection), as: ModelSnapshot.self)
         return .init(sourceRevision: result.revision, snapshot: try result.editorSnapshot)
+    }
+    func importGrid(_ asset: ProjectAsset, edits: EditorEdits, selection: SpatialGridSelection,
+                    progress: @escaping @MainActor @Sendable (BackendProgressUpdate) -> Void,
+                    installCancellation: @escaping GridImportCancellationInstaller) async throws -> EditorSaveResult {
+        guard selection.dssSource != nil else {
+            return try await importGrid(asset, edits: edits, selection: selection)
+        }
+        struct Request: Encodable, Sendable { let model: ModelSaveRequest; let selection: SpatialGridSelection }
+        try Task.checkCancellation()
+        let request = Request(model: try saveRequest(asset, changes: edits), selection: selection)
+        let operation = try client.startDuplex("model.gridImport", parameters: request,
+            control: DssGridImportControl.self, event: BackendProgressUpdate.self,
+            as: DssGridImportDuplexResult.self)
+        let cancelSender = SpatialGridImportCancelSender(operation: operation)
+        installCancellation { cancelSender.cancel() }
+        defer { installCancellation(nil) }
+
+        // Keep draining the source after a view task is cancelled. The control
+        // asks the backend to stop cooperatively; the terminal response still
+        // determines whether publication won the cancel/commit race.
+        let importTask = Task.detached(priority: .userInitiated) {
+            do {
+                for try await update in operation.events { await progress(update) }
+            } catch {
+                // Preserve the terminal result, including a snapshot committed
+                // before a cancellation or progress-stream shutdown.
+            }
+            return try await operation.value()
+        }
+        let response = try await withTaskCancellationHandler {
+            try await importTask.value
+        } onCancel: {
+            _ = cancelSender.cancel()
+        }
+        switch response.state {
+        case "completed":
+            guard let snapshot = response.snapshot else {
+                throw BackendServiceError(code: "protocolFailure", message: "The DSS grid import completed without a saved model snapshot.")
+            }
+            return .init(sourceRevision: snapshot.revision, snapshot: try snapshot.editorSnapshot,
+                refreshWarning: response.refreshWarning)
+        case "cancelled": throw CancellationError()
+        default:
+            throw BackendServiceError(code: "processFailure",
+                message: response.errorMessage ?? "The DSS grid import did not complete.")
+        }
     }
     func perform(_ asset: ProjectAsset, action: EditorAction, edits: EditorEdits) async throws -> EditorSnapshot {
         if case .selectTableRows = action, asset.section == .terrains {
@@ -236,7 +342,8 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
             sourceState: changes.sourceState, rows: changes.rows.mapValues { $0.map(BackendModelRow.init) }, samples: changes.samples.mapValues { $0.map(BackendModelSample.init) },
             planTimeWindowEdits: changes.planTimeWindowEdits, geometryTopologyState: changes.geometryTopologyState,
             geometryMeshState: changes.geometryMeshState, geometryCulvertState: changes.geometryCulvertState,
-            tableSelections: changes.tableSelections, changedCells: changes.changedCells)
+            tableSelections: changes.tableSelections, changedCells: changes.changedCells,
+            coreLayerContext: captureCoreLayerContext())
     }
     func perform(_ asset: ProjectAsset, action: EditorAction) async throws -> EditorSnapshot {
         throw BackendServiceError(code: "unsupported", message: "This model action is not yet connected to the source backend.")
@@ -244,6 +351,7 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
     private struct ModelRequest: Encodable, Sendable {
         let assetPath: String; let kind: String; let projectPath: String?
         let projectXml: String?
+        let coreLayerContext: CoreLayerRequestContext?
     }
     struct ModelSaveRequest: Encodable, Sendable {
         let assetPath: String; let kind: String; let projectPath: String?
@@ -258,6 +366,7 @@ final class BackendModelProvider: ModelEditorProvider, PlanPrecomputeProvider {
         let geometryCulvertState: String?
         var tableSelections: [String: [String]] = [:]
         var changedCells: [String: [EditorChangedCell]] = [:]
+        var coreLayerContext: CoreLayerRequestContext? = nil
     }
     struct ImageData: Codable, Sendable {
         let id: String; let name: String; let data: Data

@@ -314,6 +314,8 @@ where Row: Identifiable, Row.ID == String, Column: Identifiable, Column.ID == St
     var selectionColumnIDs: [String]? = nil
     @Binding var selection: NativeDataGridSelection
     var rowSelection: Binding<Set<String>>?
+    /// A stable row ID to bring into view after a route such as "View Attributes".
+    var focusRowID: String? = nil
     let initialWidth: (Column) -> CGFloat?
     let isReadOnly: (Column) -> Bool
     let value: (Row, Column) -> String
@@ -345,16 +347,29 @@ where Row: Identifiable, Row.ID == String, Column: Identifiable, Column.ID == St
                         headerCell(column, index: index, rowIDs: rowIDs, columnIDs: columnIDs, columnIndexes: columnIndexes)
                     }
                 }
-                ScrollView(.vertical) {
-                    LazyVStack(spacing: 0) {
-                        ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                            HStack(spacing: 0) {
-                                rowHeader(index: index, row: row)
-                                ForEach(Array(columns.enumerated()), id: \.element.id) { columnIndex, column in
-                                    cellView(row: row, rowIndex: index, column: column, columnIndex: columnIndex,
-                                             rowIndexes: rowIndexes, columnIndexes: columnIndexes)
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                                HStack(spacing: 0) {
+                                    rowHeader(index: index, row: row)
+                                    ForEach(Array(columns.enumerated()), id: \.element.id) { columnIndex, column in
+                                        cellView(row: row, rowIndex: index, column: column, columnIndex: columnIndex,
+                                                 rowIndexes: rowIndexes, columnIndexes: columnIndexes)
+                                    }
                                 }
+                                .id(row.id)
                             }
+                        }
+                    }
+                    .onAppear {
+                        if let focusRowID, rowIndexes[focusRowID] != nil {
+                            proxy.scrollTo(focusRowID, anchor: .center)
+                        }
+                    }
+                    .onChange(of: focusRowID) { _, rowID in
+                        if let rowID, rowIndexes[rowID] != nil {
+                            proxy.scrollTo(rowID, anchor: .center)
                         }
                     }
                 }

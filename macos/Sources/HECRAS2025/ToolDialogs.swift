@@ -21,6 +21,7 @@ enum ToolKind: String, CaseIterable, Identifiable, Sendable {
     case testingViewer = "Testing Projects", testingProjectUpload = "Upload Testing Project", testingGeometryUpload = "Upload Testing Geometry"
     case testingPOI = "Testing Points of Interest", testingRunner = "Testing Runner"
     var id: String { rawValue }
+    static var generalMenuCases: [ToolKind] { allCases.filter { $0 != .poiImport } }
     @MainActor var localizedTitle: String { L10n.text(rawValue) }
     var requiresProject: Bool {
         switch self {

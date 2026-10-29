@@ -149,7 +149,8 @@ public static partial class ModelEditorAdapter
     private static void ApplyGeometryCulvertDraft(ModelContext context, ModelSaveRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.GeometryCulvertState)) return;
-        var model = new GeometryCulvertModelRequest(request.AssetPath, request.Kind, request.ProjectPath, request.ProjectXml);
+        var model = new GeometryCulvertModelRequest(request.AssetPath, request.Kind, request.ProjectPath,
+            request.ProjectXml, request.CoreLayerContext);
         string dependencyRevision = CaptureGeometryCulvertDependencyRevision(model);
         GeometryCulvertDraftState state = ReadGeometryCulvertDraft(request.GeometryCulvertState,
             request.AssetPath, request.Revision, dependencyRevision);
@@ -160,7 +161,8 @@ public static partial class ModelEditorAdapter
     }
 
     private static ModelRequest ToModelRequest(GeometryCulvertModelRequest model) =>
-        new(model.AssetPath, model.Kind, model.ProjectPath, model.ProjectXml);
+        new(model.AssetPath, model.Kind, model.ProjectPath, model.ProjectXml,
+            CoreLayerContext: model.CoreLayerContext);
 
     private static void VerifyGeometryCulvertModel(GeometryCulvertModelRequest model)
     {
@@ -217,12 +219,10 @@ public static partial class ModelEditorAdapter
             if (!Path.IsPathFullyQualified(model.ProjectPath))
                 throw new ArgumentException("Culvert profile context requires an absolute project path.");
             projectIdentity = SourceFilePaths.Canonical(model.ProjectPath);
-            var project = new Project(Path.GetFullPath(model.ProjectPath));
+            var project = CoreLayerImportService.OpenProject(Path.GetFullPath(model.ProjectPath),
+                model.ProjectXml, model.CoreLayerContext);
             try
             {
-                if (model.ProjectXml is not null)
-                    project.ApplyEditorMetadata(XElement.Parse(model.ProjectXml));
-
                 Geometry? geometry = project.Geometries.FirstOrDefault(candidate =>
                     SourceFilePaths.SameSourceFile(candidate.Filename, model.AssetPath));
                 if (geometry is not null)
@@ -264,7 +264,8 @@ public static partial class ModelEditorAdapter
     private static void VerifyGeometryCulvertSaveDependencies(ModelSaveRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.GeometryCulvertState)) return;
-        var model = new GeometryCulvertModelRequest(request.AssetPath, request.Kind, request.ProjectPath, request.ProjectXml);
+        var model = new GeometryCulvertModelRequest(request.AssetPath, request.Kind, request.ProjectPath,
+            request.ProjectXml, request.CoreLayerContext);
         string dependencyRevision = CaptureGeometryCulvertDependencyRevision(model);
         _ = ReadGeometryCulvertDraft(request.GeometryCulvertState, request.AssetPath, request.Revision, dependencyRevision);
     }

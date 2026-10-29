@@ -118,7 +118,7 @@ public static partial class ModelEditorAdapter
         if (!string.Equals(revision, model.Revision, StringComparison.Ordinal)) throw new SourceFileChangedException();
         SourcePropertyValidationMessage[] messages;
         using (var context = new ModelContext(new ModelRequest(model.AssetPath, model.Kind,
-            model.ProjectPath, model.ProjectXml, model.SourceState)))
+            model.ProjectPath, model.ProjectXml, model.SourceState, model.CoreLayerContext)))
         {
             GeometryTopologyDraftState state = string.IsNullOrWhiteSpace(model.GeometryTopologyState)
                 ? NewTopologyDraft(model.AssetPath, revision)

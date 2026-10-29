@@ -281,6 +281,22 @@ struct BoundaryMapRequest: Encodable, Sendable {
     let boundarySourceState: String?
     let expectedContextToken: String?
     let resultOwner: MapResultOwnerSelection?
+    let attachedFacesViewport: RasterMapViewExtent?
+    let renderScale: Double
+
+    init(map: MapTreeMapIdentity, boundaryNode: CatalogTreeNodeLocator,
+         expectedBoundaryRevision: String, boundarySourceState: String?,
+         expectedContextToken: String?, resultOwner: MapResultOwnerSelection?,
+         attachedFacesViewport: RasterMapViewExtent? = nil, renderScale: Double = 1.0) {
+        self.map = map
+        self.boundaryNode = boundaryNode
+        self.expectedBoundaryRevision = expectedBoundaryRevision
+        self.boundarySourceState = boundarySourceState
+        self.expectedContextToken = expectedContextToken
+        self.resultOwner = resultOwner
+        self.attachedFacesViewport = attachedFacesViewport
+        self.renderScale = renderScale
+    }
 }
 
 struct BoundaryMapCoordinateData: Decodable, Sendable {
@@ -320,6 +336,19 @@ struct BoundaryMapSourceState: Sendable {
     let lines: [BoundaryMapLine]
     let status: BoundaryMapSourceStatus
     let diagnostic: String?
+    let attachedFaces: MapSourceRasterFrame?
+
+    init(capture: BoundaryMapCapture, contextToken: String?, boundarySourceState: String?,
+         lines: [BoundaryMapLine], status: BoundaryMapSourceStatus, diagnostic: String?,
+         attachedFaces: MapSourceRasterFrame? = nil) {
+        self.capture = capture
+        self.contextToken = contextToken
+        self.boundarySourceState = boundarySourceState
+        self.lines = lines
+        self.status = status
+        self.diagnostic = diagnostic
+        self.attachedFaces = attachedFaces
+    }
 
     var visibleLines: [BoundaryMapLine] {
         guard capture.effectiveVisible, status == .available else { return [] }
@@ -349,6 +378,7 @@ struct BoundaryMapSnapshot: Decodable, Sendable {
     var resultOwner: BoundaryMapResultOwnerReceipt? = nil
     var status: String? = nil
     var diagnostic: String? = nil
+    var attachedFaces: MapSourceRasterFrame? = nil
 }
 
 struct BoundaryMapLineData: Decodable, Sendable {

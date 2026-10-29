@@ -13,7 +13,8 @@ public sealed record CatalogModelActionRequest(
     string Kind,
     string ExpectedAssetSHA,
     string Action,
-    string? Name = null);
+    string? Name = null,
+    CoreLayerRequestContext? CoreLayerContext = null);
 
 public sealed record CatalogModelActionDependency(string? AssetPath, string Kind, string Name,
     string? Revision, string Reason);
@@ -794,10 +795,10 @@ public static class CatalogModelActionService
             Metadata = XElement.Load(reader, LoadOptions.None);
             Revision = actualRevision;
 
-            project = new Project(ProjectPath);
+            project = CoreLayerImportService.OpenProject(ProjectPath, request.ProjectXml,
+                request.CoreLayerContext);
             try
             {
-                project.ApplyEditorMetadata(new XElement(Metadata));
                 CoreLayerBase[] matches = SourceLayers(project, request.Kind)
                     .Where(item => !item.IsInMemory && !string.IsNullOrWhiteSpace(item.Filename)
                         && SourceFilePaths.SameSourceFile(item.Filename, AssetPath)).ToArray();

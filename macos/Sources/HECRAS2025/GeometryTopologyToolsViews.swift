@@ -6,6 +6,7 @@ enum GeometryTopologyToolPanel: String, CaseIterable, Identifiable {
     case recipe
     case arcPoints
     case tagFilter
+    case vectorImport
 
     var id: String { rawValue }
 
@@ -15,6 +16,7 @@ enum GeometryTopologyToolPanel: String, CaseIterable, Identifiable {
         case .recipe: L10n.text("Recipe Builder")
         case .arcPoints: L10n.text("Arc Points")
         case .tagFilter: L10n.text("Tag Filter")
+        case .vectorImport: L10n.text("Import Vector Lines")
         }
     }
 
@@ -24,6 +26,7 @@ enum GeometryTopologyToolPanel: String, CaseIterable, Identifiable {
         case .recipe: "list.bullet.rectangle.portrait"
         case .arcPoints: "point.topleft.down.to.point.bottomright.curvepath"
         case .tagFilter: "line.3.horizontal.decrease"
+        case .vectorImport: "square.and.arrow.down"
         }
     }
 }

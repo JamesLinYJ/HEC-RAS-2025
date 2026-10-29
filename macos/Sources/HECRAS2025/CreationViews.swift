@@ -136,8 +136,10 @@ struct SurfaceCreationDialog: View {
     let kind: SurfaceCreationKind
     let projectSessionID: UUID
     let projectPath: String
+    let coreLayerContext: CoreLayerRequestContext?
     let projectXML: @MainActor () -> String
     let currentProjectSessionID: @MainActor () -> UUID
+    let currentCoreLayerContext: @MainActor () -> CoreLayerRequestContext?
     let provider: any SurfaceCreationProvider
     let onRunningChanged: @MainActor (Bool) -> Void
     let onCreated: @MainActor (SurfaceCreationResult) -> Void
@@ -152,7 +154,8 @@ struct SurfaceCreationDialog: View {
     @State private var errorMessage: String?
 
     private var documentIdentity: SurfaceCreationDocumentIdentity {
-        SurfaceCreationDocumentIdentity(projectSessionID: projectSessionID, projectPath: projectPath, projectXML: projectXML())
+        SurfaceCreationDocumentIdentity(projectSessionID: projectSessionID, projectPath: projectPath,
+            projectXML: projectXML(), coreLayerContext: coreLayerContext)
     }
     private var currentRequestIdentity: SurfaceCreationRequestIdentity {
         SurfaceCreationRequestIdentity(document: documentIdentity, kind: kind, name: name)
@@ -302,7 +305,8 @@ struct SurfaceCreationDialog: View {
     @MainActor private func makeRequest(name: String, identity: SurfaceCreationDocumentIdentity,
                                         revision: String? = nil) -> SurfaceCreationRequest {
         SurfaceCreationRequest(kind: kind, projectPath: identity.projectPath,
-            projectXml: identity.projectXML, name: name, revision: revision)
+            projectXml: identity.projectXML, name: name, revision: revision,
+            coreLayerContext: identity.coreLayerContext)
     }
 
     @MainActor private func isCurrent(_ identity: SurfaceCreationDocumentIdentity, sequence: Int) -> Bool {
@@ -311,6 +315,7 @@ struct SurfaceCreationDialog: View {
 
     @MainActor private func identityIsCurrent(_ identity: SurfaceCreationDocumentIdentity) -> Bool {
         identity == documentIdentity && currentProjectSessionID() == identity.projectSessionID
+            && currentCoreLayerContext() == identity.coreLayerContext
     }
 }
 
@@ -318,6 +323,7 @@ private struct SurfaceCreationDocumentIdentity: Hashable {
     let projectSessionID: UUID
     let projectPath: String
     let projectXML: String
+    let coreLayerContext: CoreLayerRequestContext?
 }
 
 private struct SurfaceCreationRequestIdentity: Equatable {

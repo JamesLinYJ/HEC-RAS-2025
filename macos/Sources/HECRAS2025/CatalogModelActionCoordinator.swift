@@ -102,6 +102,7 @@ struct CatalogModelActionPresentation: Identifiable, Equatable, Sendable {
     let projectPath: String?
     let canonicalProjectPath: String?
     let projectXMLFingerprint: String?
+    let coreLayerContext: CoreLayerRequestContext?
     let assetPath: String
     let canonicalAssetPath: String
     /// Optional source revision captured by a typed diagnostic target. When
@@ -127,6 +128,7 @@ struct CatalogModelActionPresentation: Identifiable, Equatable, Sendable {
         self.projectPath = projectURL?.path
         self.canonicalProjectPath = projectURL.flatMap { CatalogModelActionTarget.canonicalPath($0.path) }
         self.projectXMLFingerprint = store.document.map { CatalogModelActionDigest.textFingerprint($0.editorXML) }
+        self.coreLayerContext = store.captureCoreLayerRequestContext()
         self.assetPath = asset.url.path
         self.canonicalAssetPath = CatalogModelActionTarget.canonicalPath(asset.url.path) ?? asset.url.path
         self.expectedAssetRevision = expectedAssetRevision
@@ -157,6 +159,7 @@ struct CatalogModelActionContextStamp: Equatable, Sendable {
     let projectPath: String
     let canonicalProjectPath: String
     let projectXMLFingerprint: String
+    let coreLayerContext: CoreLayerRequestContext?
     let assetPath: String
     let canonicalAssetPath: String
     let expectedAssetRevision: String?
@@ -184,13 +187,15 @@ struct CatalogModelActionContextStamp: Equatable, Sendable {
         guard presentation.projectPath == projectURL.path,
               currentProjectPath == expectedProjectPath,
               currentXMLFingerprint == expectedXMLFingerprint,
+              store.captureCoreLayerRequestContext() == presentation.coreLayerContext,
               presentation.assetPath == asset.url.path,
               currentAssetPath == presentation.canonicalAssetPath else { return nil }
         return Self(presentationID: presentation.id, assetID: asset.id, kind: kind.rawValue,
             action: intent.rawValue, caller: caller.rawValue,
             projectSessionID: presentation.projectSessionID, assetsRevision: presentation.assetsRevision,
             projectPath: projectURL.path, canonicalProjectPath: currentProjectPath,
-            projectXMLFingerprint: currentXMLFingerprint, assetPath: asset.url.path,
+            projectXMLFingerprint: currentXMLFingerprint,
+            coreLayerContext: presentation.coreLayerContext, assetPath: asset.url.path,
             canonicalAssetPath: currentAssetPath,
             expectedAssetRevision: presentation.expectedAssetRevision)
     }
@@ -277,7 +282,7 @@ final class CatalogModelActionCoordinator: ObservableObject {
         projectXMLSnapshot = projectXML
         await session.inspect(asset: asset, kind: stamp.kind, projectPath: projectURL,
             projectXML: projectXML, projectSessionID: stamp.projectSessionID,
-            assetsRevision: stamp.assetsRevision)
+            assetsRevision: stamp.assetsRevision, coreLayerContext: stamp.coreLayerContext)
         guard isCurrent(presentation) else {
             session.invalidate()
             inspection = nil
@@ -346,6 +351,7 @@ final class CatalogModelActionCoordinator: ObservableObject {
             let prepared = try await session.perform(asset: asset, kind: kind.rawValue,
                 projectPath: projectURL, projectXML: projectXML,
                 projectSessionID: stamp.projectSessionID, assetsRevision: stamp.assetsRevision,
+                coreLayerContext: stamp.coreLayerContext,
                 action: action, name: name)
             receipt = prepared
             guard isCurrent(presentation),

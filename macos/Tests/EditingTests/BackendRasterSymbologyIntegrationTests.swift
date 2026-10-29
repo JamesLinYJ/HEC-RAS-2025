@@ -21,9 +21,11 @@ struct BackendRasterSymbologyIntegrationTests {
         let rasterURL = folder.appendingPathComponent("elevation.tif")
         let originalRaster = try Data(contentsOf: rasterURL)
         let originalVisualization = try Data(contentsOf: visualizationURL)
+        let projectXML = try String(contentsOf: projectURL, encoding: .utf8)
         let document = try VisualizationDocument(projectURL: projectURL)
-        let mapID = UUID()
+        let mapID = MapState.projectMapID
         let source = try #require(document.singleBandRasterMapSources().first).assigning(mapID: mapID)
+        var currentSources = [source]
         #expect(source.mapIndex == 0 && source.mapName == "Map" && source.mapType == "Project")
         #expect(source.nodePath == [0] && source.sourcePath == rasterURL.resolvingSymlinksInPath().path)
 
@@ -36,11 +38,16 @@ struct BackendRasterSymbologyIntegrationTests {
         let client = BackendProcessClient(executableURL: URL(fileURLWithPath: executablePath))
         let provider = BackendRasterSymbologyProvider(
             client: client,
-            sources: { [source] }, viewport: { _ in nil }, projectXML: { nil },
+            sources: { currentSources }, viewport: { _ in nil }, projectXML: { projectXML },
             installLayer: { installedLayer = $0 },
             acceptVisualization: { oldRevision, newRevision in
                 try document.acceptExternalRasterSymbologyChange(
                     expectedPreviousRevision: oldRevision, newRevision: newRevision)
+                guard let refreshed = try document.singleBandRasterMapSources()
+                        .first(where: { $0.id == source.id }) else {
+                    throw BackendServiceError(code: "notFound", message: "The committed raster source disappeared from its visualization map.")
+                }
+                currentSources = [refreshed.assigning(mapID: mapID)]
             })
         let context = RasterSymbologyContext(projectSessionID: UUID(), mapID: mapID, assetID: source.id)
 
@@ -57,7 +64,7 @@ struct BackendRasterSymbologyIntegrationTests {
         edited.stops[0].color = "00FF00FF"
         edited.stops[1].color = "FFFFFFFF"
         edited.isEditing = true
-        try await provider.apply(edited, context: context)
+        try await provider.apply(edited, additionalOptions: [], context: context)
 
         let appliedLayer = try #require(installedLayer)
         #expect(appliedLayer.sourceMapID == mapID)
@@ -71,8 +78,9 @@ struct BackendRasterSymbologyIntegrationTests {
         let persistedDocument = try VisualizationDocument(projectURL: projectURL)
         #expect(persistedDocument.views.contains { $0.name == localView.name })
         let persistedSource = try #require(persistedDocument.singleBandRasterMapSources().first).assigning(mapID: mapID)
+        let persistedSources = [persistedSource]
         let persistedProvider = BackendRasterSymbologyProvider(
-            client: client, sources: { [persistedSource] }, viewport: { _ in nil }, projectXML: { nil },
+            client: client, sources: { persistedSources }, viewport: { _ in nil }, projectXML: { projectXML },
             installLayer: { _ in }, acceptVisualization: { _, _ in })
         let reread = try #require(try await persistedProvider.snapshot(context))
         #expect(reread.draft.name == edited.name)

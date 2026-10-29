@@ -85,6 +85,7 @@ struct VectorSymbologyView: View {
                                             set: { session.setAdditional(option.id, value: String($0)) }
                                         )
                                     ).disabled(!option.isEnabled)
+                                        .help(L10n.text(option.description ?? ""))
                                 } else {
                                     Picker(
                                         L10n.text(option.title),
@@ -97,6 +98,7 @@ struct VectorSymbologyView: View {
                                             Text(choice.titleIsUserData == true ? choice.title : L10n.text(choice.title)).tag(choice.id)
                                         }
                                     }.disabled(!option.isEnabled)
+                                        .help(L10n.text(option.description ?? ""))
                                 }
                             }
                         }

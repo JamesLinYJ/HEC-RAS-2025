@@ -9,7 +9,7 @@ namespace Ras.Backend;
 
 public sealed record LinkedResultProfilesRequest(string ProjectPath, string ProjectXml,
     string ProjectRevision, ResultPlanCandidate Anchor, ResultPlanCandidateGroup[] SelectedGroups,
-    int ProfileIndex = 0);
+    int ProfileIndex = 0, CoreLayerRequestContext? CoreLayerContext = null);
 public sealed record LinkedResultProfileStep(int ProfileIndex, string Name, string Time);
 public sealed record LinkedResultProfileFrame(string ResultPath, string Revision, string Name,
     string? OutputBlockName, int? ProfileIndex, int? NearestProfileIndex, string? Time,
@@ -32,7 +32,8 @@ public static class LinkedResultProfilesService
         ArgumentNullException.ThrowIfNull(request.Anchor);
         ArgumentNullException.ThrowIfNull(request.SelectedGroups);
         ResultPlanContextSnapshot context = ResultPlanContextService.Inspect(request.ProjectPath,
-            request.ProjectXml, request.Anchor.ResultPath, request.Anchor.Revision);
+            request.ProjectXml, request.Anchor.ResultPath, request.Anchor.Revision,
+            request.CoreLayerContext);
         if (!string.Equals(context.ProjectRevision, request.ProjectRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
         if (request.ProfileIndex < 0)

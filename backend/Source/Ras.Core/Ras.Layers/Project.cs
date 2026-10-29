@@ -517,7 +517,7 @@ public class Project
 	{
 	}
 
-	public Project(string filename, Func<string, bool> includeSourceFile)
+	public Project(string filename, Func<string, bool>? includeSourceFile)
 	{
 		if (!File.Exists(filename))
 		{
@@ -2509,7 +2509,7 @@ public class Project
 		finally { Directory.Delete(path, recursive: true); }
 	}
 
-	public OperationResult ExportPlanAsNewProject(Plan pl, string directory, ProjectExportConfig config = null, ProgressReporter pr = null)
+	public OperationResult ExportPlanAsNewProject(Plan pl, string directory, ProjectExportConfig config = null, ProgressReporter? pr = null)
 	{
 		return ExportPlansAsNewProject(new Plan[1] { pl }, directory, config, pr);
 	}

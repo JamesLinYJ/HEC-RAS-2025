@@ -66,7 +66,8 @@ public static class MapVectorSourceService
         MapSourceNodeCapture capture = MapSourceIdentity.ResolvePersistedNode(request.Map, request.Node, family);
         MapSourceIdentity.VerifyPersistedNode(request.Map, capture);
 
-        using ProjectScope projectScope = OpenProjectScope(request.Map.ProjectPath, request.Map.ProjectXml);
+        using ProjectScope projectScope = OpenProjectScope(request.Map.ProjectPath, request.Map.ProjectXml,
+            request.Map.CoreLayerContext);
         MapVectorSourceData data = ReadData(sourcePath, projectScope.Project);
         string expectedMapType = data.ShapeType switch
         {
@@ -432,21 +433,9 @@ public static class MapVectorSourceService
             : detail);
     }
 
-    private static ProjectScope OpenProjectScope(string projectPath, string? projectXml)
-    {
-        var project = new Project(Path.GetFullPath(projectPath));
-        try
-        {
-            if (!string.IsNullOrWhiteSpace(projectXml))
-                project.ApplyEditorMetadata(XElement.Parse(projectXml));
-            return new(project);
-        }
-        catch
-        {
-            DisposeProject(project);
-            throw;
-        }
-    }
+    private static ProjectScope OpenProjectScope(string projectPath, string? projectXml,
+        CoreLayerRequestContext? coreLayerContext) =>
+        new(CoreLayerImportService.OpenProject(Path.GetFullPath(projectPath), projectXml, coreLayerContext));
 
     private static void DisposeProject(Project project)
     {

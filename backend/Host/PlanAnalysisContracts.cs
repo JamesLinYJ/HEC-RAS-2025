@@ -2,7 +2,7 @@ namespace Ras.Backend;
 
 /// <summary>Immutable workspace identity used by read-only plan analysis and R2R generation.</summary>
 public sealed record PlanAnalysisProjectCapture(string ProjectPath, string ProjectRevision,
-    string ProjectXml, string ProjectXmlFingerprint);
+    string ProjectXml, string ProjectXmlFingerprint, CoreLayerRequestContext? CoreLayerContext = null);
 
 /// <summary>
 /// Exact in-memory Plan editor snapshot. This is applied to a private source Plan

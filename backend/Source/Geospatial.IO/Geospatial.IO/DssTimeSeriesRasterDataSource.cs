@@ -29,6 +29,10 @@ public class DssTimeSeriesRasterDataSource : IDisposable, ITimeSeriesRasterProvi
 
 	private readonly NativeResourceMode _resourceMode;
 
+	private readonly CancellationToken _cancellationToken;
+
+	private readonly Action<int>? _frameRead;
+
 	private readonly Lock _readerLock = new Lock();
 
 	private bool _isDisposed;
@@ -117,13 +121,17 @@ public class DssTimeSeriesRasterDataSource : IDisposable, ITimeSeriesRasterProvi
 		_filename = dssr.Filename;
 		_pathname = CleanOutTimeParts(pathname);
 		_resourceMode = NativeResourceMode.OnLoan;
+		_cancellationToken = default;
 		Init();
 	}
 
-	public DssTimeSeriesRasterDataSource(string filename, string pathname, bool keepOpen = true)
+	public DssTimeSeriesRasterDataSource(string filename, string pathname, bool keepOpen = true,
+		CancellationToken cancellationToken = default, Action<int>? frameRead = null)
 	{
 		_filename = filename;
 		_pathname = CleanOutTimeParts(pathname);
+		_cancellationToken = cancellationToken;
+		_frameRead = frameRead;
 		if (keepOpen)
 		{
 			_dssr = new DssReader(filename);
@@ -141,7 +149,10 @@ public class DssTimeSeriesRasterDataSource : IDisposable, ITimeSeriesRasterProvi
 		UseReader((DssReader dssr) =>
 		{
 			DssPath dssPath = new DssPath(_pathname);
-			List<DssPath> filterByPart = PathAssist.FilterByPart(dssr.GetCatalog().Paths, dssPath.Apart, dssPath.Bpart, dssPath.Cpart, dssPath.Dpart, dssPath.Epart, dssPath.Fpart);
+			// DSS catalogs condense time-series D-part paths in Paths. A gridded
+			// raster needs the exact record pathname for every valid time so the
+			// frame reader can retrieve each grid independently.
+			List<DssPath> filterByPart = PathAssist.FilterByPart(dssr.GetCatalog().UnCondensedPaths, dssPath.Apart, dssPath.Bpart, dssPath.Cpart, dssPath.Dpart, dssPath.Epart, dssPath.Fpart);
 			Dictionary<DateTime, string> stringByDateTime = new Dictionary<DateTime, string>();
 			for (int i = 0; i < filterByPart.Count; i++)
 			{
@@ -195,6 +206,7 @@ public class DssTimeSeriesRasterDataSource : IDisposable, ITimeSeriesRasterProvi
 
 	public bool ReadBlock(int profileIndex, long blockIndex, Memory<float> block)
 	{
+		_cancellationToken.ThrowIfCancellationRequested();
 		if (blockIndex != 0L)
 		{
 			throw new ArgumentOutOfRangeException();
@@ -204,7 +216,9 @@ public class DssTimeSeriesRasterDataSource : IDisposable, ITimeSeriesRasterProvi
 		{
 			grid = dssr.GetGrid(_paths[profileIndex], retrieveData: true);
 		});
+		_cancellationToken.ThrowIfCancellationRequested();
 		CorrectGridData(grid, block);
+		_frameRead?.Invoke(profileIndex);
 		return true;
 	}
 

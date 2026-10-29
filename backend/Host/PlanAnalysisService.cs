@@ -29,10 +29,10 @@ public static partial class ModelEditorAdapter
     {
         ArgumentNullException.ThrowIfNull(request);
         PlanAnalysisProjectCapture capture = ValidatePlanAnalysisCapture(request.Capture);
-        var project = new Project(capture.ProjectPath);
+        var project = CoreLayerImportService.OpenProject(capture.ProjectPath, capture.ProjectXml,
+            capture.CoreLayerContext);
         try
         {
-            project.ApplyEditorMetadata(ParsePlanAnalysisProjectXml(capture.ProjectXml));
             var observable = new ObservableProject(project, Utility.SynchronizationContext.None);
             PlanAnalysisDiffOption[] options = BuildPlanDiffOptions(observable);
             EnsurePlanAnalysisSourcesCurrent(capture);
@@ -88,10 +88,10 @@ public static partial class ModelEditorAdapter
         ArgumentNullException.ThrowIfNull(request);
         PlanAnalysisProjectCapture capture = ValidatePlanAnalysisCapture(request.Capture);
         PlanMatrixPlanChoice[] plans;
-        var project = new Project(capture.ProjectPath);
+        var project = CoreLayerImportService.OpenProject(capture.ProjectPath, capture.ProjectXml,
+            capture.CoreLayerContext);
         try
         {
-            project.ApplyEditorMetadata(ParsePlanAnalysisProjectXml(capture.ProjectXml));
             plans = project.Plans
                 .Where(plan => !plan.IsResult)
                 .OrderBy(plan => plan.Name, Comparer<string>.Create(TreeNode.NameComparer.CompareNames))
@@ -467,6 +467,8 @@ public static partial class ModelEditorAdapter
             throw new ArgumentException("Choose the saved owning project.");
         if (!string.Equals(Revision(projectPath), capture.ProjectRevision, StringComparison.OrdinalIgnoreCase))
             throw new SourceFileChangedException();
+        if (capture.CoreLayerContext is { } coreLayerContext)
+            CoreLayerImportService.ValidateContext(coreLayerContext, projectPath);
         string fingerprint = HashPlanAnalysisText(capture.ProjectXml);
         if (!string.Equals(fingerprint, capture.ProjectXmlFingerprint, StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("The captured project draft fingerprint does not match its XML.");
@@ -500,7 +502,8 @@ public static partial class ModelEditorAdapter
         var request = new ModelSaveRequest(canonicalPlan, "Plan", capture.ProjectPath, revision,
             draft?.Fields ?? new Dictionary<string, string>(StringComparer.Ordinal),
             new Dictionary<string, ImageData[]>(StringComparer.Ordinal), capture.ProjectXml,
-            draft?.SourceState, PlanTimeWindowEdits: draft?.PlanTimeWindowEdits);
+            draft?.SourceState, PlanTimeWindowEdits: draft?.PlanTimeWindowEdits,
+            CoreLayerContext: capture.CoreLayerContext);
         var context = new ModelContext(request);
         try
         {

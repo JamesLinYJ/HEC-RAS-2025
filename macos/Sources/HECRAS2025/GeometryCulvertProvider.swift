@@ -6,6 +6,7 @@ struct GeometryCulvertModelRequest: Codable, Hashable, Sendable {
     let kind: String
     let projectPath: String?
     let projectXml: String?
+    var coreLayerContext: CoreLayerRequestContext? = nil
 }
 
 struct GeometryCulvertMutation: Codable, Sendable {
@@ -264,18 +265,22 @@ final class BackendGeometryCulvertProvider: GeometryCulvertProvider, GeometryCul
     GeometryCulvertMapCommandProviding {
     private let client: BackendProcessClient
     private let currentProject: @MainActor () -> ProjectDocument?
+    private let currentCoreLayerContext: @MainActor () -> CoreLayerRequestContext?
 
     init(client: BackendProcessClient? = nil,
-         currentProject: @escaping @MainActor () -> ProjectDocument? = { nil }) {
+         currentProject: @escaping @MainActor () -> ProjectDocument? = { nil },
+         currentCoreLayerContext: @escaping @MainActor () -> CoreLayerRequestContext? = { nil }) {
         self.client = client ?? BackendProcessClient(executableURL: Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/Backend/HECRASBackend"))
         self.currentProject = currentProject
+        self.currentCoreLayerContext = currentCoreLayerContext
     }
 
     func modelRequest(for asset: ProjectAsset) -> GeometryCulvertModelRequest {
         let project = currentProject()
         return GeometryCulvertModelRequest(assetPath: asset.url.path, kind: "Geometry",
-            projectPath: project?.url?.path, projectXml: project?.editorXML)
+            projectPath: project?.url?.path, projectXml: project?.editorXML,
+            coreLayerContext: currentCoreLayerContext())
     }
 
     func load(_ model: GeometryCulvertModelRequest, expectedRevision: String?, draftState: String?,

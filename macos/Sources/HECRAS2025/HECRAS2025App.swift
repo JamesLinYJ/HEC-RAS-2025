@@ -96,6 +96,15 @@ struct HECRAS2025App: App {
         }
         .defaultSize(width: 1000, height: 700)
         .restorationBehavior(.disabled)
+        WindowGroup(L10n.text("Culvert Time Series"), for: MapResultCulvertTimeSeriesWindowRoute.self) { route in
+            if let route = route.wrappedValue {
+                MapResultCulvertTimeSeriesWindow(store: store, route: route)
+                    .environment(\.locale, store.interfaceLocale)
+                    .preferredColorScheme(store.theme == "Dark" ? .dark : store.theme == "Light" ? .light : nil)
+            }
+        }
+        .defaultSize(width: 1000, height: 700)
+        .restorationBehavior(.disabled)
         Window(L10n.text("Animation Testing"), id: "animation-testing") {
             WorkspaceAnimationTestingView()
                 .environment(\.locale, store.interfaceLocale)
@@ -113,13 +122,17 @@ struct HECRAS2025App: App {
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
         Window(L10n.text("Stable Channel"), id: "stable-channel-debug") {
+            let capturedProjectSessionID = store.projectSessionID
+            let capturedProjectPath = store.document?.url?.path
+            let capturedCoreLayerContext = store.captureCoreLayerRequestContext()
             StableChannelDebugWindow(session: store.stableChannelDebug)
                 .environment(\.locale, store.interfaceLocale)
                 .preferredColorScheme(store.theme == "Dark" ? .dark : store.theme == "Light" ? .light : nil)
-                .task(id: store.projectSessionID) {
+                .task(id: capturedProjectSessionID) {
                     guard store.launchDebugEnabled else { return }
-                    await store.stableChannelDebug.load(projectPath: store.document?.url?.path,
-                        projectSessionID: store.projectSessionID)
+                    await store.stableChannelDebug.load(projectPath: capturedProjectPath,
+                        projectSessionID: capturedProjectSessionID,
+                        coreLayerContext: capturedCoreLayerContext)
                 }
         }
         .defaultSize(width: 860, height: 740)
@@ -201,15 +214,19 @@ struct WorkspaceCommands: Commands {
             if store.launchDebugEnabled {
                 Button(L10n.text("Developer Tools…")) { openWindow(id: "workspace-debug-tools") }
                 Button(L10n.text("Stable Channel…")) {
+                    let capturedProjectPath = store.document?.url?.path
+                    let capturedProjectSessionID = store.projectSessionID
+                    let capturedCoreLayerContext = store.captureCoreLayerRequestContext()
                     openWindow(id: "stable-channel-debug")
-                    Task { await store.stableChannelDebug.load(projectPath: store.document?.url?.path,
-                        projectSessionID: store.projectSessionID) }
+                    Task { await store.stableChannelDebug.load(projectPath: capturedProjectPath,
+                        projectSessionID: capturedProjectSessionID,
+                        coreLayerContext: capturedCoreLayerContext) }
                 }.disabled(store.isOpeningProject || store.isSavingAll || store.isRunningProjectTool)
             }
             Divider()
             ForEach(["Create", "Import", "Export", "Map Tools", "Analysis", "Tags", "Support"] + (store.launchDebugEnabled ? ["Testing"] : []), id: \.self) { group in
                 Menu(L10n.text(group)) {
-                    ForEach(ToolKind.allCases.filter { $0.group == group }) { kind in
+                    ForEach(ToolKind.generalMenuCases.filter { $0.group == group }) { kind in
                         Button(L10n.text(kind.rawValue)) { openWindow(id: "workspace"); store.activeTool = kind }.disabled(kind.requiresProject && !store.hasProject)
                     }
                 }

@@ -155,9 +155,10 @@ public static partial class ModelEditorAdapter
         string revision = Revision(assetPath);
         if (revision != request.Revision) throw new SourceFileChangedException();
 
-        VerifyOwningProject(projectPath, assetPath);
+        VerifyOwningProject(projectPath, assetPath, request.CoreLayerContext);
 
-        ModelRequest model = new(assetPath, "Plan", projectPath, projectXml);
+        ModelRequest model = new(assetPath, "Plan", projectPath, projectXml,
+            CoreLayerContext: request.CoreLayerContext);
         using var context = new ModelContext(model);
         if (context.Layer is not Plan plan || context.Observable is not ObservablePlan)
             throw new ArgumentException("The selected model is not a source plan.");
@@ -183,9 +184,10 @@ public static partial class ModelEditorAdapter
     private static bool HasSamples(Dictionary<string, ModelSample[]>? samples) =>
         samples?.Any(pair => pair.Value is null || pair.Value.Length > 0) == true;
 
-    private static void VerifyOwningProject(string projectPath, string assetPath)
+    private static void VerifyOwningProject(string projectPath, string assetPath,
+        CoreLayerRequestContext? coreLayerContext)
     {
-        var project = new Project(projectPath);
+        var project = CoreLayerImportService.OpenProject(projectPath, null, coreLayerContext);
         try
         {
             if (!project.Plans.Any(plan => SourceFilePaths.SameSourceFile(plan.Filename, assetPath)))

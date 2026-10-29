@@ -120,6 +120,7 @@ struct VectorPlotOption: Identifiable, Sendable {
     var value: String
     let choices: [EditorChoice]
     let isEnabled: Bool
+    var description: String? = nil
 }
 struct VectorSymbologySnapshot: Sendable {
     let options: [VectorStyleOption]

@@ -1,10 +1,18 @@
 using System.Globalization;
+using System.Reflection;
+using System.Text.Json.Serialization;
 using System.Xml.Linq;
 using Geospatial.GDALAssist;
+using Geospatial.Rasters.Modifiers;
+using Geospatial.Rendering.Layers;
+using Geospatial.Rendering.Layers.Attributes;
+using Geospatial.Vectors;
 using H5Assist;
 using Ras.Layers;
 using Ras.Layers.Terrains;
 using Ras.Observables;
+using Ras.Observables.Layers;
+using Ras.Rendering;
 using Utility.Files;
 
 namespace Ras.Backend;
@@ -18,7 +26,10 @@ public sealed record CatalogTreeRequest(
     string[]? FocusedPlanIds = null,
     string? MapId = null,
     CatalogTreeMapDocument[]? Maps = null,
-    string[]? FocusedBoundaryConditionIds = null);
+    string[]? FocusedBoundaryConditionIds = null,
+    string? ProjectSessionID = null,
+    CoreLayerReferenceCapture[]? ExternalCoreLayerReferences = null,
+    CoreLayerRequestContext? CoreLayerContext = null);
 public sealed record CatalogTreeProperty(string Id, string Label, string Value);
 public sealed record CatalogTreeSummary(string? Name = null, string? Filename = null,
     string? DateCreated = null, string? DateLastModified = null, string? Description = null);
@@ -54,6 +65,12 @@ public sealed record CatalogTreeNode(
     string? ResultComputeSourcePath = null,
     string? ResultComputeSourceRevision = null)
 {
+    // Request-scoped marker used only while a compute writer owns this exact
+    // Result source. It is deliberately not a public AssetID and never crosses
+    // the map-tree wire contract.
+    [JsonIgnore]
+    internal string? ProtectedResultSourcePath { get; init; }
+
     // Retained internally so MapTreeService can mirror MultiResultVisualContext's
     // Latest key-frame selection without adding implementation metadata to the
     // native tree wire model.
@@ -137,15 +154,16 @@ public static class CatalogTreeService
     private static CatalogTreeNode[] BuildableMapTreeDefaults(ObservableProject observables,
         IEnumerable<string> geometryIDs, IEnumerable<string> boundaryConditionIDs)
     {
-        var included = geometryIDs.ToHashSet(PathComparer);
+        var included = geometryIDs.Select(SourceFilePaths.Canonical).ToHashSet(PathComparer);
         CatalogTreeNode[] geometries = observables.Geometries
             .Select(GeometryProjectNode)
-            .Where(node => node.AssetID is { } path && included.Contains(path))
+            .Where(node => node.AssetID is { } path && included.Contains(SourceFilePaths.Canonical(path)))
             .ToArray();
-        var includedBoundaryConditions = boundaryConditionIDs.ToHashSet(PathComparer);
+        var includedBoundaryConditions = boundaryConditionIDs.Select(SourceFilePaths.Canonical).ToHashSet(PathComparer);
         CatalogTreeNode[] boundaries = observables.BoundaryConditions
             .Select(BoundaryConditionProjectNode)
-            .Where(node => node.AssetID is { } path && includedBoundaryConditions.Contains(path))
+            .Where(node => node.AssetID is { } path &&
+                includedBoundaryConditions.Contains(SourceFilePaths.Canonical(path)))
             .ToArray();
         return [Group("LayersSectionContext", "Layers", [..geometries, ..boundaries])];
     }
@@ -184,13 +202,14 @@ public static class CatalogTreeService
     private static CatalogTreeNode WithDirectBoundaryConditions(CatalogTreeNode layers,
         ObservableProject observables, IEnumerable<string> boundaryConditionIDs)
     {
-        var included = boundaryConditionIDs.ToHashSet(PathComparer);
+        var included = boundaryConditionIDs.Select(SourceFilePaths.Canonical).ToHashSet(PathComparer);
         CatalogTreeNode[] boundaries = observables.BoundaryConditions
             .Select(BoundaryConditionProjectNode)
-            .Where(node => node.AssetID is { } path && included.Contains(path))
+            .Where(node => node.AssetID is { } path && included.Contains(SourceFilePaths.Canonical(path)))
             .ToArray();
         return layers with { Children = [..layers.Children ?? [], ..boundaries] };
     }
+
 
     private static CatalogTreeNode PlanAssociation(CatalogTreeNode node)
     {
@@ -303,8 +322,8 @@ public static class CatalogTreeService
     private static CatalogTreeNode[] BuildProjectTree(Project project, ObservableProject observables,
         CatalogTreeRequest request)
     {
-        var plans = observables.Plans.ToDictionary(item => AssetPath(project, item.Filename)!, StringComparer.Ordinal);
-        var geometries = observables.Geometries.ToDictionary(item => AssetPath(project, item.Filename)!, StringComparer.Ordinal);
+        var plans = observables.Plans.ToDictionary(item => SourceFilePaths.Canonical(AssetPath(project, item.Filename)!), PathComparer);
+        var geometries = observables.Geometries.ToDictionary(item => SourceFilePaths.Canonical(AssetPath(project, item.Filename)!), PathComparer);
         var results = observables.Results.ToArray();
 
         CatalogTreeNode[] baseRoots =
@@ -335,7 +354,8 @@ public static class CatalogTreeService
         IEnumerable<string> focusedIDs, IReadOnlyDictionary<string, ObservablePlan> plans,
         IReadOnlyList<ObservableResult> results, CatalogTreeNode[] baseRoots)
     {
-        var focused = focusedIDs.Distinct(StringComparer.Ordinal).Select(id => plans.GetValueOrDefault(id))
+        var focused = focusedIDs.Select(SourceFilePaths.Canonical).Distinct(PathComparer)
+            .Select(id => plans.GetValueOrDefault(id))
             .Where(item => item != null).Cast<ObservablePlan>().ToArray();
         var matchingChildren = new List<CatalogTreeNode>();
         bool geometriesMatch = false, terrainsMatch = false, nvaluesMatch = false, boundariesMatch = false;
@@ -370,7 +390,8 @@ public static class CatalogTreeService
         IReadOnlyDictionary<string, ObservableGeometry> geometries,
         CatalogTreeNode[] baseRoots)
     {
-        var focused = focusedIDs.Distinct(StringComparer.Ordinal).Select(id => geometries.GetValueOrDefault(id))
+        var focused = focusedIDs.Select(SourceFilePaths.Canonical).Distinct(PathComparer)
+            .Select(id => geometries.GetValueOrDefault(id))
             .Where(item => item != null).Cast<ObservableGeometry>().ToArray();
         var matchingChildren = new List<CatalogTreeNode>();
         bool terrainsMatch = false, nvaluesMatch = false, classificationsMatch = false;
@@ -540,7 +561,8 @@ public static class CatalogTreeService
     }
 
     internal static TerrainInputMapContextData ReadTerrainInputMapContext(
-        CatalogTreeRequest request, string inputNodeID, string expectedSourceClass, string expectedTerrainPath)
+        CatalogTreeRequest request, string inputNodeID, string expectedSourceClass, string expectedTerrainPath,
+        TerrainInputMapRenderOptions? renderOptions = null)
     {
         using var project = new CatalogProjectContext(request with { Mode = "Project" });
         string canonicalTerrainPath = SourceFilePaths.Canonical(expectedTerrainPath);
@@ -584,11 +606,128 @@ public static class CatalogTreeService
             _ => throw new NotSupportedException("This terrain input does not expose a source map render layer.")
         };
 
+        TerrainInputMapLeveeRendererData? leveeRenderer = null;
+        if (renderOptions is { ShowProfileStations: true } or { ShowTin: true })
+        {
+            if (!double.IsFinite(renderOptions.RenderScale) || renderOptions.RenderScale <= 0 ||
+                renderOptions.RenderScale > 64 || renderOptions.ShowTin != (renderOptions.TinOptions is not null))
+                throw new ArgumentException("The Levee source-render options are invalid.");
+            if (observable is not ObservableLeveeModTerrainInput leveeInput)
+                throw new NotSupportedException("Only a Levee Mod terrain input exposes these map render options.");
+            if (renderOptions.ShowTin && !renderOptions.DebugMode)
+                throw new InvalidOperationException("The Levee TIN map layer is available only in debug mode.");
+
+            Projection? viewportProjection = mapProjection;
+            Projection? inputProjection = sourceProjection;
+            ReprojectionTransformer? projectToSource = viewportProjection is not null && inputProjection is not null &&
+                !viewportProjection.IsEqual(inputProjection)
+                    ? ReprojectionTransformer.GetOrMake(viewportProjection, inputProjection) : null;
+
+            MapSourceRasterFrame? profileStations = null;
+            if (renderOptions.ShowProfileStations)
+            {
+                var baseline = new LeveeModRenderLayer(leveeInput.AsPolylineCollection(), leveeInput.Layer);
+                var withStations = new LeveeModRenderLayer(leveeInput.AsPolylineCollection(), leveeInput.Layer)
+                {
+                    ShowProfileStations = true
+                };
+                profileStations = MapSourceRasterRendering.Difference(
+                    baseline, withStations, renderOptions.Viewport, projectToSource,
+                    renderOptions.RenderScale);
+            }
+
+            MapSourceRasterFrame? tinFrame = null;
+            int tinFeatureCount = 0;
+            string? tinWarning = null;
+            TerrainInputMapTinPlotOptionDescriptor[] tinPlotOptions = [];
+            if (renderOptions.ShowTin)
+            {
+                var tins = new List<Tin>();
+                foreach (ObservableLeveeMod feature in leveeInput.Features)
+                {
+                    LeveeMod baseFeature = feature.BaseFeature;
+                    if (baseFeature.TryEvaluateAssociations(out var properties) &&
+                        LeveeResampler.TryBuildTin(baseFeature, properties, out Tin tin))
+                        tins.Add(tin);
+                }
+                tinFeatureCount = tins.Count;
+                if (tins.Count > 0)
+                {
+                    var tinRenderer = new MultiTinRenderLayer(tins);
+                    tinPlotOptions = ApplyTinPlotOptions(tinRenderer,
+                        renderOptions.TinOptions ?? throw new ArgumentException("The Levee TIN options are missing."));
+                    tinFrame = MapSourceRasterRendering.Render(tinRenderer, renderOptions.Viewport,
+                        projectToSource, renderOptions.RenderScale);
+                }
+                else
+                    tinWarning = "No simple cut/fill feature produced a TIN. Check each feature's station/elevation profile and its property association.";
+            }
+
+            leveeRenderer = new TerrainInputMapLeveeRendererData(renderOptions.Viewport,
+                profileStations, tinFrame, tinFeatureCount, tinWarning, tinPlotOptions);
+        }
+
         (string? currentPath, string? currentRevision) = TryReadStableRevision(canonicalTerrainPath);
         if (!PathComparer.Equals(currentPath, stablePath) || !string.Equals(currentRevision, revision, StringComparison.Ordinal))
             throw new SourceFileChangedException();
         return new TerrainInputMapContextData(inputNodeID, inputMatches[0].index, canonicalTerrainPath, revision,
-            expectedSourceClass, features);
+            expectedSourceClass, features, leveeRenderer);
+    }
+
+    private static TerrainInputMapTinPlotOptionDescriptor[] ApplyTinPlotOptions(
+        MultiTinRenderLayer renderer, TerrainInputMapTinRenderOptions values)
+    {
+        if (values.SurfaceFillMode is not ("none" or "z" or "m") || values.LabelEdges || values.LabelPoints)
+            throw new ArgumentException("The Levee TIN plot options are unsupported.");
+        Dictionary<string, (PlotOption Option, PropertyInfo Property)> options = renderer.GetPlotOptions()
+            .ToDictionary(pair => pair.Key.Name, pair => (pair.Key, pair.Value), StringComparer.Ordinal);
+
+        // PaintZ and PaintM both write SurfaceFillMode. Clear the other alias
+        // first, then set the selected one so the source setter cannot leave
+        // the requested fill mode disabled.
+        if (values.SurfaceFillMode == "z")
+        {
+            SetBoolean("PaintM", false);
+            SetBoolean("PaintZ", true);
+        }
+        else if (values.SurfaceFillMode == "m")
+        {
+            SetBoolean("PaintZ", false);
+            SetBoolean("PaintM", true);
+        }
+        else
+        {
+            SetBoolean("PaintZ", false);
+            SetBoolean("PaintM", false);
+        }
+        SetBoolean("RenderEdges", values.RenderEdges);
+        SetBoolean("RenderPoints", values.RenderPoints);
+        SetBoolean("RenderDeletedTris", values.RenderDeletedTriangles);
+        SetBoolean("LabelTriangles", values.LabelTriangles);
+
+        return options.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair =>
+        {
+            string propertyName = pair.Value.Property.Name;
+            bool implemented = propertyName is not ("LabelEdges" or "LabelPoints");
+            string value = pair.Value.Property.GetValue(renderer) is bool boolean
+                ? boolean ? "true" : "false"
+                : throw new InvalidDataException("The MultiTin renderer exposed a non-Boolean PlotOption.");
+            string description = pair.Value.Option.Description ?? string.Empty;
+            if (!implemented)
+                description = string.IsNullOrEmpty(description) ?
+                    "The retained MultiTin renderer does not implement this label drawing option." :
+                    description + "\nThe retained MultiTin renderer does not implement this label drawing option.";
+            return new TerrainInputMapTinPlotOptionDescriptor(propertyName,
+                pair.Value.Option.Name, pair.Value.Option.Label, description, value,
+                implemented, implemented);
+        }).ToArray();
+
+        void SetBoolean(string name, bool value)
+        {
+            if (!options.TryGetValue(name, out var option) || option.Property.PropertyType != typeof(bool))
+                throw new InvalidOperationException("The retained MultiTin PlotOption contract changed.");
+            option.Property.SetValue(renderer, value);
+        }
     }
 
     private static TerrainInputMapContextFeature? LineFeature(string inputNodeID, int index,
@@ -806,11 +945,24 @@ public static class CatalogTreeService
                 .Select(SourceFilePaths.Canonical)
                 .ToHashSet(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             Diagnostics = new CatalogDiagnosticsService.Context(path, protectedSources);
-            Project = new Project(path, sourcePath =>
-                !protectedSources.Contains(SourceFilePaths.Canonical(sourcePath)));
+            if (request.CoreLayerContext is not null)
+            {
+                if (request.ProjectSessionID is not null &&
+                    !string.Equals(request.ProjectSessionID, request.CoreLayerContext.ProjectSessionID,
+                        StringComparison.Ordinal)) throw new SourceFileChangedException();
+                if (request.ExternalCoreLayerReferences is { Length: > 0 } legacyReferences &&
+                    !legacyReferences.SequenceEqual(request.CoreLayerContext.References))
+                    throw new SourceFileChangedException();
+            }
+            else if (request.ExternalCoreLayerReferences is { Length: > 0 })
+            {
+                throw new SourceFileChangedException();
+            }
+            Project = CoreLayerImportService.OpenProject(path, request.ProjectXml,
+                request.CoreLayerContext,
+                sourcePath => !protectedSources.Contains(SourceFilePaths.Canonical(sourcePath)));
             try
             {
-                if (request.ProjectXml != null) Project.ApplyEditorMetadata(XElement.Parse(request.ProjectXml));
                 Diagnostics.BindProject(Project);
                 Observables = new ObservableProject(Project, Utility.SynchronizationContext.None);
             }

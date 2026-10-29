@@ -7,7 +7,7 @@ using Ras.Layers;
 namespace Ras.Backend;
 
 public sealed record SurfaceCreationRequest(string Kind, string ProjectPath, string ProjectXml,
-    string Name, string? Revision = null);
+    string Name, string? Revision = null, CoreLayerRequestContext? CoreLayerContext = null);
 public sealed record SurfaceCreationInspection(string Revision, bool CanExecute, string? ValidationMessage,
     string SuggestedName, string TargetDirectory);
 
@@ -141,10 +141,10 @@ public static class SurfaceCreationService
 
             string projectPath = Path.GetFullPath(request.ProjectPath);
             if (!File.Exists(projectPath)) throw new FileNotFoundException("The project file was not found.", projectPath);
-            Project = new Project(projectPath);
+            Project = CoreLayerImportService.OpenProject(projectPath, request.ProjectXml,
+                request.CoreLayerContext);
             try
             {
-                Project.ApplyEditorMetadata(XElement.Parse(request.ProjectXml));
                 TargetDirectory = request.Kind switch
                 {
                     "newTerrain" => Project.TerrainsDirectory,

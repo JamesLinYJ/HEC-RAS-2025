@@ -119,17 +119,44 @@ struct RasterSymbologyView: View {
                     .accessibilityLabel("Color Palette Preview")
                 if let draft = session.draft {
                     Form {
-                        Toggle("Grayscale", isOn: flag(\.grayscale))
-                        Toggle("Edit Symbology", isOn: flag(\.isEditing))
-                        Toggle("Update Histogram With View", isOn: flag(\.updateHistogramWithView))
-                            .disabled(!draft.canComputeHistogram)
-                        Picker("Value Source", selection: Binding(get: { session.draft?.valueSource ?? .manual }, set: { value in
-                            Task { await session.setSource(value, provider: store.rasterSymbologyProvider) }
-                        })) {
-                            ForEach(RasterValueSource.allCases, id: \.self) { mode in
-                                Text(LocalizedStringKey(mode.rawValue)).tag(mode).disabled(mode == .histogram && !draft.canComputeHistogram)
+                        Section("Symbology") {
+                            Toggle("Grayscale", isOn: flag(\.grayscale))
+                            Toggle("Edit Symbology", isOn: flag(\.isEditing))
+                            Toggle("Update Histogram With View", isOn: flag(\.updateHistogramWithView))
+                                .disabled(!draft.canComputeHistogram)
+                            Picker("Value Source", selection: Binding(get: { session.draft?.valueSource ?? .manual }, set: { value in
+                                Task { await session.setSource(value, provider: store.rasterSymbologyProvider) }
+                            })) {
+                                ForEach(RasterValueSource.allCases, id: \.self) { mode in
+                                    Text(LocalizedStringKey(mode.rawValue)).tag(mode).disabled(mode == .histogram && !draft.canComputeHistogram)
+                                }
+                            }.disabled(!draft.isEditing)
+                        }
+                        if !session.additionalOptions.isEmpty {
+                            Section("Additional Options") {
+                                ForEach(session.additionalOptions) { option in
+                                    if option.isBoolean {
+                                        Toggle(L10n.text(option.title), isOn: Binding(
+                                            get: { option.value.lowercased() == "true" },
+                                            set: { session.setAdditional(option.id, value: String($0)) }
+                                        ))
+                                        .disabled(!option.isEnabled)
+                                        .help(L10n.text(option.description ?? ""))
+                                    } else {
+                                        Picker(L10n.text(option.title), selection: Binding(
+                                            get: { option.value },
+                                            set: { session.setAdditional(option.id, value: $0) }
+                                        )) {
+                                            ForEach(option.choices) { choice in
+                                                Text(L10n.text(choice.title)).tag(choice.id)
+                                            }
+                                        }
+                                        .disabled(!option.isEnabled)
+                                        .help(L10n.text(option.description ?? ""))
+                                    }
+                                }
                             }
-                        }.disabled(!draft.isEditing)
+                        }
                     }.formStyle(.grouped)
                     Text(LocalizedStringKey(modeHelp(draft.valueSource))).font(.caption).foregroundStyle(.secondary)
                     VStack(spacing: 8) {

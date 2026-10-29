@@ -138,15 +138,26 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var rasterMapSources: [RasterMapSourceDescriptor] = []
     @Published private(set) var rasterMapSourceInfoStats: [String: RasterImportContextSource] = [:]
     @Published private(set) var isRasterMapLoading = false
+    @Published private(set) var pendingGdbMapImport: GdbMapImportSession?
     private var visualizationMapIDs: [Int: UUID] = [:]
     private var visualizationMapIdentities: [Int: VisualizationMapIdentity] = [:]
     private var rasterMapLoadTask: Task<Void, Never>?
     private var rasterMapLoadRevision = 0
     var rasterMapSourcesForActiveMap: [RasterMapSourceDescriptor] {
-        rasterMapSources.filter { $0.sourceMapID == lastActiveMapID }
+        rasterMapSources.filter {
+            $0.sourceMapID == lastActiveMapID && $0.mapLayerType == "SingleBandRasterMapLayer"
+        }
     }
     @Published var mapLegends: [MapLegend] = []
     @Published private(set) var projectSessionID = UUID()
+    let calculatorLayerRegistry = CalculatorLayerRegistry()
+    @Published private(set) var coreLayerReferencesRevision = 0
+    private let coreLayerReferenceRegistry = CoreLayerReferenceRegistry()
+    @Published private(set) var isCoreLayerReferenceManagerPresented = false
+    @Published private(set) var isManagingCoreLayerReferences = false
+    @Published private(set) var coreLayerImportPresentation: CoreLayerImportPresentation?
+    @Published private(set) var isRunningCoreLayerImport = false
+    private var coreLayerImportScopedURL: (url: URL, started: Bool)?
     private var mapStates: [UUID: MapState] = [:]
     private var mapStateSubscriptions: [UUID: AnyCancellable] = [:]
     private var mapMeshErrorSourceSubscriptions: [UUID: AnyCancellable] = [:]
@@ -486,12 +497,12 @@ final class WorkspaceStore: ObservableObject {
         }
     }
     var catalogTreeContext: LayerTreeContext {
-        LayerTreeContext(projectSessionID: projectSessionID, projectURL: document?.url, mapID: MapState.projectMapID, mode: "Catalog", focusedGeometryIDs: [], focusedPlanIDs: [], projectRevision: treeProjectRevision, assetsRevision: assetsRevision)
+        LayerTreeContext(projectSessionID: projectSessionID, projectURL: document?.url, mapID: MapState.projectMapID, mode: "Catalog", focusedGeometryIDs: [], focusedPlanIDs: [], projectRevision: treeProjectRevision, assetsRevision: assetsRevision, coreLayerContext: captureCoreLayerRequestContext())
     }
     private var layerTreeSubscription: AnyCancellable?
     var layerTreeContext: LayerTreeContext {
         LayerTreeContext(projectSessionID: projectSessionID, projectURL: document?.url, mapID: lastActiveMapID, mode: treeMode.rawValue,
-            focusedGeometryIDs: focusedGeometryIDs.sorted(), focusedPlanIDs: focusedPlanIDs.sorted(), projectRevision: treeProjectRevision, assetsRevision: assetsRevision)
+            focusedGeometryIDs: focusedGeometryIDs.sorted(), focusedPlanIDs: focusedPlanIDs.sorted(), projectRevision: treeProjectRevision, assetsRevision: assetsRevision, coreLayerContext: captureCoreLayerRequestContext())
     }
     /// A MultiResult owns a current project Plan even when it is placed
     /// directly in a Geometry/Project map rather than beneath a Plan row.
@@ -569,7 +580,491 @@ final class WorkspaceStore: ObservableObject {
         return .init(projectSessionID: projectSessionID, projectURL: document?.url, mapID: mapID,
             mode: "Project", focusedGeometryIDs: [], focusedPlanIDs: [],
             projectRevision: treeProjectRevision, assetsRevision: assetsRevision,
-            resultSelectionOverrides: resultOverrides, resultSelectionError: resultError)
+            resultSelectionOverrides: resultOverrides, coreLayerContext: captureCoreLayerRequestContext(),
+            resultSelectionError: resultError)
+    }
+    func captureCoreLayerRequestContext() -> CoreLayerRequestContext? {
+        guard let document, let url = document.url, let revision = document.sourceRevision,
+              !isOpeningProject, !isClosingTab else { return nil }
+        return coreLayerReferenceRegistry.context(sessionID: projectSessionID,
+            projectURL: url, projectRevision: revision)
+    }
+
+    var sessionCoreLayerReferences: [CoreLayerReferenceCapture] {
+        _ = coreLayerReferencesRevision
+        guard let document, let projectURL = document.url,
+              !isOpeningProject, !isClosingTab else { return [] }
+        return coreLayerReferenceRegistry.references(sessionID: projectSessionID,
+            projectURL: projectURL).sorted { ($0.kind, $0.name, $0.referenceID) < ($1.kind, $1.name, $1.referenceID) }
+    }
+
+    func presentCoreLayerReferenceManager() {
+        guard document?.url != nil, !isOpeningProject, !isClosingTab else { return }
+        isCoreLayerReferenceManagerPresented = true
+    }
+
+    func dismissCoreLayerReferenceManager() {
+        isCoreLayerReferenceManagerPresented = false
+    }
+
+    func removeCoreLayerReference(_ reference: CoreLayerReferenceCapture) throws {
+        guard !isManagingCoreLayerReferences, !isRunningCoreLayerImport,
+              !isSavingAll, !isRunningProjectTool, !isOpeningProject, !isClosingTab,
+              !editorSessions.values.contains(where: \.isBusyExceptCoreLayerConflict),
+              let document, let projectURL = document.url,
+              let projectRevision = document.sourceRevision,
+              let context = captureCoreLayerRequestContext(),
+              context.references.contains(reference) else {
+            throw BackendServiceError(code: "sourceChanged",
+                message: "The project or selected core-layer reference changed. Refresh the reference list and try again.")
+        }
+        isManagingCoreLayerReferences = true
+        defer { isManagingCoreLayerReferences = false }
+        guard coreLayerReferenceRegistry.removeExact(reference, context: context,
+            sessionID: projectSessionID, projectURL: projectURL, projectRevision: projectRevision) else {
+            throw BackendServiceError(code: "sourceChanged",
+                message: "The selected core-layer reference is no longer the exact current session reference.")
+        }
+        acceptCoreLayerReferenceRegistryChange(affected: reference,
+            conflictMessage: "This external core layer was removed from the project session. Your unsaved editor draft is preserved, but cannot be saved through the old reference.")
+    }
+
+    func reloadCoreLayerReference(_ reference: CoreLayerReferenceCapture) async throws {
+        guard !isManagingCoreLayerReferences, !isRunningCoreLayerImport,
+              !isSavingAll, !isRunningProjectTool, !isOpeningProject, !isClosingTab,
+              !editorSessions.values.contains(where: \.isBusyExceptCoreLayerConflict),
+              let document, let projectURL = document.url,
+              let projectRevision = document.sourceRevision,
+              let context = captureCoreLayerRequestContext(),
+              context.references.contains(reference),
+              let provider = layerTreeProvider as? BackendMapTreeProvider else {
+            throw BackendServiceError(code: "sourceChanged",
+                message: "The project or selected core-layer reference changed. Refresh the reference list and try again.")
+        }
+        let sessionID = projectSessionID
+        let canonicalProject = CoreLayerRequestContext.canonical(projectURL)
+        isManagingCoreLayerReferences = true
+        defer { isManagingCoreLayerReferences = false }
+
+        let receipt = try await provider.reloadCoreLayerReference(CoreLayerReferenceReloadRequest(
+            projectPath: projectURL.path, projectSessionID: sessionID.uuidString,
+            projectRevision: projectRevision, coreLayerContext: context,
+            targetReferenceID: reference.referenceID))
+
+        guard projectSessionID == sessionID,
+              self.document?.url.map({ CoreLayerRequestContext.canonical($0) }) == canonicalProject,
+              self.document?.sourceRevision?.caseInsensitiveCompare(projectRevision) == .orderedSame,
+              captureCoreLayerRequestContext() == context,
+              CoreLayerRequestContext.canonical(URL(fileURLWithPath: receipt.projectPath)) == canonicalProject,
+              receipt.projectSessionID == sessionID.uuidString,
+              receipt.projectRevision.caseInsensitiveCompare(projectRevision) == .orderedSame,
+              receipt.previousContextIdentityToken == context.identityToken,
+              receipt.previousReferenceID == reference.referenceID,
+              let currentReference = context.references.first(where: { $0.referenceID == reference.referenceID }),
+              currentReference == reference else {
+            throw BackendServiceError(code: "sourceChanged",
+                message: "The project or session reference changed while its source was being reloaded. No reference was replaced.")
+        }
+
+        let replacement = receipt.reference
+        let sourcePath = CoreLayerRequestContext.canonical(URL(fileURLWithPath: reference.sourcePath))
+        guard replacement.sessionOnly,
+              replacement.projectSessionID == sessionID.uuidString,
+              replacement.projectPath == canonicalProject,
+              replacement.kind == reference.kind,
+              CoreLayerRequestContext.canonical(URL(fileURLWithPath: replacement.sourcePath)) == sourcePath,
+              replacement.canonicalSourcePath == sourcePath,
+              replacement.sourceRevision.count == 64,
+              replacement.sourceRevision.allSatisfy({ $0.isHexDigit }),
+              !replacement.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              replacement.referenceID == CoreLayerRequestContext.referenceID(
+                  projectSessionID: sessionID, projectURL: projectURL, kind: replacement.kind,
+                  sourceURL: URL(fileURLWithPath: sourcePath), sourceRevision: replacement.sourceRevision) else {
+            throw BackendServiceError(code: "protocolFailure",
+                message: "The backend did not return a valid replacement for the exact core-layer source.")
+        }
+        var nextReferences = context.references.filter { $0.referenceID != reference.referenceID }
+        nextReferences.append(replacement)
+        let expectedNextContext = CoreLayerRequestContext.capture(projectSessionID: sessionID,
+            projectURL: projectURL, projectRevision: projectRevision, references: nextReferences)
+        guard receipt.nextContext == expectedNextContext,
+              coreLayerReferenceRegistry.replaceExact(reference, with: replacement, context: context,
+                  sessionID: sessionID, projectURL: projectURL, projectRevision: projectRevision) else {
+            throw BackendServiceError(code: "protocolFailure",
+                message: "The backend replacement did not match the current session reference set.")
+        }
+
+        if replacement != reference {
+            acceptCoreLayerReferenceRegistryChange(affected: reference,
+                conflictMessage: "This external core layer changed while its editor draft was open. The draft and its original baseline are preserved; reload the editor before saving.")
+        }
+    }
+
+    private func acceptCoreLayerReferenceRegistryChange(affected reference: CoreLayerReferenceCapture,
+                                                         conflictMessage: String) {
+        coreLayerReferencesRevision += 1
+        assetsRevision += 1
+        assets = assetsIncludingSessionCoreLayers(document?.assets ?? [])
+        let path = CoreLayerRequestContext.canonical(URL(fileURLWithPath: reference.sourcePath))
+        for editor in editorSessions.values where editor.loaded {
+            guard let assetID = editor.modelAssetID,
+                  CoreLayerRequestContext.canonical(URL(fileURLWithPath: assetID)) == path else { continue }
+            editor.markCoreLayerReferenceConflict(conflictMessage)
+        }
+        layerTreeSession.invalidate()
+        catalogTreeSession.invalidate()
+        let owner = projectSessionID
+        let mapContext = sourceMapTreeContext(lastActiveMapID)
+        let catalogContext = catalogTreeContext
+        Task { @MainActor [weak self] in
+            guard let self, self.projectSessionID == owner else { return }
+            await self.layerTreeSession.load(provider: self.layerTreeProvider, context: mapContext)
+            guard self.projectSessionID == owner else { return }
+            await self.catalogTreeSession.load(provider: self.catalogTreeProvider, context: catalogContext)
+        }
+    }
+
+    var canImportCoreLayer: Bool {
+        guard let document, let projectURL = document.url,
+              !isRunningProjectTool, !isSavingAll, !isOpeningProject, !isClosingTab,
+              layerTreeProvider is BackendMapTreeProvider,
+              projectURL.pathExtension.lowercased() == "ras",
+              let map = catalogMapDocuments.first(where: {
+                  $0.id.caseInsensitiveCompare(lastActiveMapID.uuidString) == .orderedSame
+              }) else { return false }
+        return map.sourceIndex != nil && map.visualizationRevision != nil
+            && ["Project", "Buildable", "Geometry", "Plan"].contains(map.kind)
+    }
+
+    func reportCoreLayerImportError(_ error: Error) {
+        if error is CancellationError { return }
+        let cocoaError = error as NSError
+        guard cocoaError.domain != NSCocoaErrorDomain || cocoaError.code != CocoaError.userCancelled.rawValue else { return }
+        report("Import Core Layer", error)
+    }
+
+    func beginCoreLayerImport(sourceURL: URL) async {
+        guard canImportCoreLayer, coreLayerImportPresentation == nil,
+              !isRunningCoreLayerImport,
+              let document, let projectURL = document.url,
+              let projectRevision = document.sourceRevision,
+              let provider = layerTreeProvider as? BackendMapTreeProvider else { return }
+        let scoped = sourceURL.startAccessingSecurityScopedResource()
+        coreLayerImportScopedURL = (sourceURL, scoped)
+        isRunningCoreLayerImport = true
+        defer { isRunningCoreLayerImport = false }
+
+        do {
+            let projectXML = document.editorXML(overridingDescription: descriptionDraft)
+            guard let coreLayerContext = captureCoreLayerRequestContext() else {
+                throw BackendServiceError(code: "invalidInput", message: "Save and reopen the project before importing a core layer.")
+            }
+            let capturedMapContext = sourceMapTreeContext(lastActiveMapID)
+            guard capturedMapContext.projectSessionID == projectSessionID,
+                  capturedMapContext.projectURL == projectURL,
+                  capturedMapContext.coreLayerContext == coreLayerContext else {
+                throw BackendServiceError(code: "sourceChanged", message: "The active map changed. Select it again before importing a core layer.")
+            }
+            let sourceRevision = try await Task.detached(priority: .userInitiated) {
+                try CoreLayerRequestContext.revision(of: sourceURL)
+            }.value
+            guard projectSessionID == capturedMapContext.projectSessionID,
+                  self.document?.url == projectURL,
+                  self.document?.sourceRevision == projectRevision,
+                  self.document?.editorXML(overridingDescription: descriptionDraft) == projectXML,
+                  lastActiveMapID == capturedMapContext.mapID,
+                  sourceMapTreeContext(capturedMapContext.mapID) == capturedMapContext,
+                  captureCoreLayerRequestContext() == coreLayerContext else {
+                throw BackendServiceError(code: "sourceChanged", message: "The project or active map changed while the selected HDF file was being checked.")
+            }
+            let projectXMLRevision = Self.sha256(projectXML)
+            let request = CoreLayerImportRequest(
+                projectPath: projectURL.standardizedFileURL.path,
+                projectSessionID: projectSessionID.uuidString,
+                projectRevision: projectRevision,
+                projectXml: projectXML,
+                projectXmlRevision: projectXMLRevision,
+                sourcePath: sourceURL.standardizedFileURL.path,
+                sourceRevision: sourceRevision,
+                coreLayerContext: coreLayerContext)
+            let inspection = try await provider.inspectCoreLayer(request)
+            guard projectSessionID == capturedMapContext.projectSessionID,
+                  self.document?.url == projectURL,
+                  self.document?.sourceRevision == projectRevision,
+                  self.document?.editorXML(overridingDescription: descriptionDraft) == projectXML,
+                  lastActiveMapID == capturedMapContext.mapID,
+                  sourceMapTreeContext(capturedMapContext.mapID) == capturedMapContext,
+                  captureCoreLayerRequestContext() == coreLayerContext,
+                  Self.matches(inspection, request: request) else {
+                throw BackendServiceError(code: "sourceChanged", message: "The project, map, or selected HDF file changed while it was being inspected.")
+            }
+            coreLayerImportPresentation = CoreLayerImportPresentation(
+                id: UUID(), projectSessionID: projectSessionID, projectURL: projectURL,
+                projectRevision: projectRevision, projectXML: projectXML,
+                projectXMLRevision: projectXMLRevision, sourceURL: sourceURL,
+                sourceRevision: sourceRevision, mapContext: capturedMapContext,
+                coreLayerContext: coreLayerContext, inspection: inspection)
+        } catch {
+            endCoreLayerImportScope()
+            report("Import Core Layer", error)
+        }
+    }
+
+    func performCoreLayerImport(_ presentation: CoreLayerImportPresentation,
+                                action: String) async throws {
+        guard !isRunningCoreLayerImport, coreLayerImportPresentation?.id == presentation.id,
+              ["addReference", "copyFile"].contains(action),
+              coreLayerImportProjectIsCurrent(presentation, requireMapContext: true),
+              let provider = layerTreeProvider as? BackendMapTreeProvider else {
+            throw BackendServiceError(code: "sourceChanged", message: "The project or active map changed. Inspect the file again before importing it.")
+        }
+        isRunningCoreLayerImport = true
+        defer { isRunningCoreLayerImport = false }
+        let request = CoreLayerImportRequest(
+            projectPath: presentation.projectURL.standardizedFileURL.path,
+            projectSessionID: presentation.projectSessionID.uuidString,
+            projectRevision: presentation.projectRevision,
+            projectXml: presentation.projectXML,
+            projectXmlRevision: presentation.projectXMLRevision,
+            sourcePath: presentation.sourceURL.standardizedFileURL.path,
+            sourceRevision: presentation.sourceRevision,
+            action: action,
+            coreLayerContext: presentation.coreLayerContext)
+        let receipt = try await provider.performCoreLayerImport(request)
+        guard coreLayerImportProjectIsCurrent(presentation, requireMapContext: true),
+              Self.matches(receipt, request: request, inspection: presentation.inspection,
+                           action: action) else {
+            throw BackendServiceError(code: "sourceChanged", message: "The project or HDF file changed while the import was running.")
+        }
+
+        switch action {
+        case "copyFile":
+            guard let copiedPath = receipt.importedAssetPath,
+                  let copiedRevision = receipt.importedAssetRevision,
+                  CoreLayerRequestContext.canonical(URL(fileURLWithPath: copiedPath))
+                    != CoreLayerRequestContext.canonical(presentation.sourceURL),
+                  FileManager.default.fileExists(atPath: copiedPath) else {
+                throw BackendServiceError(code: "sourceChanged", message: "The copied project layer could not be verified byte-for-byte.")
+            }
+            let copiedFileRevision = try await Self.revision(of: URL(fileURLWithPath: copiedPath))
+            guard copiedFileRevision.caseInsensitiveCompare(copiedRevision) == .orderedSame else {
+                throw BackendServiceError(code: "sourceChanged", message: "The copied project layer could not be verified byte-for-byte.")
+            }
+            try document?.reloadAssets()
+            assets = assetsIncludingSessionCoreLayers(document?.assets ?? [])
+            loadMapLayers()
+            await catalogTreeSession.load(provider: catalogTreeProvider, context: catalogTreeContext)
+            log("Import Core Layer", L10n.format("Copied %@ into the project.", receipt.name))
+        case "addReference":
+            guard let reference = receipt.reference,
+                  Self.matches(reference, request: request, inspection: presentation.inspection) else {
+                throw BackendServiceError(code: "sourceChanged", message: "The backend did not return the exact session-only layer reference that was inspected.")
+            }
+            var references = presentation.coreLayerContext.references
+            references.removeAll { $0.referenceID == reference.referenceID }
+            let nextContext = CoreLayerRequestContext.capture(
+                projectSessionID: presentation.projectSessionID,
+                projectURL: presentation.projectURL,
+                projectRevision: presentation.projectRevision,
+                references: references + [reference])
+            // The map action must use the exact captured map and proposed
+            // reference set, never a new registry snapshot after an await.
+            let snapshot = try await provider.addCoreLayerToMap(
+                sourcePath: reference.sourcePath, revision: reference.sourceRevision,
+                kind: reference.kind, context: presentation.mapContext,
+                coreLayerContext: nextContext)
+            guard coreLayerImportProjectIsCurrent(presentation, requireMapContext: false),
+                  Self.snapshot(snapshot, contains: reference) else {
+                throw BackendServiceError(code: "sourceChanged", message: "The map response did not read back the exact Geometry or Boundary Condition that was added.")
+            }
+            guard registerCoreLayerReference(reference,
+                projectSessionID: presentation.projectSessionID,
+                projectURL: presentation.projectURL) else {
+                throw BackendServiceError(code: "sourceChanged", message: "The external layer could not be attached to the captured project session.")
+            }
+            await layerTreeSession.load(provider: layerTreeProvider,
+                context: sourceMapTreeContext(presentation.mapContext.mapID))
+            await catalogTreeSession.load(provider: catalogTreeProvider, context: catalogTreeContext)
+            log("Import Core Layer", L10n.format("Added %@ to the active map.", reference.name))
+        default:
+            throw BackendServiceError(code: "unsupported", message: "Choose Add Reference or Copy File.")
+        }
+        coreLayerImportPresentation = nil
+        endCoreLayerImportScope()
+    }
+
+    func cancelCoreLayerImportPresentation() {
+        guard !isRunningCoreLayerImport else { return }
+        coreLayerImportPresentation = nil
+        endCoreLayerImportScope()
+    }
+
+    private func coreLayerImportProjectIsCurrent(_ presentation: CoreLayerImportPresentation,
+                                                requireMapContext: Bool) -> Bool {
+        guard projectSessionID == presentation.projectSessionID,
+              document?.url == presentation.projectURL,
+              document?.sourceRevision == presentation.projectRevision,
+              document?.editorXML(overridingDescription: descriptionDraft) == presentation.projectXML,
+              captureCoreLayerRequestContext() == presentation.coreLayerContext else { return false }
+        if requireMapContext {
+            return lastActiveMapID == presentation.mapContext.mapID
+                && sourceMapTreeContext(presentation.mapContext.mapID) == presentation.mapContext
+        }
+        return true
+    }
+
+    private func endCoreLayerImportScope() {
+        if let scoped = coreLayerImportScopedURL, scoped.started {
+            scoped.url.stopAccessingSecurityScopedResource()
+        }
+        coreLayerImportScopedURL = nil
+    }
+
+    private static func matches(_ inspection: CoreLayerImportInspection,
+                                request: CoreLayerImportRequest) -> Bool {
+        let project = CoreLayerRequestContext.canonical(URL(fileURLWithPath: request.projectPath))
+        let source = CoreLayerRequestContext.canonical(URL(fileURLWithPath: request.sourcePath))
+        return CoreLayerRequestContext.canonical(URL(fileURLWithPath: inspection.projectPath)) == project
+            && inspection.projectSessionID == request.projectSessionID
+            && inspection.projectRevision.caseInsensitiveCompare(request.projectRevision) == .orderedSame
+            && inspection.projectXmlRevision.caseInsensitiveCompare(request.projectXmlRevision) == .orderedSame
+            && CoreLayerRequestContext.canonical(URL(fileURLWithPath: inspection.canonicalSourcePath)) == source
+            && inspection.sourceRevision.caseInsensitiveCompare(request.sourceRevision) == .orderedSame
+            && ["geometry", "boundaryCondition"].contains(inspection.kind)
+            && inspection.referenceIsSessionOnly
+            && inspection.availableActions.contains("addReference")
+            && inspection.availableActions.contains("copyFile")
+    }
+
+    private static func matches(_ receipt: CoreLayerImportReceipt,
+                                request: CoreLayerImportRequest,
+                                inspection: CoreLayerImportInspection,
+                                action: String) -> Bool {
+        CoreLayerRequestContext.canonical(URL(fileURLWithPath: receipt.projectPath))
+            == CoreLayerRequestContext.canonical(URL(fileURLWithPath: request.projectPath))
+            && receipt.projectSessionID == request.projectSessionID
+            && receipt.projectRevision.caseInsensitiveCompare(request.projectRevision) == .orderedSame
+            && receipt.projectXmlRevision.caseInsensitiveCompare(request.projectXmlRevision) == .orderedSame
+            && CoreLayerRequestContext.canonical(URL(fileURLWithPath: receipt.canonicalSourcePath))
+                == CoreLayerRequestContext.canonical(URL(fileURLWithPath: request.sourcePath))
+            && receipt.sourceRevision.caseInsensitiveCompare(request.sourceRevision) == .orderedSame
+            && receipt.kind == inspection.kind
+            && receipt.name == inspection.name
+            && receipt.action == action
+            && (action == "addReference" ? receipt.referenceIsSessionOnly : !receipt.referenceIsSessionOnly)
+    }
+
+    private static func matches(_ reference: CoreLayerReferenceCapture,
+                                request: CoreLayerImportRequest,
+                                inspection: CoreLayerImportInspection) -> Bool {
+        guard let sessionID = UUID(uuidString: request.projectSessionID) else { return false }
+        return reference.sessionOnly
+            && reference.projectSessionID == request.projectSessionID
+            && CoreLayerRequestContext.canonical(URL(fileURLWithPath: reference.projectPath))
+                == CoreLayerRequestContext.canonical(URL(fileURLWithPath: request.projectPath))
+            && reference.kind == inspection.kind
+            && reference.name == inspection.name
+            && CoreLayerRequestContext.canonical(URL(fileURLWithPath: reference.sourcePath))
+                == CoreLayerRequestContext.canonical(URL(fileURLWithPath: request.sourcePath))
+            && CoreLayerRequestContext.canonical(URL(fileURLWithPath: reference.canonicalSourcePath))
+                == CoreLayerRequestContext.canonical(URL(fileURLWithPath: inspection.canonicalSourcePath))
+            && reference.sourceRevision.caseInsensitiveCompare(request.sourceRevision) == .orderedSame
+            && reference.referenceID == CoreLayerRequestContext.referenceID(
+                projectSessionID: sessionID, projectURL: URL(fileURLWithPath: request.projectPath),
+                kind: reference.kind, sourceURL: URL(fileURLWithPath: request.sourcePath),
+                sourceRevision: request.sourceRevision)
+    }
+
+    private static func snapshot(_ snapshot: LayerTreeSnapshot,
+                                 contains reference: CoreLayerReferenceCapture) -> Bool {
+        let expectedSourceClass = reference.kind == "geometry"
+            ? Set(["GeometryNodeVM", "GeometryNode", "ObservableGeometry"])
+            : Set(["BoundaryConditionNodeVM", "BoundaryConditionNode", "ObservableBoundaryCondition"])
+        func contains(_ nodes: [LayerTreeNode]) -> Bool {
+            nodes.contains { node in
+                let matchesAsset = node.assetID.map {
+                    CoreLayerRequestContext.canonical(URL(fileURLWithPath: $0)) == reference.canonicalSourcePath
+                } ?? false
+                return (matchesAsset && expectedSourceClass.contains(node.sourceClass)
+                        && node.name == reference.name)
+                    || contains(node.children ?? [])
+            }
+        }
+        return contains(snapshot.roots)
+    }
+
+    private static func sha256(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02X", $0) }.joined()
+    }
+
+    private static func revision(of url: URL) async throws -> String {
+        try await Task.detached(priority: .userInitiated) {
+            try CoreLayerRequestContext.revision(of: url)
+        }.value
+    }
+
+    private func refreshCoreLayerReferenceAfterModelSave(_ committedAsset: ProjectAsset,
+        committedSnapshot: EditorSnapshot, capturedCoreLayerContext: CoreLayerRequestContext?,
+        committedProjectRevision: String?) {
+        guard let document, let projectURL = document.url,
+              let projectRevision = committedProjectRevision,
+              let currentProjectRevision = document.sourceRevision,
+              currentProjectRevision.caseInsensitiveCompare(projectRevision) == .orderedSame,
+              let capturedCoreLayerContext,
+              let sourceRevision = committedSnapshot.sourceRevision,
+              sourceRevision.count == 64, sourceRevision.allSatisfy({ $0.isHexDigit }),
+              let nameField = committedSnapshot.fields["GeometryCatalogSummary/Context_Name"]
+                ?? committedSnapshot.fields["BoundaryConditionCatalogSummary/Context_Name"],
+              coreLayerReferenceRegistry.rebaseReference(from: capturedCoreLayerContext,
+                  sessionID: projectSessionID,
+                  projectURL: projectURL, projectRevision: projectRevision,
+                  sourceURL: committedAsset.url, sourceRevision: sourceRevision, name: nameField) else { return }
+
+        coreLayerReferencesRevision += 1
+        assets = assetsIncludingSessionCoreLayers(assets)
+        let owner = projectSessionID
+        let currentLayerContext = layerTreeContext
+        let currentCatalogContext = catalogTreeContext
+        layerTreeSession.invalidate()
+        catalogTreeSession.invalidate()
+        Task { @MainActor [weak self] in
+            guard let self, self.projectSessionID == owner else { return }
+            await self.layerTreeSession.load(provider: self.layerTreeProvider, context: currentLayerContext)
+            guard self.projectSessionID == owner else { return }
+            await self.catalogTreeSession.load(provider: self.catalogTreeProvider, context: currentCatalogContext)
+        }
+    }
+
+    @discardableResult
+    func registerCoreLayerReference(_ reference: CoreLayerReferenceCapture,
+                                    projectSessionID expectedSession: UUID,
+                                    projectURL: URL) -> Bool {
+        guard projectSessionID == expectedSession, document?.url == projectURL else { return false }
+        guard coreLayerReferenceRegistry.register(reference, sessionID: expectedSession,
+            projectURL: projectURL) else { return false }
+        coreLayerReferencesRevision += 1
+        assets = assetsIncludingSessionCoreLayers(assets)
+        return true
+    }
+    private func assetsIncludingSessionCoreLayers(_ source: [ProjectAsset]) -> [ProjectAsset] {
+        guard let projectURL = document?.url else { return source }
+        var result = source
+        for reference in coreLayerReferenceRegistry.references(sessionID: projectSessionID,
+            projectURL: projectURL) {
+            let path = SourceFilePaths.canonical(URL(fileURLWithPath: reference.sourcePath))
+            let section: ProjectSection = reference.kind == "geometry" ? .geometries : .boundaryConditions
+            if let index = result.firstIndex(where: { SourceFilePaths.canonical($0.url) == path }) {
+                let existing = result[index]
+                if existing.name != reference.name || existing.section != section {
+                    result[index] = ProjectAsset(url: existing.url, section: section,
+                        displayName: reference.name)
+                }
+            } else {
+                result.append(ProjectAsset(url: URL(fileURLWithPath: path), section: section,
+                    displayName: reference.name))
+            }
+        }
+        return result
     }
     var terrainDownloadProvider: (any TerrainDownloadProvider)?
     var rasterSymbologyProvider: (any RasterSymbologyProvider)?
@@ -618,6 +1113,7 @@ final class WorkspaceStore: ObservableObject {
     private var editorSessions: [UUID: ModelEditorSession] = [:]
     private var primaryEditorIDs: [ModelEditorKind: UUID] = [:]
     private var editorSubscriptions: [UUID: AnyCancellable] = [:]
+    private var geometryCulvertMapPreparationEditorIDs: Set<UUID> = []
     @Published private(set) var isSavingAll = false
     @Published private(set) var isRunningBackendTool = false
     @Published private(set) var isRunningLibraryImport = false
@@ -699,8 +1195,11 @@ final class WorkspaceStore: ObservableObject {
     }
     @Published private(set) var isExportingTerrainRaster = false
     private var terrainRasterExportOwner: (leaseID: UUID, projectSessionID: UUID, captureID: String)?
-    @Published var surfaceCreation: SurfaceCreationKind?
-    var isRunningProjectTool: Bool { isRunningLibraryImport || isRunningPlanMatrixEmit || isRunningBackendTool || isRunningCumulusGridImport || isRunningRasterMutation || isCreatingSurface || isDeletingResult || isRunningMapMutation || isRunningCatalogModelAction || isRunningPlanCompute || isRunningInitialConditionsCommit || isExportingTerrainRaster }
+    @Published var surfaceCreation: SurfaceCreationKind? {
+        didSet { if surfaceCreation == nil { surfaceCreationCoreLayerContext = nil } }
+    }
+    @Published private(set) var surfaceCreationCoreLayerContext: CoreLayerRequestContext?
+    var isRunningProjectTool: Bool { isRunningLibraryImport || isRunningPlanMatrixEmit || isRunningBackendTool || isRunningCumulusGridImport || isRunningRasterMutation || isCreatingSurface || isDeletingResult || isRunningMapMutation || isRunningCatalogModelAction || isRunningPlanCompute || isRunningInitialConditionsCommit || isExportingTerrainRaster || isRunningCoreLayerImport || isManagingCoreLayerReferences }
     @Published var showCloseTabConfirmation = false
     @Published private(set) var isClosingTab = false
     private var pendingCloseTab: WorkspaceTab?
@@ -732,7 +1231,11 @@ final class WorkspaceStore: ObservableObject {
                 state.polylineEditor.currentScope.map { SourceFilePaths.canonical(URL(fileURLWithPath: $0.canonicalPath)) == physicalPath } == true
         }
     }
-    var hasBusyModelEditors: Bool { stableChannelDebug.isBusy || editorSessions.values.contains { $0.isBusy } || hasBusyMapEditors }
+    var hasBusyModelEditors: Bool {
+        stableChannelDebug.isBusy
+            || editorSessions.values.contains { $0.isBusyExceptCoreLayerConflict }
+            || hasBusyMapEditors
+    }
     var statusText: String { hasUnsavedChanges ? L10n.text("Unsaved changes") : document == nil ? L10n.text("Ready") : L10n.format("Ready · %d project files", assets.count) }
     var visibleSections: [ProjectSection] {
         switch treeMode {
@@ -840,6 +1343,9 @@ final class WorkspaceStore: ObservableObject {
                 guard let self else { return nil }
                 return self.document?.editorXML(overridingDescription: self.descriptionDraft)
             }
+            tools.coreLayerContext = { [weak self] in self?.captureCoreLayerRequestContext() }
+            tools.planUploadCredentials = { [weak self] in self?.developerCredentialStore.load() }
+            tools.applicationUID = { [weak self] in self?.applicationUID }
             tools.reportContext = { [weak self] in
                 guard let self else { return nil }
                 let geometries = self.assets.filter { $0.section == .geometries }.map { asset in
@@ -890,6 +1396,9 @@ final class WorkspaceStore: ObservableObject {
         }
         layerTreeSubscription = layerTreeSession.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         catalogTreeSubscription = catalogTreeSession.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        calculatorLayerRegistry.onReferencePointsChanged = { [weak self] mapID, points in
+            self?.existingMapState(for: mapID)?.calculatorSourceReferencePoints = points
+        }
         stableChannelSubscription = stableChannelDebug.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         if let registry = self.jobProvider as? WorkspaceJobRegistry {
             jobsSubscription = registry.$jobs.sink { [weak self] in self?.jobs = $0 }
@@ -944,6 +1453,7 @@ final class WorkspaceStore: ObservableObject {
         let currentContext: @MainActor (LayerTreeContext) -> Bool = { [weak self] context in
             self?.projectSessionID == context.projectSessionID && self?.document?.url == context.projectURL
                 && self?.isRunningPlanCompute == false
+                && self?.captureCoreLayerRequestContext() == context.coreLayerContext
             }
             let beginBackupRestore: @MainActor () -> Bool = { [weak self] in
                 guard let self, !self.isRunningProjectTool, !self.isSavingAll,
@@ -961,6 +1471,7 @@ final class WorkspaceStore: ObservableObject {
                 isContextCurrent: { [weak self] context in
                     self?.projectSessionID == context.projectSessionID && self?.document?.url == context.projectURL
                         && self?.isRunningPlanCompute == false
+                        && self?.captureCoreLayerRequestContext() == context.coreLayerContext
                 },
                 visualizationRevision: { [weak self] in self?.visualization?.sourceRevision },
                 beginMapMutation: { [weak self] in
@@ -982,6 +1493,9 @@ final class WorkspaceStore: ObservableObject {
         vectorSymbologyProvider = WorkspaceVectorSymbologyProvider(store: self,
             preferences: self.globalVectorStylePreferences,
             client: (modelProvider as? BackendModelProvider)?.client)
+        (modelProvider as? BackendModelProvider)?.setCoreLayerContextProvider { [weak self] in
+            self?.captureCoreLayerRequestContext()
+        }
     }
 
     func openPanel() { if let url = system.chooseProject() { requestOpen(url) } }
@@ -1281,6 +1795,12 @@ final class WorkspaceStore: ObservableObject {
                 guard let self, let session, self.editorSessions[session.id] === session else { return }
                 self.assetsRevision += 1
             }
+            session.didSaveModelSnapshot = { [weak self] committedAsset, snapshot, capturedContext, committedProjectRevision in
+                guard let self, self.projectSessionID == ownerProjectSession else { return }
+                self.refreshCoreLayerReferenceAfterModelSave(committedAsset, committedSnapshot: snapshot,
+                    capturedCoreLayerContext: capturedContext,
+                    committedProjectRevision: committedProjectRevision)
+            }
             editorSubscriptions[session.id] = session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         }
     }
@@ -1542,6 +2062,145 @@ final class WorkspaceStore: ObservableObject {
     }
     func loadedVectorStyleMapStates() -> [MapState] { Array(mapStates.values) }
 
+    /// Includes editors that are still loading or busy. A map renderer may
+    /// use a saved-only owner only when no registered editor owns this asset.
+    func hasGeometryMeshEditor(for canonicalAssetID: String) -> Bool {
+        geometryMeshEditorCount(for: canonicalAssetID) > 0
+    }
+
+    func geometryMeshEditorCount(for canonicalAssetID: String) -> Int {
+        let path = SourceFilePaths.canonical(URL(fileURLWithPath: canonicalAssetID))
+        return editorSessions.values.filter { editor in
+            guard let assetID = editor.modelAssetID else { return false }
+            return SourceFilePaths.canonical(URL(fileURLWithPath: assetID)) == path
+        }.count
+    }
+
+    /// Changes when the exact map owner becomes available, busy, ready, or
+    /// stale. ProjectGeometryMapCanvas uses this as a task key so preparation
+    /// retries on owner/context transitions without initiating IO from body.
+    func geometryCulvertMapHoverPreparationIdentity(assetID: String,
+                                                    projectSessionID expectedSession: UUID,
+                                                    expectedRevision: String,
+                                                    model: GeometryCulvertModelRequest) -> String {
+        let path = SourceFilePaths.canonical(URL(fileURLWithPath: assetID))
+        let modelContext = [model.assetPath, model.kind, model.projectPath ?? "",
+            model.projectXml ?? "", model.coreLayerContext?.identityToken ?? ""].joined(separator: "\n")
+        let modelDigest = SHA256.hash(data: Data(modelContext.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        let base = [expectedSession.uuidString, path, expectedRevision, modelDigest].joined(separator: "|")
+        guard expectedSession == projectSessionID, !assetID.isEmpty, !model.assetPath.isEmpty,
+              !expectedRevision.isEmpty, model.kind == "Geometry",
+              SourceFilePaths.canonical(URL(fileURLWithPath: model.assetPath)) == path else {
+            return base + "|invalid-owner-context"
+        }
+        let matches = editorSessions.values.filter { editor in
+            guard let owner = editor.modelAssetID else { return false }
+            return SourceFilePaths.canonical(URL(fileURLWithPath: owner)) == path
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
+        guard matches.count == 1, let editor = matches.first else {
+            return base + "|editor-count:" + matches.map { $0.id.uuidString }.joined(separator: ",")
+        }
+        let parentState = [editor.id.uuidString, editor.loaded ? "loaded" : "not-loaded",
+            editor.loadingSelection ? "selection-loading" : "selection-idle",
+            editor.canEdit ? "editable" : "read-only", editor.isBusy ? "busy" : "idle",
+            editor.sourceFileRevision ?? "no-source-revision"].joined(separator: "|")
+        return base + "|" + parentState + "|"
+            + (editor.geometryCulvert?.mapHoverPreparationIdentity ?? "no-culvert-child")
+    }
+
+    /// Loads the exact Geometry editor's culvert child for map rendering when
+    /// it is absent. Loading is deduplicated per editor and isolated from a
+    /// cancelling SwiftUI task; the result is returned only if the same
+    /// project, editor, asset, source revision, and child still own the map.
+    func prepareGeometryCulvertMapHoverSnapshot(assetID: String,
+                                                projectSessionID expectedSession: UUID,
+                                                expectedRevision: String,
+                                                model: GeometryCulvertModelRequest) async
+        -> GeometryCulvertSnapshot? {
+        guard !model.assetPath.isEmpty,
+              let editor = geometryCulvertMapHoverOwner(assetID: assetID,
+                  projectSessionID: expectedSession, expectedRevision: expectedRevision, model: model),
+              editor.loaded, !editor.loadingSelection,
+              editor.canEdit, !editor.isBusy,
+              let sourceRevision = editor.sourceFileRevision,
+              sourceRevision.caseInsensitiveCompare(expectedRevision) == .orderedSame,
+              let child = editor.geometryCulvert else { return nil }
+        if let current = child.mapHoverSnapshot(model: model, expectedRevision: expectedRevision) {
+            return current
+        }
+        guard child.canPrepareMapHover(model: model, expectedRevision: expectedRevision),
+              geometryCulvertMapPreparationEditorIDs.insert(editor.id).inserted else { return nil }
+        let editorID = editor.id
+        let canonicalAssetID = SourceFilePaths.canonical(URL(fileURLWithPath: assetID))
+        defer { geometryCulvertMapPreparationEditorIDs.remove(editorID) }
+
+        // A map view may cancel/restart its task as observed readiness changes.
+        // Keep the one child load alive; every continuation still validates the
+        // owner before returning a usable snapshot.
+        let loadTask = Task { @MainActor [weak self, weak editor] in
+            guard let self, let editor,
+                  self.projectSessionID == expectedSession,
+                  self.editorSessions[editorID] === editor,
+                  editor.loaded, !editor.loadingSelection,
+                  editor.canEdit, !editor.isBusy,
+                  editor.modelAssetID.map({
+                      SourceFilePaths.canonical(URL(fileURLWithPath: $0))
+                  }) == canonicalAssetID,
+                  editor.sourceFileRevision?.caseInsensitiveCompare(expectedRevision) == .orderedSame,
+                  editor.geometryCulvert === child,
+                  child.canPrepareMapHover(model: model, expectedRevision: expectedRevision) else { return }
+            await editor.ensureGeometryCulvertLoaded()
+        }
+        await loadTask.value
+        geometryCulvertMapPreparationEditorIDs.remove(editorID)
+
+        guard !Task.isCancelled,
+              expectedSession == projectSessionID,
+              let currentEditor = geometryCulvertMapHoverOwner(assetID: assetID,
+                  projectSessionID: expectedSession, expectedRevision: expectedRevision, model: model),
+              currentEditor === editor, currentEditor.id == editorID,
+              currentEditor.loaded, !currentEditor.loadingSelection,
+              currentEditor.canEdit, !currentEditor.isBusy,
+              currentEditor.sourceFileRevision?.caseInsensitiveCompare(expectedRevision) == .orderedSame,
+              currentEditor.geometryCulvert === child else { return nil }
+        return child.mapHoverSnapshot(model: model, expectedRevision: expectedRevision)
+    }
+
+    /// Captures a culvert child only from the one ready, editable Geometry
+    /// editor that owns this exact source in the current project session. A
+    /// registered-but-loading editor deliberately blocks saved-source fallback
+    /// so map hover and map rendering cannot identify a different owner.
+    func geometryCulvertMapHoverSnapshot(assetID: String,
+                                         projectSessionID expectedSession: UUID,
+                                         expectedRevision: String,
+                                         model: GeometryCulvertModelRequest) -> GeometryCulvertSnapshot? {
+        guard let editor = geometryCulvertMapHoverOwner(assetID: assetID,
+                  projectSessionID: expectedSession, expectedRevision: expectedRevision, model: model),
+              editor.loaded, !editor.loadingSelection,
+              editor.canEdit, !editor.isBusy,
+              let sourceRevision = editor.sourceFileRevision,
+              sourceRevision.caseInsensitiveCompare(expectedRevision) == .orderedSame,
+              let child = editor.geometryCulvert else { return nil }
+        return child.mapHoverSnapshot(model: model, expectedRevision: expectedRevision)
+    }
+
+    private func geometryCulvertMapHoverOwner(assetID: String,
+                                              projectSessionID expectedSession: UUID,
+                                              expectedRevision: String,
+                                              model: GeometryCulvertModelRequest) -> ModelEditorSession? {
+        guard expectedSession == projectSessionID,
+              !assetID.isEmpty, !model.assetPath.isEmpty, !expectedRevision.isEmpty,
+              model.kind == "Geometry" else { return nil }
+        let path = SourceFilePaths.canonical(URL(fileURLWithPath: assetID))
+        guard SourceFilePaths.canonical(URL(fileURLWithPath: model.assetPath)) == path else { return nil }
+        let matches = editorSessions.values.filter { editor in
+            guard let owner = editor.modelAssetID else { return false }
+            return SourceFilePaths.canonical(URL(fileURLWithPath: owner)) == path
+        }
+        return matches.count == 1 ? matches.first : nil
+    }
+
     func geometryMeshSession(assetID: String,
                              projectSessionID expectedSession: UUID) -> GeometryMeshSession? {
         guard expectedSession == projectSessionID else { return nil }
@@ -1605,7 +2264,9 @@ final class WorkspaceStore: ObservableObject {
         guard let map = catalogMapDocuments.first(where: { $0.id == mapID.uuidString }),
               let index = map.sourceIndex, ["Project", "Buildable"].contains(map.kind) else { return [] }
         let generic: [VectorSymbologyContext] = (vectorStyleNodes[mapID] ?? []).compactMap { node in
-            guard let locator = node.sourceLocator, locator.nodeType == "MapLayer",
+            guard let locator = node.sourceLocator,
+                  (locator.nodeType == "MapLayer"
+                    || (locator.nodeType == "GdbVectorLayer" && locator.mapType == "GdbVectorLayer")),
                   let path = locator.nodePath, !path.isEmpty,
                   let layerType = locator.mapType,
                   let url = sourceMapVectorURL(node) else { return nil }
@@ -2046,7 +2707,7 @@ final class WorkspaceStore: ObservableObject {
         return revision
     }
     func unregisterEditor(_ session: ModelEditorSession) {
-        guard !session.hasUnsavedEditorChanges, !session.isBusy,
+        guard !session.hasUnsavedEditorChanges, !session.isBusyExceptCoreLayerConflict,
               initialConditionsCommitOwner?.editorID != session.id else { return }
         editorSessions[session.id] = nil; editorSubscriptions[session.id] = nil
         primaryEditorIDs = primaryEditorIDs.filter { $0.value != session.id }
@@ -2061,7 +2722,7 @@ final class WorkspaceStore: ObservableObject {
         case .page: return
         case .editor(let kind):
             guard openEditors.contains(kind) else { return }
-            if let id = primaryEditorIDs[kind], editorSessions[id]?.isBusy == true {
+            if let id = primaryEditorIDs[kind], editorSessions[id]?.isBusyExceptCoreLayerConflict == true {
                 errorMessage = L10n.text("Wait for the model operation to finish before closing.")
                 return
             }
@@ -2091,6 +2752,11 @@ final class WorkspaceStore: ObservableObject {
             finishClosingTab(tab); return true
         }
         guard case .editor(let kind) = tab, let id = primaryEditorIDs[kind], let session = editorSessions[id] else { return false }
+        guard !session.hasCoreLayerReferenceConflict else {
+            errorMessage = L10n.text("This external core layer changed while its editor draft was open. The draft and its original baseline are preserved; reload the editor before saving.")
+            pendingCloseTab = nil
+            return false
+        }
         let saved = await session.saveLoadedModel()
         guard saved, !session.hasUnsavedEditorChanges, projectSessionID == project else {
             errorMessage = session.error ?? L10n.text("Some model edits are still unsaved. Save them before continuing.")
@@ -2106,13 +2772,21 @@ final class WorkspaceStore: ObservableObject {
             editor.discardForProjectReplacement()
         }
         if case .editor(let kind) = tab, let id = primaryEditorIDs[kind], let session = editorSessions[id] {
-            guard !session.isBusy else { return }
+            guard !session.isBusyExceptCoreLayerConflict else { return }
             session.discardEdits()
-            guard !session.hasUnsavedEditorChanges, !session.isBusy else { return }
+            if session.hasCoreLayerReferenceConflict {
+                session.clearCoreLayerReferenceConflictAfterExplicitDiscard()
+            }
+            guard !session.hasUnsavedEditorChanges, !session.isBusyExceptCoreLayerConflict else { return }
         }
         finishClosingTab(tab)
     }
     func cancelCloseTab() { pendingCloseTab = nil; showCloseTabConfirmation = false }
+    var pendingCloseTabAllowsSave: Bool {
+        guard case .editor(let kind) = pendingCloseTab,
+              let id = primaryEditorIDs[kind], let session = editorSessions[id] else { return true }
+        return !session.hasCoreLayerReferenceConflict
+    }
     private func finishClosingTab(_ tab: WorkspaceTab) {
         switch tab {
         case .editor(let kind):
@@ -2194,6 +2868,7 @@ final class WorkspaceStore: ObservableObject {
     func presentSurfaceCreation(_ kind: SurfaceCreationKind) {
         guard document?.url != nil, modelProvider is BackendModelProvider,
               !isRunningProjectTool, !isSavingAll, !isClosingTab, !isOpeningProject else { return }
+        surfaceCreationCoreLayerContext = captureCoreLayerRequestContext()
         surfaceCreation = kind
     }
     func setSurfaceCreationRunning(_ running: Bool) { isCreatingSurface = running }
@@ -2218,7 +2893,7 @@ final class WorkspaceStore: ObservableObject {
     func refreshAssets() {
         guard !isRunningRasterMutation, !isRunningPlanCompute else { return }
         do {
-            try document?.reloadAssets(); assets = document?.assets ?? []; loadMapLayers()
+            try document?.reloadAssets(); assets = assetsIncludingSessionCoreLayers(document?.assets ?? []); loadMapLayers()
             try refreshRasterMapSources(); configureRasterSymbologyProvider(); loadRasterMapLayers()
             log("Refresh", L10n.text("Refreshed project files."))
         }
@@ -2325,7 +3000,7 @@ final class WorkspaceStore: ObservableObject {
               !editor.isSaving, !editor.isPerforming, !editor.isRefreshingContext,
               !editor.loadingSelection, !editor.hasPendingGeometryEdit,
               !hasBusyMapEditors, !catalogTreeSession.busy, !layerTreeSession.busy,
-              !editorSessions.values.contains(where: { $0.id != editorID && $0.isBusy }) else {
+              !editorSessions.values.contains(where: { $0.id != editorID && $0.isBusyExceptCoreLayerConflict }) else {
             errorMessage = L10n.text("Finish the current project operation before computing the plan.")
             return false
         }
@@ -2704,11 +3379,11 @@ final class WorkspaceStore: ObservableObject {
         switch action {
         case .terrainImport: kind = .terrain
         case .classificationImport: kind = .surface
-        case .griddedImport, .initialConditions: kind = .boundaryCondition
+        case .griddedImport, .initialConditions, .spatialImport: kind = .boundaryCondition
         case .tagCreate, .tagEdit:
             guard featureKind == "arc" || featureKind == "region", spatialLayerID == nil else { return false }
             kind = .geometry
-        case .topology, .topologyRecipe, .tagFilter:
+        case .topology, .topologyRecipe, .tagFilter, .vectorImport:
             guard featureKind == nil, spatialLayerID == nil else { return false }
             kind = .geometry
         case .arcPoints:
@@ -2717,7 +3392,7 @@ final class WorkspaceStore: ObservableObject {
         default: return false
         }
         guard asset.section == kind.section,
-              action == .griddedImport || spatialLayerID == nil,
+              action == .griddedImport || action == .spatialImport || spatialLayerID == nil,
               action == .tagCreate || action == .tagEdit || action == .arcPoints || featureKind == nil else { return false }
         editorToolPresentationRequest = EditorToolPresentationRequest(id: UUID(),
             projectSessionID: projectSessionID, assetID: asset.id, action: action,
@@ -2752,10 +3427,14 @@ final class WorkspaceStore: ObservableObject {
               let provider = layerTreeProvider as? BackendMapTreeProvider,
               let sourceType = kind.defaultSourceType,
               !isRunningProjectTool, !isSavingAll, !isOpeningProject else { return false }
+        let coreLayerContext = captureCoreLayerRequestContext()
         let projectSession = projectSessionID
         do {
-            let receipt = try await provider.createMap(projectPath: projectPath.standardizedFileURL.path, kind: sourceType)
-            guard projectSessionID == projectSession, receipt.mapType == sourceType,
+            let receipt = try await provider.createMap(projectPath: projectPath.standardizedFileURL.path,
+                kind: sourceType, coreLayerContext: coreLayerContext)
+            guard projectSessionID == projectSession, document?.url == projectPath,
+                  captureCoreLayerRequestContext() == coreLayerContext,
+                  receipt.mapType == sourceType,
                   let id = visualizationMapIDs[receipt.mapIndex], let map = mapDocument(for: id),
                   map.name == receipt.mapName else { return false }
             guard map.sourceType == sourceType || map.kind.defaultSourceType == sourceType else { return false }
@@ -2797,10 +3476,13 @@ final class WorkspaceStore: ObservableObject {
               let provider = layerTreeProvider as? BackendMapTreeProvider,
               let map = catalogMapDocuments.first(where: { $0.id == id.uuidString }),
               !isRunningProjectTool, !isSavingAll, !isOpeningProject else { return false }
+        let coreLayerContext = captureCoreLayerRequestContext()
         let projectSession = projectSessionID
         do {
-            let receipt = try await provider.renameMap(projectPath: projectPath.path, map: map, to: name)
-            return projectSessionID == projectSession && mapName(id) == receipt.mapName
+            let receipt = try await provider.renameMap(projectPath: projectPath.path, map: map,
+                to: name, coreLayerContext: coreLayerContext)
+            return projectSessionID == projectSession && document?.url == projectPath
+                && captureCoreLayerRequestContext() == coreLayerContext && mapName(id) == receipt.mapName
         } catch { if projectSessionID == projectSession { report("Maps", error) }; return false }
     }
     func mapState(for id: UUID) -> MapState {
@@ -3020,8 +3702,48 @@ final class WorkspaceStore: ObservableObject {
 
     private func refreshRasterMapSources() throws {
         guard let visualization else { rasterMapSources = []; rasterMapSourceInfoStats = [:]; return }
-        rasterMapSources = try visualization.singleBandRasterMapSources().compactMap { source in
+        let previousSources = rasterMapSources
+        let refreshedSources = try visualization.mapRasterSources().compactMap { source in
             visualizationMapIDs[source.mapIndex].map { source.assigning(mapID: $0) }
+        }.map { source in
+            guard let previous = previousSources.first(where: {
+                $0.id == source.id && $0.sourceMapID == source.sourceMapID &&
+                    $0.nodePath == source.nodePath && $0.mapLayerType == source.mapLayerType &&
+                    $0.sourcePath == source.sourcePath
+            }) else { return source }
+            return source.updating(sourceRevision: previous.sourceRevision)
+        }
+        rasterMapSources = refreshedSources.map { source in
+            guard source.gdbSourceContext != nil, source.gdbSource == nil,
+                  let mapID = source.sourceMapID,
+                  let map = mapIdentityRequest(for: mapID),
+                  map.projectPath == source.projectPath,
+                  map.mapIndex == source.mapIndex, map.mapName == source.mapName,
+                  map.mapType == source.mapType,
+                  map.expectedVisualizationRevision.caseInsensitiveCompare(source.visualizationRevision) == .orderedSame else {
+                return source
+            }
+            let treeContext = sourceMapTreeContext(mapID)
+            guard treeContext.projectSessionID == projectSessionID,
+                  treeContext.mapID == mapID,
+                  treeContext.resultSelectionError == nil else { return source }
+            let mapCapture = GdbRasterSymbologyMapCapture(
+                projectPath: map.projectPath, projectXml: map.projectXml,
+                projectXmlSHA: map.projectXmlSHA, mapID: map.mapID,
+                mapIndex: map.mapIndex, mapName: map.mapName, mapType: map.mapType,
+                expectedVisualizationRevision: map.expectedVisualizationRevision,
+                resultSelectionOverrides: treeContext.resultSelectionOverrides.map {
+                    GdbRasterMapTreeResultSelectionOverride(planAssetID: $0.planAssetID,
+                        planName: $0.planName, selectedResultPath: $0.selectedResultPath,
+                        selectedResultRevision: $0.selectedResultRevision)
+                },
+                computeReadLease: mapResultComputeReadLease.map { lease in
+                    GdbRasterComputeReadLease(projectSessionID: lease.projectSessionID,
+                        runID: lease.runID, projectPath: lease.projectPath,
+                        protectedSourcePaths: lease.protectedSourcePaths,
+                        callbackResultPath: lease.callbackResultPath)
+                })
+            return source.reusingUniqueHydratedGdbIdentity(from: previousSources, matching: mapCapture) ?? source
         }
         let validKeys = Set(rasterMapSources.compactMap { source in
             source.sourceMapID.map { $0.uuidString + "|" + source.id }
@@ -3090,17 +3812,36 @@ final class WorkspaceStore: ObservableObject {
                 guard !Task.isCancelled, self.projectSessionID == sessionID,
                       self.rasterMapLoadRevision == revision else { return }
                 do {
-                    let loaded = try await provider.loadMapLayerWithProperties(source)
+                    var loadSource = source
+                    if source.gdbSourceContext != nil {
+                        loadSource = try await self.prepareGdbRasterSourceForRead(source)
+                        guard !Task.isCancelled, self.projectSessionID == sessionID,
+                              self.rasterMapLoadRevision == revision,
+                              let sourceIndex = self.rasterMapSources.firstIndex(where: {
+                                  $0.id == source.id && $0.sourceMapID == source.sourceMapID
+                                      && $0.nodePath == source.nodePath
+                              }) else { return }
+                        self.rasterMapSources[sourceIndex] = loadSource
+                    }
+                    let loaded = try await provider.loadMapLayerWithProperties(loadSource)
                     guard !Task.isCancelled, self.projectSessionID == sessionID,
                           self.rasterMapLoadRevision == revision,
-                          self.rasterMapSources.contains(source),
-                          let mapID = source.sourceMapID,
+                          self.rasterMapSources.contains(loadSource),
+                          let mapID = loadSource.sourceMapID,
                           loaded.layer.sourceMapID == mapID else { return }
+                    if let sourceRevision = loaded.sourceRevision,
+                       let sourceIndex = self.rasterMapSources.firstIndex(where: {
+                           $0.id == loadSource.id && $0.sourceMapID == mapID &&
+                               $0.nodePath == loadSource.nodePath && $0.sourcePath == loadSource.sourcePath
+                       }) {
+                        self.rasterMapSources[sourceIndex] = self.rasterMapSources[sourceIndex]
+                            .updating(sourceRevision: sourceRevision)
+                    }
                     self.installRasterMapLayer(loaded.layer)
-                    let key = mapID.uuidString + "|" + source.id
+                    let key = mapID.uuidString + "|" + loadSource.id
                     if let metadata = loaded.rasterInfoStats,
                        SourceFilePaths.canonical(URL(fileURLWithPath: metadata.path))
-                            == SourceFilePaths.canonical(URL(fileURLWithPath: source.sourcePath)) {
+                            == SourceFilePaths.canonical(URL(fileURLWithPath: loadSource.sourcePath)) {
                         self.rasterMapSourceInfoStats[key] = metadata
                     } else { self.rasterMapSourceInfoStats.removeValue(forKey: key) }
                 } catch {
@@ -3114,10 +3855,12 @@ final class WorkspaceStore: ObservableObject {
     @discardableResult
     private func resetProjectWorkspace() -> Bool {
         guard !isRunningPlanCompute, !isRunningInitialConditionsCommit, !isRunningPlanMatrixEmit, !isRunningLibraryImport,
+              !isManagingCoreLayerReferences,
               !hasBusyModelEditors, !hasUnsavedMapEdits,
               !stableChannelDebug.hasUnsavedChanges,
               !editorSessions.values.contains(where: { $0.geometryMesh?.hasUnsavedDiagnosticsPreferences == true }) else { return false }
         guard stableChannelDebug.invalidateOwner() else { return false }
+        pendingGdbMapImport?.cancel()
         releaseProjectOpenLock()
         terrainUSGSTileOverlay.clearAll()
         cancelHistoricalResultReads()
@@ -3134,6 +3877,13 @@ final class WorkspaceStore: ObservableObject {
         chatSession.invalidate(); chatSession = ChatSession()
         layerTreeSession.invalidate()
         catalogTreeSession.invalidate()
+        calculatorLayerRegistry.removeAll(projectSessionID: projectSessionID)
+        endCoreLayerImportScope()
+        isCoreLayerReferenceManagerPresented = false
+        isManagingCoreLayerReferences = false
+        coreLayerImportPresentation = nil
+        coreLayerReferenceRegistry.reset()
+        coreLayerReferencesRevision += 1
         cancelMapLoading(); projectSessionID = UUID()
         liveResultComputeByPath = [:]; activePlanComputeCapture = nil
         rasterMapLoadTask?.cancel(); rasterMapLoadTask = nil; rasterMapLoadRevision += 1
@@ -3257,10 +4007,26 @@ final class WorkspaceStore: ObservableObject {
     }
     @discardableResult
     func connectMapSource(_ file: URL, for mapID: UUID) async -> Bool {
-        if ["tif", "tiff"].contains(file.pathExtension.lowercased()) {
+        if let gdbRoot = GdbFileGeodatabasePath.root(for: file) {
+            guard !isRunningProjectTool, !isOpeningProject, !isSavingAll, !isClosingTab,
+                  let session = GdbMapImportSession(store: self, sourceURL: gdbRoot, mapID: mapID) else { return false }
+            pendingGdbMapImport?.cancel()
+            pendingGdbMapImport = session
+            return true
+        }
+        switch file.pathExtension.lowercased() {
+        case "shp", "geojson", "json":
+            return await connectVectorSource(file, for: mapID)
+        default:
+            // Let the retained GDAL reader identify the actual raster format;
+            // VRT, ASCII grids, and other GDAL drivers are not limited to TIFF.
             return await connectRasterSource(file, for: mapID)
         }
-        return await connectVectorSource(file, for: mapID)
+    }
+
+    func retireGdbMapImport(_ session: GdbMapImportSession) {
+        guard pendingGdbMapImport === session else { return }
+        pendingGdbMapImport = nil
     }
     func connectVector(_ file: URL) { connectVector(file, for: lastActiveMapID) }
     func connectVector(_ file: URL, for mapID: UUID) {
@@ -3343,55 +4109,100 @@ final class WorkspaceStore: ObservableObject {
             return false
         }
     }
-    /// Adds the actual TIFF context to one saved map. Used by source raster
-    /// geoprocessing output and the native raster importer; pixels stay in the
-    /// selected TIFF and the project connection follows ordinary project Save.
+    /// Adds an actual source-backed GDAL raster context to one saved map.
+    /// The source manifest includes every file reported by GDAL; the legacy
+    /// TIFF SHA argument remains accepted for existing geoprocessing callers.
     @discardableResult
     func connectRasterSource(_ file: URL, for mapID: UUID,
-                             expectedSourceRevision: String? = nil) async -> Bool {
+                             expectedSourceRevision: String? = nil,
+                             mapLayerType: String? = nil,
+                             inspection: MapRasterLayerInspectResult? = nil) async -> Bool {
         guard let mapState = existingMapState(for: mapID), mapState.kind != .unsupported,
               let openedDocument = document, let openedURL = openedDocument.url,
               !isRunningPlanCompute, !isRunningProjectTool, !isOpeningProject,
               !isSavingAll, !isClosingTab else { return false }
         let project = projectSessionID
         let mapIdentity = mapWorkflowIdentity(mapID)
+        let coreLayerContext = captureCoreLayerRequestContext()
+        let capturedMapTreeContext = sourceMapTreeContext(mapID)
+        guard capturedMapTreeContext.coreLayerContext == coreLayerContext else { return false }
         do {
-            guard ["tif", "tiff"].contains(file.pathExtension.lowercased()),
-                  let provider = layerTreeProvider as? BackendMapTreeProvider,
+            guard let provider = layerTreeProvider as? BackendMapTreeProvider,
                   let projectRevision = openedDocument.sourceRevision else {
                 throw BackendServiceError(code: "unsupported", message: "This source map operation is unavailable for the selected map.")
             }
-            let sourceRevision = try await Task.detached {
-                let handle = try FileHandle(forReadingFrom: file)
-                defer { try? handle.close() }
-                var hash = SHA256()
-                while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty {
-                    try Task.checkCancellation()
-                    hash.update(data: data)
-                }
-                return hash.finalize().map { String(format: "%02X", $0) }.joined()
-            }.value
-            if let expectedSourceRevision,
-               sourceRevision.caseInsensitiveCompare(expectedSourceRevision) != .orderedSame {
+            let rasterProvider = BackendMapRasterLayerProvider(client: runtimeInfoClient)
+            let sourceInspection: MapRasterLayerInspectResult
+            if let inspection { sourceInspection = inspection }
+            else { sourceInspection = try await rasterProvider.inspect(sourcePath: file.standardizedFileURL.path) }
+            guard document === openedDocument, openedDocument.url == openedURL,
+                  projectSessionID == project, existingMapState(for: mapID) === mapState,
+                  mapWorkflowIdentity(mapID) == mapIdentity,
+                  sourceMapTreeContext(mapID) == capturedMapTreeContext,
+                  captureCoreLayerRequestContext() == coreLayerContext else { return false }
+            guard SourceFilePaths.canonical(URL(fileURLWithPath: sourceInspection.sourcePath))
+                        == SourceFilePaths.canonical(file),
+                  sourceInspection.supportedMapLayerTypes.contains(sourceInspection.mapLayerType),
+                  sourceInspection.supportedMapLayerTypes.contains(mapLayerType ?? sourceInspection.mapLayerType) else {
                 throw ProjectFileError.modifiedExternally
+            }
+            let rasterURL = URL(fileURLWithPath: sourceInspection.sourceCanonicalPath)
+            if let expectedSourceRevision,
+               sourceInspection.sourceRevision.caseInsensitiveCompare(expectedSourceRevision) != .orderedSame {
+                // Older raster-calculator output paths passed a raw TIFF SHA.
+                // Accept that exact legacy identity only for TIFF, then send
+                // the current GDAL manifest to the source-backed route.
+                guard ["tif", "tiff"].contains(file.pathExtension.lowercased()) else {
+                    throw ProjectFileError.modifiedExternally
+                }
+                let legacyRevision = try await Task.detached {
+                    let handle = try FileHandle(forReadingFrom: file)
+                    defer { try? handle.close() }
+                    var hash = SHA256()
+                    while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty {
+                        try Task.checkCancellation()
+                        hash.update(data: data)
+                    }
+                    return hash.finalize().map { String(format: "%02X", $0) }.joined()
+                }.value
+                guard legacyRevision.caseInsensitiveCompare(expectedSourceRevision) == .orderedSame else {
+                    throw ProjectFileError.modifiedExternally
+                }
+            }
+            let selectedMapLayerType = mapLayerType ?? sourceInspection.mapLayerType
+            guard sourceInspection.supportedMapLayerTypes.contains(selectedMapLayerType) else {
+                throw BackendServiceError(code: "invalidInput", message: "The selected raster layer type is not supported by this GDAL source.")
             }
             guard document === openedDocument, openedDocument.url == openedURL,
                   projectSessionID == project, existingMapState(for: mapID) === mapState,
                   mapWorkflowIdentity(mapID) == mapIdentity,
+                  sourceMapTreeContext(mapID) == capturedMapTreeContext,
+                  captureCoreLayerRequestContext() == coreLayerContext,
                   !isRunningPlanCompute, !isRunningProjectTool, !isOpeningProject,
                   !isSavingAll, !isClosingTab else { return false }
-            let stagedXML = try openedDocument.editorXML(connectingFile: file, overridingDescription: descriptionDraft)
-            let imported = try await provider.importRaster(sourcePath: file.standardizedFileURL.path,
-                revision: sourceRevision, projectXML: stagedXML, projectRevision: projectRevision,
-                context: sourceMapTreeContext(mapID), didPublish: {
-                    try openedDocument.connectFile(file)
+            let stagedXML = try openedDocument.editorXML(connectingFile: rasterURL, overridingDescription: descriptionDraft)
+            let imported = try await provider.importRaster(sourcePath: sourceInspection.sourceCanonicalPath,
+                revision: sourceInspection.sourceRevision, mapLayerType: selectedMapLayerType,
+                projectXML: stagedXML, projectRevision: projectRevision,
+                context: capturedMapTreeContext, didPublish: {
+                    guard self.document === openedDocument, openedDocument.url == openedURL,
+                          self.projectSessionID == project,
+                          self.existingMapState(for: mapID) === mapState,
+                          self.mapWorkflowIdentity(mapID) == mapIdentity,
+                          self.sourceMapTreeContext(mapID) == capturedMapTreeContext,
+                          self.captureCoreLayerRequestContext() == coreLayerContext else {
+                        throw CancellationError()
+                    }
+                    try openedDocument.connectFile(rasterURL)
                     self.isModified = true
                 })
             guard document === openedDocument, projectSessionID == project,
-                  existingMapState(for: mapID) === mapState else { return false }
+                  existingMapState(for: mapID) === mapState,
+                  captureCoreLayerRequestContext() == coreLayerContext else { return false }
             await configureMapResultSources(mapID)
             guard document === openedDocument, projectSessionID == project,
-                  existingMapState(for: mapID) === mapState else { return false }
+                  existingMapState(for: mapID) === mapState,
+                  captureCoreLayerRequestContext() == coreLayerContext else { return false }
             if mapID == MapState.projectMapID { page = .map }
             else if mapDocuments.contains(where: { $0.id == mapID }) { activeTab = .map(mapID) }
             log("Add Map Layer", L10n.format("Connected %@.", file.lastPathComponent))
@@ -3402,7 +4213,10 @@ final class WorkspaceStore: ObservableObject {
             return true
         } catch is CancellationError { return false }
         catch {
-            if document === openedDocument, projectSessionID == project { report("Add Map Layer", error) }
+            if document === openedDocument, projectSessionID == project,
+               captureCoreLayerRequestContext() == coreLayerContext {
+                report("Add Map Layer", error)
+            }
             return false
         }
     }
@@ -3460,8 +4274,8 @@ final class WorkspaceStore: ObservableObject {
         guard isCurrentMapState(state, mapID: mapID, projectSessionID: expectedSession) else { return }
         let reads = sourceMapVectorReadRequests(nodes, mapID: mapID)
         sourceMapVectorLoadStates[mapID] = .init(operationID: operationID, projectSessionID: expectedSession,
-            mapWorkflowIdentity: identity, phase: .loading, completedFiles: 0, totalFiles: reads.files.count,
-            currentSourceName: reads.files.first?.displayName, issues: reads.issues)
+            mapWorkflowIdentity: identity, phase: .loading, completedFiles: 0, totalFiles: reads.totalSources,
+            currentSourceName: reads.files.first?.displayName ?? reads.gdbLayers.first?.displayName, issues: reads.issues)
         defer {
             if let current = sourceMapVectorLoadStates[mapID], current.operationID == operationID {
                 if current.isActive {
@@ -3485,7 +4299,8 @@ final class WorkspaceStore: ObservableObject {
         state.sourceVectorPaths = paths
         do {
             let result = try await MixedMapVectorSourceReader.load(reads: reads, nodes: nodes, map: map,
-                provider: BackendMapVectorSourceProvider(client: runtimeInfoClient)) { [weak self] update in
+                provider: BackendMapVectorSourceProvider(client: runtimeInfoClient),
+                gdbProvider: BackendGdbMapSourceProvider(client: runtimeInfoClient)) { [weak self] update in
                 guard let self, self.projectSessionID == expectedSession,
                       self.mapWorkflowIdentity(mapID) == identity,
                       let current = self.sourceMapVectorLoadStates[mapID],
@@ -3499,17 +4314,30 @@ final class WorkspaceStore: ObservableObject {
                   mapIdentityRequest(for: mapID) == map,
                   mapWorkflowIdentity(mapID) == identity else { return }
             let loadedPaths = Set(result.layers.map { SourceFilePaths.canonical($0.url) })
+            let geodatabasePathSet = Set(reads.gdbLayers.map(\.canonicalPath))
             // Failed or missing sources must not keep stale cached geometry.
             // Editor draft ledgers are separate and remain available to save,
             // discard, or recover explicitly.
             var installed = mapLayers.filter {
                 let path = SourceFilePaths.canonical($0.url)
+                if $0.sourceMapID == mapID && geodatabasePathSet.contains(path) {
+                    // GDB child layers share one package URL. Replace that map's
+                    // complete exact-node set as a unit so a stale failed child
+                    // cannot remain selected beside refreshed siblings.
+                    return false
+                }
                 let belongsToMap = $0.sourceMapID == nil || $0.sourceMapID == mapID
                 return !belongsToMap || !paths.contains(path) || loadedPaths.contains(path)
             }
             for layer in result.layers {
                 let path = SourceFilePaths.canonical(layer.url)
-                if let index = installed.firstIndex(where: {
+                if URL(fileURLWithPath: path).pathExtension.caseInsensitiveCompare("gdb") == .orderedSame,
+                   let identity = layer.visualIdentity,
+                   let index = installed.firstIndex(where: { $0.visualIdentity == identity && $0.sourceMapID == layer.sourceMapID }) {
+                    installed[index] = layer
+                } else if URL(fileURLWithPath: path).pathExtension.caseInsensitiveCompare("gdb") == .orderedSame {
+                    installed.append(layer)
+                } else if let index = installed.firstIndex(where: {
                     SourceFilePaths.canonical($0.url) == path && $0.sourceMapID == layer.sourceMapID
                 }) { installed[index] = layer }
                 else { installed.append(layer) }
@@ -3520,7 +4348,7 @@ final class WorkspaceStore: ObservableObject {
             sourceMapVectorFamilyCaptures[mapID] = result.families
             if let current = sourceMapVectorLoadStates[mapID], current.operationID == operationID {
                 sourceMapVectorLoadStates[mapID] = current.replacing(phase: .completed,
-                    completedFiles: reads.files.count, currentSourceName: .some(nil), issues: result.issues)
+                    completedFiles: reads.totalSources, currentSourceName: .some(nil), issues: result.issues)
             }
             for issue in result.issues { log("Map Layer", L10n.text(issue)) }
             for layer in result.layers {
@@ -3748,6 +4576,7 @@ extension WorkspaceStore {
                       && $0.sourceIndex != nil
               }),
               let visualization else { return false }
+        let coreLayerContext = captureCoreLayerRequestContext()
         let targetState = mapState(for: mapID)
         guard !targetState.polylineEditor.isBusy,
               !targetState.polylineEditor.hasUnsavedChanges else {
@@ -3770,7 +4599,7 @@ extension WorkspaceStore {
 
         do {
             let receipt = try await provider.deleteMap(projectPath: projectURL.standardizedFileURL.path,
-                map: target)
+                map: target, coreLayerContext: coreLayerContext)
             guard projectSessionID == projectSession, document?.url == projectURL,
                   receipt.removedMapIndex == removedIndex,
                   receipt.removedMapName == target.name,
@@ -3827,6 +4656,7 @@ extension WorkspaceStore {
                 newRevision: receipt.visualizationRevision)
 
             mapResultSourceSetupCoordinator.cancel(mapID: mapID)
+            calculatorLayerRegistry.removeAll(mapID: mapID)
             targetState.resultSources.invalidate()
             targetState.resultMap.invalidate()
             targetState.projectGeometryMap.invalidate()

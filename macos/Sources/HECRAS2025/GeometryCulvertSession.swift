@@ -89,6 +89,76 @@ final class GeometryCulvertSession: ObservableObject {
     var isDirty: Bool { snapshot?.isDirty == true }
     var canBeginParentSave: Bool { !isLoading && !isEditing && !parentSaveInProgress && !hasActiveSketch }
     var geometryCulvertStateForParentSave: String? { isDirty ? snapshot?.draftState : nil }
+
+    /// A SwiftUI task key for a map's one-shot preparation request. `isLoading`
+    /// is included so the map retries after an already-running child load ends;
+    /// the task itself must not perform the load inline because changing this
+    /// key cancels the view task.
+    var mapHoverPreparationIdentity: String {
+        let modelIdentity: String
+        if let currentModel {
+            let context = [currentModel.assetPath, currentModel.kind,
+                currentModel.projectPath ?? "", currentModel.projectXml ?? "",
+                currentModel.coreLayerContext?.identityToken ?? ""].joined(separator: "\n")
+            modelIdentity = SHA256.hash(data: Data(context.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+        } else {
+            modelIdentity = "no-model"
+        }
+        return [modelIdentity, expectedSourceRevision ?? "no-revision",
+            didLoad ? "loaded" : "not-loaded", isLoading ? "loading" : "idle",
+            isEditing ? "editing" : "idle", parentSaveInProgress ? "saving" : "idle",
+            hasActiveSketch ? "sketch" : "no-sketch", isProfileContextStale ? "stale" : "current",
+            isLoadingTerrainPreview ? "terrain-loading" : "terrain-idle",
+            isLoadingMapCommandPreview ? "command-loading" : "command-idle",
+            isLoadingSmartAddPreview ? "smart-add-loading" : "smart-add-idle",
+            isFinishingSmartAdd ? "smart-add-finishing" : "smart-add-finished",
+            snapshot?.revision ?? "no-snapshot", snapshot?.draftState ?? "no-draft",
+            snapshot?.canEdit == true ? "child-editable" : "child-read-only",
+            snapshot?.isDirty == true ? "dirty" : "clean"].joined(separator: "|")
+    }
+
+    /// Map preparation may load an absent child snapshot, but must leave
+    /// in-flight edits, sketches, saves, or stale context to their owning UI.
+    func canPrepareMapHover(model: GeometryCulvertModelRequest,
+                            expectedRevision: String) -> Bool {
+        guard model.kind == "Geometry", !model.assetPath.isEmpty, !expectedRevision.isEmpty,
+              currentModel.map({ $0 == model }) ?? true,
+              currentAsset.map({ SourceFilePaths.canonical($0.url)
+                  == SourceFilePaths.canonical(URL(fileURLWithPath: model.assetPath)) }) ?? true,
+              !isDirty || expectedSourceRevision?.caseInsensitiveCompare(expectedRevision) == .orderedSame else {
+            return false
+        }
+        return (!didLoad || snapshot?.canEdit == true)
+            && !isLoading && !isEditing && !parentSaveInProgress && !hasActiveSketch
+            && !isProfileContextStale && !isLoadingTerrainPreview
+            && !isLoadingMapCommandPreview && !isLoadingSmartAddPreview && !isFinishingSmartAdd
+            && mapCommandTask == nil && smartAddPreviewTask == nil && smartAddFinishTask == nil
+    }
+
+    /// Returns the exact loaded child snapshot for a map capture without
+    /// causing a load or falling back to a saved-source approximation. Map
+    /// drawing and hover identification must observe the same owner and HDF
+    /// revision as the active Geometry editor.
+    func mapHoverSnapshot(model: GeometryCulvertModelRequest,
+                          expectedRevision: String) -> GeometryCulvertSnapshot? {
+        guard didLoad, !isLoading,
+              let asset = currentAsset, asset.section == .geometries,
+              SourceFilePaths.canonical(asset.url) == SourceFilePaths.canonical(URL(fileURLWithPath: model.assetPath)),
+              model.kind == "Geometry", currentModel == model,
+              let expectedSourceRevision, !expectedRevision.isEmpty,
+              expectedSourceRevision.caseInsensitiveCompare(expectedRevision) == .orderedSame,
+              let snapshot, snapshot.revision.caseInsensitiveCompare(expectedRevision) == .orderedSame,
+              canEdit, !isEditing, !parentSaveInProgress, !hasActiveSketch,
+              !isProfileContextStale,
+              !isLoadingTerrainPreview, !isLoadingMapCommandPreview,
+              !isLoadingSmartAddPreview, !isFinishingSmartAdd,
+              mapCommandTask == nil, smartAddPreviewTask == nil, smartAddFinishTask == nil else {
+            return nil
+        }
+        return snapshot
+    }
+
     var profileSamples: [ChartSample] {
         guard let snapshot else { return [] }
         return snapshot.profiles.flatMap { profile in
@@ -103,6 +173,10 @@ final class GeometryCulvertSession: ObservableObject {
         let projectRevision = SHA256.hash(data: Data(projectContext.utf8)).map { String(format: "%02x", $0) }.joined()
         return (currentAsset?.id ?? "") + "|" + (currentModel?.assetPath ?? "") + "|"
             + (snapshot?.revision ?? expectedSourceRevision ?? "") + "|" + projectRevision
+    }
+    var selectionDraftContextIdentity: String {
+        geometryCulvertIdentity + "|" + (snapshot?.draftState ?? "")
+            + "|" + (isProfileContextStale ? "stale" : "current")
     }
     var terrainPreviewIdentity: String {
         geometryCulvertIdentity + "|" + (snapshot?.dependencyRevision ?? "")
@@ -884,20 +958,31 @@ final class GeometryCulvertSession: ObservableObject {
     }
 
     func select(_ ids: Set<String>, featureKind: String) async {
-        guard ["barrel", "barrelProperties", "openingProperties"].contains(featureKind), !parentSaveInProgress else { return }
+        guard ["barrel", "barrelProperties", "openingProperties"].contains(featureKind),
+              !parentSaveInProgress, !isEditing else { return }
         selectedFeatureIDs[featureKind] = ids
         guard featureKind == "barrel", let model = currentModel, let asset = currentAsset,
-              let current = snapshot, !isEditing, didLoad else { return }
+              let current = snapshot, didLoad else { return }
         await fetch(model: model, expectedRevision: current.revision, asset: asset,
             draftState: current.draftState)
     }
 
     func setField(featureKind: String, fieldID: String, value: String) async {
-        guard !hasActiveSketch else { return }
-        guard ["barrel", "barrelProperties", "openingProperties"].contains(featureKind) else { return }
-        let ids = selectedFeatureIDs[featureKind, default: []].sorted()
-        guard !ids.isEmpty else { return }
-        await submit(GeometryCulvertMutation(operation: "setField", featureKind: featureKind,
+        let selectedIDs = selectedFeatureIDs[featureKind, default: []]
+        _ = await setField(featureKind: featureKind, fieldID: fieldID, value: value,
+            expectedSelectedIDs: selectedIDs, expectedContextIdentity: selectionDraftContextIdentity)
+    }
+
+    @discardableResult
+    func setField(featureKind: String, fieldID: String, value: String,
+                  expectedSelectedIDs: Set<String>, expectedContextIdentity: String) async -> Bool {
+        guard canEdit, !isLoading, !hasActiveSketch,
+              ["barrel", "barrelProperties", "openingProperties"].contains(featureKind),
+              !expectedSelectedIDs.isEmpty,
+              selectedFeatureIDs[featureKind, default: []] == expectedSelectedIDs,
+              selectionDraftContextIdentity == expectedContextIdentity else { return false }
+        let ids = expectedSelectedIDs.sorted()
+        return await submit(GeometryCulvertMutation(operation: "setField", featureKind: featureKind,
             featureIDs: ids, fieldID: fieldID, value: value))
     }
 
@@ -1218,6 +1303,10 @@ final class GeometryCulvertSession: ObservableObject {
         } catch {
             guard generation == loadGeneration, currentAsset?.id == assetID,
                   currentModel == model, !Task.isCancelled else { return false }
+            if (error as? BackendServiceError)?.code == "sourceChanged" {
+                isProfileContextStale = true
+                invalidateMapCommandPreview()
+            }
             self.error = error.localizedDescription
             return false
         }

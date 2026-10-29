@@ -179,7 +179,7 @@ public static class ShapefileIO
 		return TryReadShapefileInternal(shpFilename, out collection, (ISpatialTransformer)null, prog);
 	}
 
-	public static OperationResult TryRead(string shpFilename, out PointFeatureCollection collection, Projection destProj, ProgressReporter prog = null)
+	public static OperationResult TryRead(string shpFilename, out PointFeatureCollection collection, Projection? destProj, ProgressReporter prog = null)
 	{
 		if (destProj == null)
 		{
@@ -248,7 +248,7 @@ public static class ShapefileIO
 		return TryReadShapefileInternal(shpFilename, out collection, (ISpatialTransformer)null, prog);
 	}
 
-	public static OperationResult TryRead(string shpFilename, out PolylineCollectionFeatureCollection collection, Projection destProj, ProgressReporter prog = null)
+	public static OperationResult TryRead(string shpFilename, out PolylineCollectionFeatureCollection collection, Projection? destProj, ProgressReporter prog = null)
 	{
 		if (destProj == null)
 		{
@@ -294,7 +294,7 @@ public static class ShapefileIO
 		return TryReadShapefileInternal(shpFilename, out collection, (ISpatialTransformer)null, prog);
 	}
 
-	public static OperationResult TryRead(string shpFilename, out PolygonFeatureCollection collection, Projection destProj, ProgressReporter prog = null)
+	public static OperationResult TryRead(string shpFilename, out PolygonFeatureCollection collection, Projection? destProj, ProgressReporter prog = null)
 	{
 		if (destProj == null)
 		{
@@ -344,7 +344,7 @@ public static class ShapefileIO
 		return TryReadShapefileInternal(shpFilename, out collection, reprojectTransform, prog);
 	}
 
-	public static OperationResult TryRead(string shpFilename, out PolygonCollectionFeatureCollection collection, Projection destProj, ProgressReporter prog = null)
+	public static OperationResult TryRead(string shpFilename, out PolygonCollectionFeatureCollection collection, Projection? destProj, ProgressReporter prog = null)
 	{
 		if (destProj == null)
 		{
@@ -451,7 +451,7 @@ public static class ShapefileIO
 		}
 	}
 
-	public static OperationResult Write(string shpFilename, PointCollection points, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, PointCollection points, Table attrTable = null, Projection? projection = null)
 	{
 		if (points == null)
 		{
@@ -484,17 +484,17 @@ public static class ShapefileIO
 		return Write(shpFilename, pointBufferUnsafe, z, m, attrTable, projection);
 	}
 
-	public static OperationResult Write(string shpFilename, Span<Point> points, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, Span<Point> points, Table attrTable = null, Projection? projection = null)
 	{
 		return Write(shpFilename, points, Span<double>.Empty, Span<double>.Empty, attrTable, projection);
 	}
 
-	public static OperationResult Write(string shpFilename, List<Point> points, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, List<Point> points, Table attrTable = null, Projection? projection = null)
 	{
 		return Write(shpFilename, CollectionsMarshal.AsSpan(points), Span<double>.Empty, Span<double>.Empty, attrTable, projection);
 	}
 
-	public static OperationResult Write(string shpFilename, Span<Point> points, Span<double> z, Span<double> m, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, Span<Point> points, Span<double> z, Span<double> m, Table attrTable = null, Projection? projection = null)
 	{
 		OperationResult operationResult = new OperationResult();
 		operationResult.MergeIn(TryAssertNoDepsExist(shpFilename));
@@ -536,7 +536,7 @@ public static class ShapefileIO
 		}
 	}
 
-	public static OperationResult Write(string shpFilename, IList<PointCollection> multipoints, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, IList<PointCollection> multipoints, Table attrTable = null, Projection? projection = null)
 	{
 		if (multipoints is IReadOnlyList<PointCollection> multipoints2)
 		{
@@ -545,7 +545,7 @@ public static class ShapefileIO
 		return Write(shpFilename, (IReadOnlyList<PointCollection>)multipoints.AsReadOnly(), attrTable, projection);
 	}
 
-	public static OperationResult Write(string shpFilename, IReadOnlyList<PointCollection> multipoints, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, IReadOnlyList<PointCollection> multipoints, Table attrTable = null, Projection? projection = null)
 	{
 		if (multipoints == null)
 		{
@@ -590,7 +590,7 @@ public static class ShapefileIO
 		}
 	}
 
-	public static OperationResult Write(string shpFilename, IList<Polyline> polylines, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, IList<Polyline> polylines, Table attrTable = null, Projection? projection = null)
 	{
 		if (polylines is IReadOnlyList<Polyline> polylines2)
 		{
@@ -599,17 +599,17 @@ public static class ShapefileIO
 		return Write(shpFilename, (IReadOnlyList<Polyline>)polylines.AsReadOnly(), attrTable, projection);
 	}
 
-	public static OperationResult Write(string shpFilename, List<Polyline> polylines, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, List<Polyline> polylines, Table attrTable = null, Projection? projection = null)
 	{
 		return Write(shpFilename, (IReadOnlyList<Polyline>)polylines, attrTable, projection);
 	}
 
-	public static OperationResult Write(string shpFilename, Polyline[] polylines, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, Polyline[] polylines, Table attrTable = null, Projection? projection = null)
 	{
 		return Write(shpFilename, (IReadOnlyList<Polyline>)polylines, attrTable, projection);
 	}
 
-	public static OperationResult Write(string shpFilename, IReadOnlyList<Polyline> polylines, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, IReadOnlyList<Polyline> polylines, Table attrTable = null, Projection? projection = null)
 	{
 		if (polylines == null)
 		{
@@ -681,7 +681,7 @@ public static class ShapefileIO
 		}
 	}
 
-	public static OperationResult Write(string shpFilename, IReadOnlyList<Polygon> polygons, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, IReadOnlyList<Polygon> polygons, Table attrTable = null, Projection? projection = null)
 	{
 		if (polygons == null)
 		{
@@ -726,7 +726,7 @@ public static class ShapefileIO
 		}
 	}
 
-	public static OperationResult Write(string shpFilename, IReadOnlyList<ComplexPolygon> complexPolygons, Table attrTable = null, Projection projection = null)
+	public static OperationResult Write(string shpFilename, IReadOnlyList<ComplexPolygon> complexPolygons, Table attrTable = null, Projection? projection = null)
 	{
 		if (complexPolygons == null)
 		{
@@ -771,7 +771,7 @@ public static class ShapefileIO
 		}
 	}
 
-	public static OperationResult WriteTinAsPolygons(string shpFilename, Tin tin, TinWriteOptions options = null, Projection projection = null)
+	public static OperationResult WriteTinAsPolygons(string shpFilename, Tin tin, TinWriteOptions options = null, Projection? projection = null)
 	{
 		if (tin == null)
 		{
@@ -841,7 +841,7 @@ public static class ShapefileIO
 		}
 	}
 
-	public static OperationResult WriteSubsetTinAsPolygons(string shpFilename, Tin sourceTin, IList<int> triangleIndices, TinWriteOptions options = null, Projection projection = null)
+	public static OperationResult WriteSubsetTinAsPolygons(string shpFilename, Tin sourceTin, IList<int> triangleIndices, TinWriteOptions options = null, Projection? projection = null)
 	{
 		if (sourceTin == null)
 		{
@@ -855,7 +855,7 @@ public static class ShapefileIO
 		return WriteSubsetTinAsPolygons_Internal(shpFilename, subsetTin, triangleIndexMap, pointIndexMap, options, projection);
 	}
 
-	public static OperationResult WriteSubsetTinAsPolygons(string shpFilename, Tin sourceTin, Extent subsetExtent, TinWriteOptions options = null, Projection projection = null)
+	public static OperationResult WriteSubsetTinAsPolygons(string shpFilename, Tin sourceTin, Extent subsetExtent, TinWriteOptions options = null, Projection? projection = null)
 	{
 		if (sourceTin == null)
 		{
@@ -883,7 +883,7 @@ public static class ShapefileIO
 		}
 	}
 
-	private static OperationResult WriteSubsetTinAsPolygons_Internal(string shpFilename, Tin subsetTin, int[] triMap, int[] ptMap, TinWriteOptions options = null, Projection projection = null)
+	private static OperationResult WriteSubsetTinAsPolygons_Internal(string shpFilename, Tin subsetTin, int[] triMap, int[] ptMap, TinWriteOptions options = null, Projection? projection = null)
 	{
 		if (options == null)
 		{
@@ -1388,7 +1388,7 @@ public static class ShapefileIO
 		DebugWriteTin(directory, tinFac.Tin);
 	}
 
-	public static void Write_GDAL(string fn, string layerName, Memory<Point> points, Projection projection = null)
+	public static void Write_GDAL(string fn, string layerName, Memory<Point> points, Projection? projection = null)
 	{
 		using (Driver driver = Ogr.GetDriverByName("ESRI Shapefile"))
 		{
@@ -1412,7 +1412,7 @@ public static class ShapefileIO
 		projection?.ExportEsri(PRJFilename(fn));
 	}
 
-	public static void Write_GDAL(string fn, string layerName, Memory<Polyline> polylines, Projection projection = null)
+	public static void Write_GDAL(string fn, string layerName, Memory<Polyline> polylines, Projection? projection = null)
 	{
 		using (Driver driver = Ogr.GetDriverByName("ESRI Shapefile"))
 		{
@@ -1440,7 +1440,7 @@ public static class ShapefileIO
 		projection?.ExportEsri(PRJFilename(fn));
 	}
 
-	public static void Write_GDAL(string fn, string layerName, Memory<Polygon> polygons, Projection projection = null)
+	public static void Write_GDAL(string fn, string layerName, Memory<Polygon> polygons, Projection? projection = null)
 	{
 		using (Driver driver = Ogr.GetDriverByName("ESRI Shapefile"))
 		{

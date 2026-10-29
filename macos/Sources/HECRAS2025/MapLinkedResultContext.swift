@@ -19,11 +19,13 @@ struct MapLinkedResultCapture: Hashable, Sendable, Identifiable {
     let selectionIndex: Int
     let anchorPath: String
     let anchorRevision: String
+    let coreLayerContext: CoreLayerRequestContext?
 
     init(projectSessionID: UUID, mapID: UUID, mapWorkflowIdentity: String,
          projectPath: URL, projectXML: String, contextToken: String,
          sourceIdentity: String, resultNodeIdentity: String, selectionIndex: Int,
-         anchorPath: String, anchorRevision: String) throws {
+         anchorPath: String, anchorRevision: String,
+         coreLayerContext: CoreLayerRequestContext? = nil) throws {
         guard !mapWorkflowIdentity.isEmpty, !contextToken.isEmpty, !sourceIdentity.isEmpty,
               !resultNodeIdentity.isEmpty, selectionIndex >= 0, !anchorRevision.isEmpty else {
             throw BackendServiceError(code: "invalidInput", message: "Choose an exact saved Result map slot before linking plans.")
@@ -40,12 +42,14 @@ struct MapLinkedResultCapture: Hashable, Sendable, Identifiable {
         self.selectionIndex = selectionIndex
         self.anchorPath = Self.canonical(anchorPath)
         self.anchorRevision = anchorRevision
+        self.coreLayerContext = coreLayerContext
     }
 
     var id: String {
         let value = [projectSessionID.uuidString, mapID.uuidString, mapWorkflowIdentity,
             projectPath, projectXMLSHA, contextToken, sourceIdentity, resultNodeIdentity,
-            String(selectionIndex), anchorPath, anchorRevision].joined(separator: "\n")
+            String(selectionIndex), anchorPath, anchorRevision,
+            coreLayerContext?.identityToken ?? ""].joined(separator: "\n")
         return Self.sha256(Data(value.utf8))
     }
 
@@ -55,6 +59,7 @@ struct MapLinkedResultCapture: Hashable, Sendable, Identifiable {
                  mapWorkflowIdentity currentMapWorkflowIdentity: String,
                  projectPath currentProjectPath: URL?, projectXML currentProjectXML: String?,
                  sourceIdentity currentSourceIdentity: String,
+                 coreLayerContext currentCoreLayerContext: CoreLayerRequestContext?,
                  sources: MapResultSourcesSnapshot?) -> Bool {
         guard currentProjectSessionID == projectSessionID,
               currentMapWorkflowIdentity == mapWorkflowIdentity,
@@ -62,6 +67,7 @@ struct MapLinkedResultCapture: Hashable, Sendable, Identifiable {
               Self.canonical(currentProjectPath.standardizedFileURL.path) == Self.canonical(projectPath),
               let currentProjectXML,
               Self.sha256(Data(currentProjectXML.utf8)) == projectXMLSHA,
+              currentCoreLayerContext == coreLayerContext,
               currentSourceIdentity == sourceIdentity,
               let sources,
               sources.sources.contextToken == contextToken,
@@ -118,7 +124,7 @@ enum MapLinkedResultSelectionBuilder {
         }
         let selection = LinkedResultSelection(projectPath: context.projectPath,
             projectRevision: context.projectRevision, anchor: context.anchor,
-            selectedGroups: selected)
+            selectedGroups: selected, coreLayerContext: capture.coreLayerContext)
         guard selection.results.count == 1 + selected.reduce(0, { $0 + $1.results.count }) else {
             throw BackendServiceError(code: "protocolFailure", message: "The linked Result selection contains duplicate files.")
         }
@@ -169,6 +175,7 @@ final class MapLinkedResultContextSession: ObservableObject {
               MapLinkedResultCapture.canonical(selection.projectPath) == MapLinkedResultCapture.canonical(capture.projectPath),
               MapLinkedResultCapture.canonical(selection.anchor.resultPath) == capture.anchorPath,
               selection.anchor.revision.caseInsensitiveCompare(capture.anchorRevision) == .orderedSame,
+              selection.coreLayerContext == capture.coreLayerContext,
               !selection.selectedGroups.isEmpty, ownerIsCurrent() else {
             throw BackendServiceError(code: "sourceChanged", message: "The map Result selection changed. Reopen Link Plans.")
         }
